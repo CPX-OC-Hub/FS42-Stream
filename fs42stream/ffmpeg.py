@@ -12,9 +12,11 @@ class FFMpegHLSCommandBuilder:
     def __init__(self, ffmpeg: str = "/usr/bin/ffmpeg") -> None:
         self.ffmpeg = ffmpeg
 
-    def build(self, block: PlannedBlock, *, output_dir: Path) -> list[str]:
+    def build(self, block: PlannedBlock, *, output_dir: Path, duration_limit: float | None = None) -> list[str]:
         if not block.items:
             raise ValueError("cannot build ffmpeg command for an empty block")
+        if duration_limit is not None and duration_limit <= 0:
+            raise ValueError("duration_limit must be positive")
 
         cmd: list[str] = [self.ffmpeg, "-hide_banner", "-y"]
         for item in block.items:
@@ -47,6 +49,12 @@ class FFMpegHLSCommandBuilder:
                 "48000",
                 "-ac",
                 "2",
+            ]
+        )
+        if duration_limit is not None:
+            cmd.extend(["-t", self._num(duration_limit)])
+        cmd.extend(
+            [
                 "-f",
                 "hls",
                 "-hls_time",

@@ -21,3 +21,13 @@ Follow the FieldStation42 schedule API exactly, especially `schedule_blocks[*].p
 Avoid screen capture, `ffconcat`, per-advert FFmpeg restarts, and persistent stale HLS packagers.
 
 Current implementation direction: process one FS42 schedule block at a time, decode and normalize all plan items, use FFmpeg concat filter, then publish HLS.
+
+## Phase 2 bounded block runner
+
+Run the live Sky One schedule block for a bounded duration without installing or starting any persistent service:
+
+```bash
+python3 -m fs42stream.run_block --channel "Sky One" --duration-limit 120 --output-dir /tmp/fs42stream-hls
+```
+
+The runner fetches `http://192.168.10.252:4242/schedules/Sky%20One`, deterministically selects the current block or the next future block, validates only that selected block's `plan[*]` files with `/usr/bin/ffprobe`, preserves `plan[*]` order, resolves media under `/mnt/fs42` and `/mnt/media/SDTV`, then invokes `/usr/bin/ffmpeg` once to emit bounded HLS. It prints JSON diagnostics including selection reason, resolved plan order, generated command, and HLS inspection when available. Use `--dry-run` to fetch, select, resolve, and validate without running FFmpeg.
