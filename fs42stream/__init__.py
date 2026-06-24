@@ -4,6 +4,7 @@ __all__ = [
     "client",
     "ffmpeg",
     "ffprobe",
+    "hls_harness",
     "paths",
     "planner",
 ]
