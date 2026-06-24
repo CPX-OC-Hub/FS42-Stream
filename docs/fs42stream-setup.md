@@ -27,7 +27,14 @@ Observed on `fs42stream`:
 ```text
 /mnt/media/SDTV  exists, directory, readable
 /mnt/fs42        exists, directory, readable
-/mnt/FS42        missing
+/mnt/FS42        not required; checked only because an earlier handoff used uppercase spelling
 ```
 
-Sample schedule paths from `GET /schedules/Sky%20One` resolve correctly when joined to `/mnt/fs42`, including programme symlinks resolving into `/mnt/media/SDTV`.
+Canonical paths for implementation:
+
+```text
+FS42 catalog root: /mnt/fs42
+Media/show root:   /mnt/media/SDTV
+```
+
+Sample schedule paths from `GET /schedules/Sky%20One` resolve correctly when joined to lowercase `/mnt/fs42`, including programme symlinks resolving into `/mnt/media/SDTV`. The streamer must not depend on uppercase `/mnt/FS42`.
