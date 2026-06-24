@@ -38,3 +38,15 @@ Media/show root:   /mnt/media/SDTV
 ```
 
 Sample schedule paths from `GET /schedules/Sky%20One` resolve correctly when joined to lowercase `/mnt/fs42`, including programme symlinks resolving into `/mnt/media/SDTV`. The streamer must not depend on uppercase `/mnt/FS42`.
+
+## System FFmpeg after sudo enablement
+
+Passwordless sudo is now enabled for `hermes-admin`, so distro packages were installed:
+
+```text
+sudo apt-get install -y ffmpeg git python3-venv
+/usr/bin/ffmpeg  -> ffmpeg version 6.1.1-3ubuntu5
+/usr/bin/ffprobe -> ffprobe version 6.1.1-3ubuntu5
+```
+
+The user-local static build still exists, but implementation should prefer `/usr/bin/ffmpeg` and `/usr/bin/ffprobe` unless a specific static-build feature is required.
