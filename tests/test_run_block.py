@@ -101,6 +101,19 @@ class BlockRunnerTests(unittest.TestCase):
         self.assertEqual(diagnostics["status"], "dry-run")
         self.assertEqual(diagnostics["selection"]["reason"], "current")
 
+    def test_runner_preserves_nonzero_ffmpeg_returncode_in_diagnostics(self):
+        client = mock.Mock(fetch_schedule=mock.Mock(return_value=SCHEDULE))
+        probe = mock.Mock(validate_video=mock.Mock(return_value=ProbeResult(1, 320, 240, 25, 44100, 1)))
+        runner = BlockRunner(client=client, planner=BlockPlanner(PathResolver(), probe), builder=FFMpegHLSCommandBuilder())
+        completed = subprocess.CompletedProcess(["ffmpeg"], 42, stdout="", stderr="boom")
+
+        with mock.patch("subprocess.run", return_value=completed):
+            diagnostics = runner.run(BlockRunConfig(channel="Sky One", duration_limit=15, output_dir=Path("/tmp/out"), now=datetime(2026, 6, 17, 11, 5, 0)))
+
+        self.assertEqual(diagnostics["status"], "ffmpeg-error")
+        self.assertEqual(diagnostics["ffmpeg"]["returncode"], 42)
+        self.assertEqual(diagnostics["ffmpeg"]["stderr"], "boom")
+
     def test_runner_reports_runtime_fallback_replacement_in_json_diagnostics(self):
         schedule = {
             "network_name": "Sky One",
