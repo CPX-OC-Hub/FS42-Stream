@@ -1,5 +1,6 @@
 import json
 import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -106,15 +107,21 @@ class FFProbeTests(unittest.TestCase):
 
 class BlockPlannerTests(unittest.TestCase):
     def test_preserves_schedule_blocks_plan_entries_while_adding_resolved_path_and_probe(self):
-        resolver = PathResolver(fs42_root="/mnt/fs42", sdtv_root="/mnt/media/SDTV")
-        probe = mock.Mock()
-        probe.validate_video.return_value = ProbeResult(duration=1.0, width=320, height=240, fps=29.97, audio_sample_rate=44100, audio_channels=1)
-        blocks = BlockPlanner(resolver, probe).plan(SCHEDULE)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            fs42_root = root / "fs42"
+            sdtv_root = root / "SDTV"
+            fs42_root.mkdir()
+            sdtv_root.mkdir()
+            resolver = PathResolver(fs42_root=fs42_root, sdtv_root=sdtv_root)
+            probe = mock.Mock()
+            probe.validate_video.return_value = ProbeResult(duration=1.0, width=320, height=240, fps=29.97, audio_sample_rate=44100, audio_channels=1)
+            blocks = BlockPlanner(resolver, probe).plan(SCHEDULE)
         self.assertEqual(blocks[0].title, "South Park")
         self.assertEqual(blocks[0].items[0].source["path"], SCHEDULE["schedule_blocks"][0]["plan"][0]["path"])
         self.assertEqual(blocks[0].items[0].skip, 12.5)
         self.assertEqual(blocks[0].items[0].duration, 331.25)
-        self.assertEqual(blocks[0].items[0].resolved_path, Path("/mnt/fs42/catalog/SkyOne/late/South Park/episode.mp4"))
+        self.assertEqual(blocks[0].items[0].resolved_path, fs42_root / "catalog/SkyOne/late/South Park/episode.mp4")
         self.assertEqual(probe.validate_video.call_count, 2)
 
 
