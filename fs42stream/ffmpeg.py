@@ -26,7 +26,7 @@ class FFMpegHLSCommandBuilder:
                 cmd.extend(["-t", self._num(item.duration)])
             cmd.extend(["-i", str(item.resolved_path)])
 
-        filter_complex = self._filter_complex(len(block.items))
+        filter_complex = self._filter_complex(block)
         playlist = output_dir / f"{self._slug(block.title)}.m3u8"
         segment_pattern = output_dir / f"{self._slug(block.title)}_%05d.ts"
         cmd.extend(
@@ -69,19 +69,28 @@ class FFMpegHLSCommandBuilder:
         return cmd
 
     @staticmethod
-    def _filter_complex(n: int) -> str:
+    def _filter_complex(block: PlannedBlock) -> str:
         chains: list[str] = []
         labels: list[str] = []
-        for idx in range(n):
+        for idx, item in enumerate(block.items):
             chains.append(
                 f"[{idx}:v]scale=640:480:force_original_aspect_ratio=decrease,"
                 "pad=640:480:(ow-iw)/2:(oh-ih)/2,"
                 "fps=25,setsar=1,format=yuv420p"
                 f"[v{idx}]"
             )
-            chains.append(f"[{idx}:a]aresample=48000,aformat=channel_layouts=stereo[a{idx}]")
+            if item.probe.audio_channels > 0:
+                chains.append(f"[{idx}:a]aresample=48000,aformat=channel_layouts=stereo[a{idx}]")
+            else:
+                duration = item.duration or item.probe.duration or 1.0
+                chains.append(
+                    "anullsrc=channel_layout=stereo:sample_rate=48000,"
+                    f"atrim=duration={FFMpegHLSCommandBuilder._num(duration)},"
+                    "asetpts=PTS-STARTPTS"
+                    f"[a{idx}]"
+                )
             labels.append(f"[v{idx}][a{idx}]")
-        chains.append("".join(labels) + f"concat=n={n}:v=1:a=1[vout][aout]")
+        chains.append("".join(labels) + f"concat=n={len(block.items)}:v=1:a=1[vout][aout]")
         return ";".join(chains)
 
     @staticmethod

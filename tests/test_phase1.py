@@ -98,7 +98,19 @@ class FFProbeTests(unittest.TestCase):
         self.assertEqual(result, ProbeResult(duration=31.2, width=640, height=480, fps=25.0, audio_sample_rate=48000, audio_channels=2))
         self.assertIn("/usr/bin/ffprobe", run.call_args.args[0][0])
 
-    def test_validate_video_raises_for_missing_audio_or_video(self):
+    def test_validate_video_allows_video_only_inputs_for_silent_bumps(self):
+        payload = {
+            "streams": [
+                {"codec_type": "video", "width": 640, "height": 480, "avg_frame_rate": "25/1"},
+            ],
+            "format": {"duration": "1.000"},
+        }
+        completed = subprocess.CompletedProcess(["ffprobe"], 0, stdout=json.dumps(payload), stderr="")
+        with mock.patch("subprocess.run", return_value=completed):
+            result = FFProbe().validate_video(Path("silent-bump.mp4"))
+        self.assertEqual(result, ProbeResult(duration=1.0, width=640, height=480, fps=25.0, audio_sample_rate=0, audio_channels=0))
+
+    def test_validate_video_raises_when_video_stream_is_missing(self):
         completed = subprocess.CompletedProcess(["ffprobe"], 0, stdout=json.dumps({"streams": [], "format": {}}), stderr="")
         with mock.patch("subprocess.run", return_value=completed):
             with self.assertRaises(ValueError):
@@ -144,6 +156,16 @@ class FFMpegCommandBuilderTests(unittest.TestCase):
         self.assertIn("aformat=channel_layouts=stereo", joined)
         self.assertIn("-f hls", joined)
         self.assertEqual(cmd[-1], "/tmp/hls/South_Park.m3u8")
+
+    def test_builds_silent_audio_chain_for_video_only_inputs(self):
+        resolver = PathResolver()
+        probe = mock.Mock(validate_video=mock.Mock(return_value=ProbeResult(1, 320, 240, 25, 0, 0)))
+        block = BlockPlanner(resolver, probe).plan(SCHEDULE)[0]
+        cmd = FFMpegHLSCommandBuilder(ffmpeg="/usr/bin/ffmpeg").build(block, output_dir=Path("/tmp/hls"))
+        joined = " ".join(cmd)
+        self.assertIn("anullsrc=channel_layout=stereo:sample_rate=48000", joined)
+        self.assertIn("atrim=duration=331.25", joined)
+        self.assertNotIn("[0:a]aresample", joined)
 
 
 if __name__ == "__main__":
