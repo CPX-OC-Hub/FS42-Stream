@@ -38,6 +38,7 @@ class BlockRunConfig:
     output_dir: Path = Path("/tmp/fs42stream-hls")
     now: datetime | None = None
     dry_run: bool = False
+    output_name: str | None = None
 
 
 def select_current_or_next_block(schedule: Mapping[str, Any], *, now: datetime | None = None) -> SelectedBlock:
@@ -99,7 +100,7 @@ class BlockRunner:
         schedule = self.client.fetch_schedule(config.channel, expected_blocks=None)
         selected = select_current_or_next_block(schedule, now=config.now)
         planned = self.planner.plan_block(selected.block)
-        command = self.builder.build(planned, output_dir=config.output_dir, duration_limit=config.duration_limit)
+        command = self.builder.build(planned, output_dir=config.output_dir, duration_limit=config.duration_limit, output_name=config.output_name)
 
         diagnostics = _diagnostics(
             status="dry-run" if config.dry_run else "ok",
@@ -110,6 +111,7 @@ class BlockRunner:
             output_dir=config.output_dir,
             duration_limit=config.duration_limit,
             command=command,
+            output_name=config.output_name,
         )
         if config.dry_run:
             return diagnostics
@@ -146,6 +148,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--fallback-slate-video", type=Path, help="optional prebuilt video used instead of generated black slate for runtime/off-air image entries")
     parser.add_argument("--timeout", type=float, default=10.0, help="FS42 API timeout in seconds")
     parser.add_argument("--now", help="override current time for deterministic tests, e.g. 2026-06-17T10:05:00")
+    parser.add_argument("--output-name", help="stable HLS playlist/segment prefix, e.g. Sky_One")
     parser.add_argument("--dry-run", action="store_true", help="validate and print command without running ffmpeg")
     args = parser.parse_args(argv)
 
@@ -160,6 +163,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         output_dir=args.output_dir,
         now=_parse_datetime(args.now) if args.now else None,
         dry_run=args.dry_run,
+        output_name=args.output_name,
     )
     try:
         diagnostics = runner.run(config)
@@ -181,8 +185,10 @@ def _diagnostics(
     output_dir: Path,
     duration_limit: float,
     command: list[str],
+    output_name: str | None = None,
 ) -> dict[str, Any]:
-    playlist = output_dir / f"{FFMpegHLSCommandBuilder._slug(planned.title)}.m3u8"
+    output_slug = FFMpegHLSCommandBuilder._slug(output_name or planned.title)
+    playlist = output_dir / f"{output_slug}.m3u8"
     type_summary = plan_item_type_summary(planned.items)
     diagnostics: dict[str, Any] = {
         "status": status,

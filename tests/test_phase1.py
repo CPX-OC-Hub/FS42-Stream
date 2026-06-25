@@ -254,6 +254,17 @@ class FFMpegCommandBuilderTests(unittest.TestCase):
         self.assertIn("-f hls", joined)
         self.assertEqual(cmd[-1], "/tmp/hls/South_Park.m3u8")
 
+    def test_builds_stable_channel_playlist_when_output_name_is_provided(self):
+        resolver = PathResolver()
+        probe = mock.Mock(validate_video=mock.Mock(return_value=ProbeResult(1, 320, 240, 25, 44100, 1)))
+        block = BlockPlanner(resolver, probe).plan(SCHEDULE)[0]
+
+        cmd = FFMpegHLSCommandBuilder(ffmpeg="/usr/bin/ffmpeg").build(block, output_dir=Path("/tmp/hls"), output_name="Sky_One")
+
+        joined = " ".join(cmd)
+        self.assertIn("/tmp/hls/Sky_One_%05d.ts", joined)
+        self.assertEqual(cmd[-1], "/tmp/hls/Sky_One.m3u8")
+
     def test_builds_silent_audio_chain_for_video_only_inputs(self):
         resolver = PathResolver()
         probe = mock.Mock(validate_video=mock.Mock(return_value=ProbeResult(1, 320, 240, 25, 0, 0)))

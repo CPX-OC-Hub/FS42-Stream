@@ -12,7 +12,7 @@ class FFMpegHLSCommandBuilder:
     def __init__(self, ffmpeg: str = "/usr/bin/ffmpeg") -> None:
         self.ffmpeg = ffmpeg
 
-    def build(self, block: PlannedBlock, *, output_dir: Path, duration_limit: float | None = None) -> list[str]:
+    def build(self, block: PlannedBlock, *, output_dir: Path, duration_limit: float | None = None, output_name: str | None = None) -> list[str]:
         if not block.items:
             raise ValueError("cannot build ffmpeg command for an empty block")
         if duration_limit is not None and duration_limit <= 0:
@@ -32,8 +32,9 @@ class FFMpegHLSCommandBuilder:
             cmd.extend(["-i", item.ffmpeg_input or str(item.resolved_path)])
 
         filter_complex = self._filter_complex(block)
-        playlist = output_dir / f"{self._slug(block.title)}.m3u8"
-        segment_pattern = output_dir / f"{self._slug(block.title)}_%05d.ts"
+        output_slug = self._slug(output_name or block.title)
+        playlist = output_dir / f"{output_slug}.m3u8"
+        segment_pattern = output_dir / f"{output_slug}_%05d.ts"
         cmd.extend(
             [
                 "-filter_complex",
