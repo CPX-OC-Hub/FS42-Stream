@@ -92,6 +92,7 @@ class LiveControllerTests(unittest.TestCase):
             self.assertEqual([event["block"]["index"] for event in result["events"] if event["event"] == "block_start"], [0, 1])
             self.assertEqual([event["block"]["title"] for event in result["events"] if event["event"] == "block_start"], ["First Live Block", "Second Live Block"])
             self.assertEqual([call.output_dir for call in runner.calls], [channel_dir, channel_dir])
+            self.assertEqual([call.output_name for call in runner.calls], ["Sky_One", "Sky_One"])
             self.assertEqual([call.duration_limit for call in runner.calls], [10, 10])
             self.assertFalse(stale_segment.exists())
             self.assertFalse(stale_playlist.exists())

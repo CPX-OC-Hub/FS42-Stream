@@ -89,6 +89,7 @@ class LiveController:
                     output_dir=channel_output_dir,
                     now=block_now,
                     dry_run=config.dry_run,
+                    output_name=FFMpegHLSCommandBuilder._slug(config.channel),
                 )
             )
             diagnostics_dict = dict(diagnostics)
