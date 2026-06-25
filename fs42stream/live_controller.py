@@ -66,11 +66,12 @@ class LiveController:
         cursor = config.now
         last_index = -1
 
+        hls_start_number = 0
         for ordinal in range(config.max_blocks):
             schedule = self.schedule_client.fetch_schedule(config.channel, expected_blocks=None)
             selected = _select_not_before(schedule, now=cursor, minimum_index=last_index + 1)
             block_info = _block_info(selected)
-            cleanup = clean_hls_outputs(channel_output_dir)
+            cleanup = clean_hls_outputs(channel_output_dir) if ordinal == 0 else []
             events.append(
                 {
                     "event": "block_start",
@@ -82,6 +83,8 @@ class LiveController:
             )
 
             block_now = _parse_datetime(selected.block.get("start_time")) or cursor
+            block_hls_append = ordinal > 0
+            block_hls_start_number = 0 if block_hls_append else hls_start_number
             diagnostics = self.block_runner.run(
                 BlockRunConfig(
                     channel=config.channel,
@@ -90,9 +93,12 @@ class LiveController:
                     now=block_now,
                     dry_run=config.dry_run,
                     output_name=FFMpegHLSCommandBuilder._slug(config.channel),
+                    hls_start_number=block_hls_start_number,
+                    hls_append=block_hls_append,
                 )
             )
             diagnostics_dict = dict(diagnostics)
+            hls_start_number = int(diagnostics_dict.get("hls_next_start_number") or hls_start_number)
             events.append(_complete_event(ordinal=ordinal, block=block_info, diagnostics=diagnostics_dict))
 
             last_index = selected.index

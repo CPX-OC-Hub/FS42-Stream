@@ -16,11 +16,22 @@ class FFMpegHLSCommandBuilder:
         if self.video_encoder.endswith("_vaapi") and not self.vaapi_device:
             raise ValueError("vaapi_device is required when using a VAAPI video encoder")
 
-    def build(self, block: PlannedBlock, *, output_dir: Path, duration_limit: float | None = None, output_name: str | None = None) -> list[str]:
+    def build(
+        self,
+        block: PlannedBlock,
+        *,
+        output_dir: Path,
+        duration_limit: float | None = None,
+        output_name: str | None = None,
+        hls_start_number: int = 0,
+        hls_append: bool = False,
+    ) -> list[str]:
         if not block.items:
             raise ValueError("cannot build ffmpeg command for an empty block")
         if duration_limit is not None and duration_limit <= 0:
             raise ValueError("duration_limit must be positive")
+        if hls_start_number < 0:
+            raise ValueError("hls_start_number must be non-negative")
 
         cmd: list[str] = [self.ffmpeg, "-hide_banner", "-y"]
         if self.vaapi_device:
@@ -65,19 +76,19 @@ class FFMpegHLSCommandBuilder:
         )
         if duration_limit is not None:
             cmd.extend(["-t", self._num(duration_limit)])
-        cmd.extend(
+        hls_args = ["-f", "hls", "-hls_time", "6", "-hls_playlist_type", "event"]
+        if not hls_append or hls_start_number:
+            hls_args.extend(["-start_number", str(hls_start_number)])
+        if hls_append:
+            hls_args.extend(["-hls_flags", "append_list+discont_start"])
+        hls_args.extend(
             [
-                "-f",
-                "hls",
-                "-hls_time",
-                "6",
-                "-hls_playlist_type",
-                "event",
                 "-hls_segment_filename",
                 str(segment_pattern),
                 str(playlist),
             ]
         )
+        cmd.extend(hls_args)
         return cmd
 
     @staticmethod

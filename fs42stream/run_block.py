@@ -39,6 +39,8 @@ class BlockRunConfig:
     now: datetime | None = None
     dry_run: bool = False
     output_name: str | None = None
+    hls_start_number: int = 0
+    hls_append: bool = False
 
 
 def select_current_or_next_block(schedule: Mapping[str, Any], *, now: datetime | None = None) -> SelectedBlock:
@@ -100,7 +102,14 @@ class BlockRunner:
         schedule = self.client.fetch_schedule(config.channel, expected_blocks=None)
         selected = select_current_or_next_block(schedule, now=config.now)
         planned = self.planner.plan_block(selected.block)
-        command = self.builder.build(planned, output_dir=config.output_dir, duration_limit=config.duration_limit, output_name=config.output_name)
+        command = self.builder.build(
+            planned,
+            output_dir=config.output_dir,
+            duration_limit=config.duration_limit,
+            output_name=config.output_name,
+            hls_start_number=config.hls_start_number,
+            hls_append=config.hls_append,
+        )
 
         diagnostics = _diagnostics(
             status="dry-run" if config.dry_run else "ok",
@@ -112,6 +121,8 @@ class BlockRunner:
             duration_limit=config.duration_limit,
             command=command,
             output_name=config.output_name,
+            hls_start_number=config.hls_start_number,
+            hls_append=config.hls_append,
         )
         if config.dry_run:
             return diagnostics
@@ -132,6 +143,7 @@ class BlockRunner:
                 "segment_count": len(inspection.segments),
                 "has_endlist": inspection.has_endlist,
             }
+            diagnostics["hls_next_start_number"] = config.hls_start_number + len(inspection.segments)
         return diagnostics
 
 
@@ -188,6 +200,8 @@ def _diagnostics(
     duration_limit: float,
     command: list[str],
     output_name: str | None = None,
+    hls_start_number: int = 0,
+    hls_append: bool = False,
 ) -> dict[str, Any]:
     output_slug = FFMpegHLSCommandBuilder._slug(output_name or planned.title)
     playlist = output_dir / f"{output_slug}.m3u8"
@@ -199,6 +213,8 @@ def _diagnostics(
         "duration_limit": duration_limit,
         "output_dir": str(output_dir),
         "playlist": str(playlist),
+        "hls_start_number": hls_start_number,
+        "hls_append": hls_append,
         **type_summary,
         "selection": {
             "index": selected.index,

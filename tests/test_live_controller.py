@@ -52,6 +52,7 @@ class FakeBlockRunner:
             "status": "ok",
             "playlist": str(playlist),
             "hls": {"playlist": str(playlist), "segments": [str(segment)], "segment_count": 1, "has_endlist": True},
+            "hls_next_start_number": index + 1,
             "ffmpeg": {"returncode": index, "stdout": "", "stderr": ""},
             "plan": [
                 {"runtime_action": "generated_fallback_slate" if index == 1 else None, "diagnostic": "fallback used" if index == 1 else None}
@@ -94,6 +95,8 @@ class LiveControllerTests(unittest.TestCase):
             self.assertEqual([call.output_dir for call in runner.calls], [channel_dir, channel_dir])
             self.assertEqual([call.output_name for call in runner.calls], ["Sky_One", "Sky_One"])
             self.assertEqual([call.duration_limit for call in runner.calls], [10, 10])
+            self.assertEqual([call.hls_start_number for call in runner.calls], [0, 0])
+            self.assertEqual([call.hls_append for call in runner.calls], [False, True])
             self.assertFalse(stale_segment.exists())
             self.assertFalse(stale_playlist.exists())
             self.assertTrue(keep_file.exists())
