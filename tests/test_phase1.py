@@ -266,6 +266,30 @@ class FFMpegCommandBuilderTests(unittest.TestCase):
         for index in input_indexes:
             self.assertIn("-re", cmd[max(0, index - 4):index])
 
+    def test_builds_vaapi_h264_command_when_requested(self):
+        resolver = PathResolver()
+        probe = mock.Mock(validate_video=mock.Mock(return_value=ProbeResult(1, 320, 240, 25, 44100, 1)))
+        block = BlockPlanner(resolver, probe).plan(SCHEDULE)[0]
+
+        cmd = FFMpegHLSCommandBuilder(
+            ffmpeg="/usr/bin/ffmpeg",
+            video_encoder="h264_vaapi",
+            vaapi_device="/dev/dri/renderD128",
+        ).build(block, output_dir=Path("/tmp/hls"), output_name="Sky_One")
+
+        joined = " ".join(cmd)
+        self.assertIn("-vaapi_device", cmd)
+        self.assertIn("/dev/dri/renderD128", cmd)
+        self.assertIn("format=nv12,hwupload[vout]", joined)
+        self.assertIn("-c:v h264_vaapi", joined)
+        self.assertIn("-qp 23", joined)
+        self.assertNotIn("libx264", cmd)
+        self.assertEqual(cmd[-1], "/tmp/hls/Sky_One.m3u8")
+
+    def test_rejects_vaapi_encoder_without_device(self):
+        with self.assertRaisesRegex(ValueError, "vaapi_device"):
+            FFMpegHLSCommandBuilder(video_encoder="h264_vaapi")
+
     def test_builds_stable_channel_playlist_when_output_name_is_provided(self):
         resolver = PathResolver()
         probe = mock.Mock(validate_video=mock.Mock(return_value=ProbeResult(1, 320, 240, 25, 44100, 1)))

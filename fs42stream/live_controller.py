@@ -142,6 +142,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--sdtv-root", type=Path, default=Path(DEFAULT_SDTV_ROOT))
     parser.add_argument("--ffmpeg", default=DEFAULT_FFMPEG)
     parser.add_argument("--ffprobe", default=DEFAULT_FFPROBE)
+    parser.add_argument("--video-encoder", default="libx264", help="video encoder, e.g. libx264 or h264_vaapi")
+    parser.add_argument("--vaapi-device", help="VAAPI device path, e.g. /dev/dri/renderD128")
     parser.add_argument("--fallback-slate-video", type=Path)
     parser.add_argument("--timeout", type=float, default=10.0)
     parser.add_argument("--now", help="override current time for deterministic tests, e.g. 2026-06-17T10:05:00")
@@ -152,7 +154,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     block_runner = BlockRunner(
         client=FS42ScheduleClient(args.api_base_url, timeout=args.timeout),
         planner=BlockPlanner(PathResolver(fs42_root=args.fs42_root, sdtv_root=args.sdtv_root), FFProbe(args.ffprobe), fallback_slate_video=args.fallback_slate_video),
-        builder=FFMpegHLSCommandBuilder(args.ffmpeg),
+        builder=FFMpegHLSCommandBuilder(args.ffmpeg, video_encoder=args.video_encoder, vaapi_device=args.vaapi_device),
     )
     controller = LiveController(schedule_client=schedule_client, block_runner=block_runner)
     config = LiveControllerConfig(
