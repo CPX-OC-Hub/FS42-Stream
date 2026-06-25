@@ -143,14 +143,15 @@ class LiveControllerTests(unittest.TestCase):
                 sleeps.append(seconds)
                 current[0] = datetime(2026, 6, 17, 10, 30, 0)
 
-            controller = LiveController(schedule_client=FakeScheduleClient(), block_runner=FakeBlockRunner())
+            runner = FakeBlockRunner()
+            controller = LiveController(schedule_client=FakeScheduleClient(), block_runner=runner)
 
             result = controller.run(
                 LiveControllerConfig(
                     channel="Sky One",
                     output_root=Path(tmp),
                     max_blocks=2,
-                    duration_limit=10,
+                    duration_limit=1800,
                     clock=lambda: current[0],
                     sleep=sleep_until_boundary,
                     status_callback=updates.append,
@@ -162,6 +163,7 @@ class LiveControllerTests(unittest.TestCase):
         self.assertEqual(started, ["First Live Block", "Second Live Block"])
         self.assertLess(event_names.index("block_wait_until_boundary"), event_names.index("block_start", 3))
         self.assertEqual(sleeps, [1500.0])
+        self.assertEqual([call.duration_limit for call in runner.calls], [1500.0, 1800])
         self.assertEqual(updates[-1]["status"], "complete")
 
     def test_complete_event_exposes_plan_item_and_commercial_diagnostics(self):
