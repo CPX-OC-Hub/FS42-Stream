@@ -31,3 +31,18 @@ python3 -m fs42stream.run_block --channel "Sky One" --duration-limit 120 --outpu
 ```
 
 The runner fetches `http://192.168.10.252:4242/schedules/Sky%20One`, deterministically selects the current block or the next future block, validates only that selected block's `plan[*]` files with `/usr/bin/ffprobe`, preserves `plan[*]` order, resolves media under `/mnt/fs42` and `/mnt/media/SDTV`, then invokes `/usr/bin/ffmpeg` once to emit bounded HLS. Known runtime/off-air image slate entries such as missing `/mnt/fs42/runtime/brb.png` are explicitly replaced with a generated black slate video, or with a validated configured video when `--fallback-slate-video` is supplied; normal programme/ad media is still probed and fails loudly if missing. It prints JSON diagnostics including selection reason, resolved plan order, any runtime slate replacement, generated argv command, and HLS inspection when available. Use `--dry-run` to fetch, select, resolve, and validate without running FFmpeg.
+
+## Phase 4 foreground API/status/HLS server
+
+Run the stdlib-only foreground API server without installing a persistent service:
+
+```bash
+python3 -m fs42stream.api_server --host 127.0.0.1 --port 8088 --output-root /tmp/fs42stream-live --status-json /tmp/fs42stream-live/status.json
+```
+
+Endpoints:
+
+- `GET /api/health` returns service health JSON.
+- `GET /api/channels` returns the supported `Sky One` channel and endpoint URLs.
+- `GET /api/channels/Sky_One/status` returns the latest status JSON file when present.
+- `GET /hls/Sky_One/<playlist-or-segment>` serves `.m3u8` and `.ts` files from `/tmp/fs42stream-live/Sky_One` only; traversal and paths resolving outside the output root are rejected.

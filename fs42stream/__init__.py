@@ -5,6 +5,7 @@ __all__ = [
     "ffmpeg",
     "ffprobe",
     "hls_harness",
+    "api_server",
     "paths",
     "planner",
 ]
