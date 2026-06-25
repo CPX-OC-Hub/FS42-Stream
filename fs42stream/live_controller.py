@@ -199,6 +199,7 @@ def _emit_live_status(
     raw_plan = selected.block.get("plan")
     if isinstance(raw_plan, list):
         active_block["plan"] = [dict(item) for item in raw_plan if isinstance(item, Mapping)]
+    local_schedule_now = _schedule_now(schedule_now, config.schedule_timezone) if schedule_now is not None else None
     upcoming_blocks = _upcoming_blocks(schedule, after_index=selected.index)
     payload = {
         "status": status,
@@ -208,7 +209,7 @@ def _emit_live_status(
         "max_blocks": config.max_blocks,
         "duration_limit": config.duration_limit,
         "schedule_timezone": config.schedule_timezone,
-        "schedule_now": schedule_now.isoformat() if schedule_now is not None else None,
+        "schedule_now": local_schedule_now.isoformat() if local_schedule_now is not None else None,
         "active_block": active_block,
         "upcoming_blocks": upcoming_blocks,
         "hls": {
