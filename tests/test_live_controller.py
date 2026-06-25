@@ -102,6 +102,36 @@ class LiveControllerTests(unittest.TestCase):
             self.assertEqual(complete_events[1]["runtime_fallback_diagnostics"], ["fallback used"])
             json.dumps(result)
 
+    def test_complete_event_exposes_plan_item_and_commercial_diagnostics(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            runner = mock.Mock()
+            runner.run.return_value = {
+                "status": "dry-run",
+                "playlist": str(root / "Sky_One" / "out.m3u8"),
+                "ffmpeg": {"returncode": None, "stdout": "", "stderr": ""},
+                "plan_item_count": 4,
+                "plan_item_counts": {"feature": 1, "commercial": 2, "bump": 1},
+                "commercial_count": 2,
+                "ad_count": 2,
+                "commercial_paths": ["/mnt/fs42/catalog/commercial/ad-a.mp4", "/mnt/fs42/catalog/commercial/ad-b.mp4"],
+                "plan": [],
+            }
+            controller = LiveController(schedule_client=FakeScheduleClient(), block_runner=runner)
+
+            result = controller.run(LiveControllerConfig(channel="Sky One", output_root=root, max_blocks=1, duration_limit=10, now=datetime(2026, 6, 17, 10, 5, 0), dry_run=True))
+
+        complete = [event for event in result["events"] if event["event"] == "block_complete"][0]
+        self.assertEqual(complete["plan_item_count"], 4)
+        self.assertEqual(complete["plan_item_counts"], {"feature": 1, "commercial": 2, "bump": 1})
+        self.assertEqual(complete["commercial_count"], 2)
+        self.assertEqual(complete["ad_count"], 2)
+        self.assertEqual(complete["commercial_paths"], ["/mnt/fs42/catalog/commercial/ad-a.mp4", "/mnt/fs42/catalog/commercial/ad-b.mp4"])
+        self.assertEqual(result["plan_item_count"], 4)
+        self.assertEqual(result["plan_item_counts"], {"feature": 1, "commercial": 2, "bump": 1})
+        self.assertEqual(result["commercial_count"], 2)
+        self.assertEqual(result["commercial_paths"], ["/mnt/fs42/catalog/commercial/ad-a.mp4", "/mnt/fs42/catalog/commercial/ad-b.mp4"])
+
     def test_cli_is_bounded_and_prints_json(self):
         with tempfile.TemporaryDirectory() as tmp, \
              mock.patch("fs42stream.live_controller.FS42ScheduleClient.fetch_schedule", return_value=SCHEDULE), \

@@ -145,6 +145,44 @@ class BlockRunnerTests(unittest.TestCase):
         self.assertEqual(diagnostics["plan"][0]["diagnostic"], "known runtime/off-air image slate replaced with generated fallback video")
         self.assertIn("lavfi", diagnostics["command"])
 
+    def test_runner_dry_run_reports_commercial_counts_paths_and_preserves_inputs(self):
+        schedule = {
+            "network_name": "Sky One",
+            "schedule_blocks": [
+                {
+                    "title": "Current With Commercials",
+                    "start_time": "2026-06-17T10:00:00",
+                    "end_time": "2026-06-17T10:30:00",
+                    "plan": [
+                        {"path": "catalog/SkyOne/feature-a.mp4", "duration": 30, "is_stream": False, "type": "feature"},
+                        {"path": "catalog/SkyOne/../commercial/ad-a.mp4", "duration": 15, "is_stream": False, "type": "commercial"},
+                        {"path": "catalog/SkyOne/bump.mp4", "duration": 1, "is_stream": False, "type": "bump"},
+                        {"path": "catalog/SkyOne/../commercial/ad-b.mp4", "duration": 20, "is_stream": False, "type": "commercial"},
+                    ],
+                }
+            ],
+        }
+        client = mock.Mock(fetch_schedule=mock.Mock(return_value=schedule))
+        probe = mock.Mock(validate_video=mock.Mock(return_value=ProbeResult(1, 640, 480, 25, 48000, 2)))
+        runner = BlockRunner(
+            client=client,
+            planner=BlockPlanner(PathResolver(fs42_root="/mnt/fs42", sdtv_root="/mnt/media/SDTV"), probe),
+            builder=FFMpegHLSCommandBuilder("/usr/bin/ffmpeg"),
+        )
+
+        diagnostics = runner.run(BlockRunConfig(channel="Sky One", duration_limit=15, output_dir=Path("/tmp/out"), now=datetime(2026, 6, 17, 10, 5, 0), dry_run=True))
+
+        self.assertEqual(diagnostics["plan_item_counts"], {"feature": 1, "commercial": 2, "bump": 1})
+        self.assertEqual(diagnostics["plan_item_count"], 4)
+        self.assertEqual(diagnostics["commercial_count"], 2)
+        self.assertEqual(diagnostics["ad_count"], 2)
+        self.assertEqual(diagnostics["commercial_paths"], ["/mnt/fs42/catalog/commercial/ad-a.mp4", "/mnt/fs42/catalog/commercial/ad-b.mp4"])
+        self.assertEqual([item["type"] for item in diagnostics["plan"]], ["feature", "commercial", "bump", "commercial"])
+        self.assertEqual([item["index"] for item in diagnostics["plan"]], [0, 1, 2, 3])
+        self.assertIn("/mnt/fs42/catalog/commercial/ad-a.mp4", diagnostics["command"])
+        self.assertIn("/mnt/fs42/catalog/commercial/ad-b.mp4", diagnostics["command"])
+        self.assertNotIn("lavfi", diagnostics["command"])
+
 
 class RunBlockCLITests(unittest.TestCase):
     def test_cli_prints_json_status_and_returns_zero_on_success(self):

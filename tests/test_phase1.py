@@ -9,7 +9,7 @@ from fs42stream.client import FS42ScheduleClient
 from fs42stream.ffmpeg import FFMpegHLSCommandBuilder
 from fs42stream.ffprobe import FFProbe, ProbeResult
 from fs42stream.paths import PathResolver
-from fs42stream.planner import BlockPlanner
+from fs42stream.planner import BlockPlanner, plan_item_type_counts, plan_item_type_summary
 
 
 SCHEDULE = {
@@ -189,6 +189,50 @@ class BlockPlannerTests(unittest.TestCase):
         with self.assertRaisesRegex(FileNotFoundError, "missing programme"):
             BlockPlanner(PathResolver(), probe).plan(SCHEDULE)
 
+    def test_preserves_type_commercial_entries_and_counts_fs42_item_types(self):
+        schedule = {
+            "schedule_blocks": [
+                {
+                    "title": "Advert Fidelity",
+                    "plan": [
+                        {"path": "catalog/SkyOne/part1.mp4", "duration": 30, "is_stream": False, "type": "feature"},
+                        {"path": "catalog/SkyOne/../commercial/ad-a.mp4", "duration": 15, "is_stream": False, "type": "commercial"},
+                        {"path": "catalog/SkyOne/bump.mp4", "duration": 1, "is_stream": False, "type": "bump"},
+                        {"path": "catalog/SkyOne/../commercial/ad-b.mp4", "duration": 20, "is_stream": False, "type": "commercial"},
+                    ],
+                }
+            ]
+        }
+        probe = mock.Mock(validate_video=mock.Mock(return_value=ProbeResult(1, 640, 480, 25, 48000, 2)))
+        block = BlockPlanner(PathResolver(fs42_root="/mnt/fs42", sdtv_root="/mnt/media/SDTV"), probe).plan(schedule)[0]
+
+        self.assertEqual([item.source["type"] for item in block.items], ["feature", "commercial", "bump", "commercial"])
+        self.assertEqual([item.fs42_type for item in block.items], ["feature", "commercial", "bump", "commercial"])
+        self.assertEqual(plan_item_type_counts(block.items), {"feature": 1, "commercial": 2, "bump": 1})
+        self.assertEqual(plan_item_type_summary(block.items)["commercial_count"], 2)
+        self.assertEqual(
+            plan_item_type_summary(block.items)["commercial_paths"],
+            ["/mnt/fs42/catalog/commercial/ad-a.mp4", "/mnt/fs42/catalog/commercial/ad-b.mp4"],
+        )
+
+    def test_commercial_runtime_path_is_not_replaced_with_off_air_fallback(self):
+        schedule = {
+            "schedule_blocks": [
+                {
+                    "title": "Commercial Missing",
+                    "plan": [
+                        {"path": "runtime/brb.png", "duration": 10, "is_stream": False, "type": "commercial", "content_type": "slate", "media_type": "image"},
+                    ],
+                }
+            ]
+        }
+        probe = mock.Mock()
+        probe.validate_video.side_effect = FileNotFoundError("missing commercial")
+
+        with self.assertRaisesRegex(FileNotFoundError, "missing commercial"):
+            BlockPlanner(PathResolver(fs42_root="/mnt/fs42", sdtv_root="/mnt/media/SDTV"), probe).plan(schedule)
+        probe.validate_video.assert_called_once_with(Path("/mnt/fs42/runtime/brb.png"))
+
 
 class FFMpegCommandBuilderTests(unittest.TestCase):
     def test_builds_block_level_concat_filter_hls_command_with_normalisation(self):
@@ -240,6 +284,34 @@ class FFMpegCommandBuilderTests(unittest.TestCase):
         self.assertIn("color=black", cmd)
         self.assertNotIn("/mnt/fs42/runtime/brb.png", cmd)
         self.assertNotIn("shell=True", " ".join(cmd))
+
+    def test_includes_commercial_plan_entries_as_ffmpeg_inputs_in_order(self):
+        schedule = {
+            "schedule_blocks": [
+                {
+                    "title": "South Park With Adverts",
+                    "plan": [
+                        {"path": "catalog/SkyOne/feature-a.mp4", "duration": 30, "is_stream": False, "type": "feature"},
+                        {"path": "catalog/SkyOne/../commercial/ad-a.mp4", "duration": 15, "is_stream": False, "type": "commercial"},
+                        {"path": "catalog/SkyOne/feature-b.mp4", "duration": 30, "is_stream": False, "type": "feature"},
+                    ],
+                }
+            ]
+        }
+        probe = mock.Mock(validate_video=mock.Mock(return_value=ProbeResult(1, 320, 240, 25, 44100, 1)))
+        block = BlockPlanner(PathResolver(fs42_root="/mnt/fs42", sdtv_root="/mnt/media/SDTV"), probe).plan(schedule)[0]
+        cmd = FFMpegHLSCommandBuilder(ffmpeg="/usr/bin/ffmpeg").build(block, output_dir=Path("/tmp/hls"))
+
+        inputs = [cmd[index + 1] for index, arg in enumerate(cmd[:-1]) if arg == "-i"]
+        self.assertEqual(
+            inputs,
+            [
+                "/mnt/fs42/catalog/SkyOne/feature-a.mp4",
+                "/mnt/fs42/catalog/commercial/ad-a.mp4",
+                "/mnt/fs42/catalog/SkyOne/feature-b.mp4",
+            ],
+        )
+        self.assertIn("concat=n=3:v=1:a=1", " ".join(cmd))
 
 
 if __name__ == "__main__":

@@ -36,7 +36,7 @@ class IntegratedRunnerTests(unittest.TestCase):
                 status = json.loads((config.output_root / "status.json").read_text())
                 case.assertEqual(status["status"], "running")
                 case.assertEqual(status["api_port"], 18088)
-                return {"status": "complete", "channel": config.channel, "blocks_completed": config.max_blocks, "events": []}
+                return {"status": "complete", "channel": config.channel, "blocks_completed": config.max_blocks, "plan_item_count": 4, "plan_item_counts": {"feature": 1, "commercial": 2, "bump": 1}, "commercial_count": 2, "commercial_paths": ["/mnt/fs42/catalog/commercial/ad-a.mp4", "/mnt/fs42/catalog/commercial/ad-b.mp4"], "events": []}
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -50,6 +50,10 @@ class IntegratedRunnerTests(unittest.TestCase):
         self.assertEqual(result["status"], "complete")
         self.assertEqual(final_status["status"], "complete")
         self.assertEqual(final_status["blocks_completed"], 2)
+        self.assertEqual(final_status["plan_item_count"], 4)
+        self.assertEqual(final_status["plan_item_counts"], {"feature": 1, "commercial": 2, "bump": 1})
+        self.assertEqual(final_status["commercial_count"], 2)
+        self.assertEqual(final_status["commercial_paths"], ["/mnt/fs42/catalog/commercial/ad-a.mp4", "/mnt/fs42/catalog/commercial/ad-b.mp4"])
         self.assertEqual(events, ["served", ("controller", "Sky One", 2, 10, root), "shutdown", "closed"])
 
     def test_real_api_server_exposes_running_status_and_hls_while_controller_runs(self):

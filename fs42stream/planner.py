@@ -22,6 +22,12 @@ class PlannedItem:
     runtime_action: str | None = None
     diagnostic: str | None = None
 
+    @property
+    def fs42_type(self) -> str:
+        """Return FS42's explicit plan-item type, with legacy fallbacks."""
+
+        return fs42_item_type(self.source)
+
 
 @dataclass(frozen=True)
 class PlannedBlock:
@@ -77,7 +83,7 @@ class BlockPlanner:
             raise ValueError("plan item missing path/realpath")
         resolved = self.resolver.resolve(raw_path)
         duration = float(item.get("duration") or 0.0)
-        if self._is_known_runtime_off_air_slate(item, resolved):
+        if not _is_commercial_type(fs42_item_type(item)) and self._is_known_runtime_off_air_slate(item, resolved):
             if self.fallback_slate_video is not None:
                 return PlannedItem(
                     source=item,
@@ -121,3 +127,42 @@ class BlockPlanner:
         content_type = str(item.get("content_type") or "").lower()
         suffix = resolved.suffix.lower()
         return media_type in {"image", "slate"} or content_type in {"slate", "off-air", "off_air", "brb"} or suffix in {".png", ".jpg", ".jpeg"}
+
+
+def fs42_item_type(item: Mapping[str, Any]) -> str:
+    """Return a deterministic label for an FS42 plan item type.
+
+    Live FS42 schedules use an explicit ``type`` field (for example
+    ``commercial``). Older fixtures in this project used ``content_type``;
+    falling back keeps diagnostics useful without rewriting source entries.
+    """
+
+    for key in ("type", "content_type", "media_type"):
+        value = item.get(key)
+        if value is not None and str(value) != "":
+            return str(value).lower()
+    return "unknown"
+
+
+def plan_item_type_counts(items: Sequence[PlannedItem]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for item in items:
+        item_type = item.fs42_type
+        counts[item_type] = counts.get(item_type, 0) + 1
+    return counts
+
+
+def plan_item_type_summary(items: Sequence[PlannedItem]) -> dict[str, Any]:
+    commercial_paths = [str(item.ffmpeg_input or item.resolved_path) for item in items if _is_commercial_type(item.fs42_type)]
+    return {
+        "plan_item_count": len(items),
+        "plan_item_counts": plan_item_type_counts(items),
+        "commercial_count": len(commercial_paths),
+        "ad_count": len(commercial_paths),
+        "commercial_paths": commercial_paths,
+        "commercial_path_count": len(commercial_paths),
+    }
+
+
+def _is_commercial_type(item_type: str) -> bool:
+    return item_type.lower() in {"commercial", "advert", "ad"}
