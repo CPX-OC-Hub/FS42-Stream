@@ -14,7 +14,7 @@ from .ffmpeg import FFMpegHLSCommandBuilder
 from .ffprobe import FFProbe
 from .hls_harness import inspect_hls_output
 from .paths import PathResolver
-from .planner import BlockPlanner, PlannedBlock
+from .planner import BlockPlanner, PlannedBlock, plan_item_type_summary
 
 DEFAULT_API_BASE_URL = "http://192.168.10.252:4242"
 DEFAULT_CHANNEL = "Sky One"
@@ -183,13 +183,15 @@ def _diagnostics(
     command: list[str],
 ) -> dict[str, Any]:
     playlist = output_dir / f"{FFMpegHLSCommandBuilder._slug(planned.title)}.m3u8"
-    return {
+    type_summary = plan_item_type_summary(planned.items)
+    diagnostics: dict[str, Any] = {
         "status": status,
         "channel": channel,
         "network_name": schedule.get("network_name"),
         "duration_limit": duration_limit,
         "output_dir": str(output_dir),
         "playlist": str(playlist),
+        **type_summary,
         "selection": {
             "index": selected.index,
             "reason": selected.reason,
@@ -203,6 +205,8 @@ def _diagnostics(
                 "resolved_path": str(item.resolved_path),
                 "skip": item.skip,
                 "duration": item.duration,
+                "type": item.fs42_type,
+                "source_type": item.source.get("type"),
                 "content_type": item.source.get("content_type"),
                 "media_type": item.source.get("media_type"),
                 "input_kind": item.input_kind,
@@ -222,6 +226,7 @@ def _diagnostics(
         ],
         "command": command,
     }
+    return diagnostics
 
 
 def _parse_datetime(value: Any) -> datetime | None:

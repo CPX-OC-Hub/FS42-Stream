@@ -97,6 +97,7 @@ class LiveController:
             last_index = selected.index
             cursor = _parse_datetime(selected.block.get("end_time")) or block_now or cursor
 
+        summary = _events_plan_summary(events)
         return {
             "status": "complete",
             "channel": config.channel,
@@ -105,6 +106,7 @@ class LiveController:
             "max_blocks": config.max_blocks,
             "blocks_completed": config.max_blocks,
             "duration_limit": config.duration_limit,
+            **summary,
             "events": events,
         }
 
@@ -201,7 +203,7 @@ def _complete_event(*, ordinal: int, block: Mapping[str, Any], diagnostics: Mapp
     hls: Mapping[str, Any] = raw_hls if isinstance(raw_hls, Mapping) else {}
     playlist = hls.get("playlist") or diagnostics.get("playlist")
     segments = hls.get("segments") or []
-    return {
+    event = {
         "event": "block_complete",
         "block_number": ordinal + 1,
         "block": dict(block),
@@ -211,6 +213,10 @@ def _complete_event(*, ordinal: int, block: Mapping[str, Any], diagnostics: Mapp
         "ffmpeg_returncode": ffmpeg.get("returncode"),
         "runtime_fallback_diagnostics": _runtime_fallback_diagnostics(diagnostics),
     }
+    for key in ("plan_item_count", "plan_item_counts", "commercial_count", "ad_count", "commercial_paths", "commercial_path_count"):
+        if key in diagnostics:
+            event[key] = diagnostics[key]
+    return event
 
 
 def _runtime_fallback_diagnostics(diagnostics: Mapping[str, Any]) -> list[str]:
@@ -225,6 +231,39 @@ def _runtime_fallback_diagnostics(diagnostics: Mapping[str, Any]) -> list[str]:
             diagnostic = item.get("diagnostic") or item.get("runtime_action")
             messages.append(str(diagnostic))
     return messages
+
+
+def _events_plan_summary(events: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    counts: dict[str, int] = {}
+    total_items = 0
+    commercial_count = 0
+    commercial_paths: list[str] = []
+    for event in events:
+        if event.get("event") != "block_complete":
+            continue
+        raw_count = event.get("plan_item_count")
+        if isinstance(raw_count, int):
+            total_items += raw_count
+        raw_counts = event.get("plan_item_counts")
+        if isinstance(raw_counts, Mapping):
+            for key, value in raw_counts.items():
+                if isinstance(value, int):
+                    item_type = str(key)
+                    counts[item_type] = counts.get(item_type, 0) + value
+        raw_commercial_count = event.get("commercial_count")
+        if isinstance(raw_commercial_count, int):
+            commercial_count += raw_commercial_count
+        raw_paths = event.get("commercial_paths")
+        if isinstance(raw_paths, list):
+            commercial_paths.extend(str(path) for path in raw_paths)
+    return {
+        "plan_item_count": total_items,
+        "plan_item_counts": counts,
+        "commercial_count": commercial_count,
+        "ad_count": commercial_count,
+        "commercial_paths": commercial_paths,
+        "commercial_path_count": len(commercial_paths),
+    }
 
 
 if __name__ == "__main__":
