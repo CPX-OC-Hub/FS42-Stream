@@ -41,6 +41,16 @@ class BlockPlanner:
             raise ValueError("schedule missing schedule_blocks list")
         return [self._plan_block(block) for block in raw_blocks]
 
+    def plan_block(self, block: Mapping[str, Any]) -> PlannedBlock:
+        """Plan a single schedule block, preserving its `plan[*]` order.
+
+        The live block runner intentionally plans only the selected current/next
+        block so a 338-block FS42 schedule does not trigger hundreds of ffprobe
+        calls before starting output.
+        """
+
+        return self._plan_block(block)
+
     def _plan_block(self, block: Mapping[str, Any]) -> PlannedBlock:
         raw_plan = block.get("plan")
         if not isinstance(raw_plan, list):

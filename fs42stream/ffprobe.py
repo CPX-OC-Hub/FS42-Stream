@@ -45,16 +45,16 @@ class FFProbe:
         streams = payload.get("streams") or []
         video = next((s for s in streams if s.get("codec_type") == "video"), None)
         audio = next((s for s in streams if s.get("codec_type") == "audio"), None)
-        if not video or not audio:
-            raise ValueError(f"ffprobe did not find both video and audio streams for {path}")
+        if not video:
+            raise ValueError(f"ffprobe did not find a video stream for {path}")
         duration = float((payload.get("format") or {}).get("duration") or 0.0)
         return ProbeResult(
             duration=duration,
             width=int(video.get("width") or 0),
             height=int(video.get("height") or 0),
             fps=self._parse_fps(str(video.get("avg_frame_rate") or video.get("r_frame_rate") or "0/1")),
-            audio_sample_rate=int(audio.get("sample_rate") or 0),
-            audio_channels=int(audio.get("channels") or 0),
+            audio_sample_rate=int((audio or {}).get("sample_rate") or 0),
+            audio_channels=int((audio or {}).get("channels") or 0),
         )
 
     @staticmethod
