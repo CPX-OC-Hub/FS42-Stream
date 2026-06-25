@@ -23,13 +23,13 @@ class FFMpegHLSCommandBuilder:
             if item.input_kind == "lavfi":
                 if item.duration > 0:
                     cmd.extend(["-t", self._num(item.duration)])
-                cmd.extend(["-f", "lavfi", "-i", item.ffmpeg_input or "color=black"])
+                cmd.extend(["-re", "-f", "lavfi", "-i", item.ffmpeg_input or "color=black"])
                 continue
             if item.skip > 0:
                 cmd.extend(["-ss", self._num(item.skip)])
             if item.duration > 0:
                 cmd.extend(["-t", self._num(item.duration)])
-            cmd.extend(["-i", item.ffmpeg_input or str(item.resolved_path)])
+            cmd.extend(["-re", "-i", item.ffmpeg_input or str(item.resolved_path)])
 
         filter_complex = self._filter_complex(block)
         output_slug = self._slug(output_name or block.title)
