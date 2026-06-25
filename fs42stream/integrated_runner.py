@@ -96,6 +96,7 @@ def run_integrated(
         "api_port": actual_port,
         "api_base_url": f"http://{actual_host}:{actual_port}",
         "status_url": f"http://{actual_host}:{actual_port}/api/channels/Sky_One/status",
+        "schedule_url": f"http://{actual_host}:{actual_port}/api/channels/Sky_One/schedule",
         "hls_url": f"http://{actual_host}:{actual_port}/hls/Sky_One/",
         "max_blocks": config.max_blocks,
         "blocks_completed": 0,
@@ -106,6 +107,13 @@ def run_integrated(
 
     try:
         controller = controller_factory()
+
+        def write_live_status(update: Mapping[str, Any]) -> None:
+            live_status = dict(running_status)
+            live_status.update(dict(update))
+            live_status["updated_at"] = _utc_now()
+            _write_status(status_json, live_status)
+
         result = dict(
             controller.run(
                 LiveControllerConfig(
@@ -114,6 +122,7 @@ def run_integrated(
                     max_blocks=config.max_blocks,
                     duration_limit=config.duration_limit,
                     dry_run=config.dry_run,
+                    status_callback=write_live_status,
                 )
             )
         )

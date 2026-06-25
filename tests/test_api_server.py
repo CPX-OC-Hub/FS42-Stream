@@ -44,6 +44,7 @@ class APIServerTests(unittest.TestCase):
             self.assertEqual(payload["channels"][0]["name"], "Sky One")
             self.assertEqual(payload["channels"][0]["slug"], "Sky_One")
             self.assertEqual(payload["channels"][0]["status_url"], "/api/channels/Sky_One/status")
+            self.assertEqual(payload["channels"][0]["schedule_url"], "/api/channels/Sky_One/schedule")
             self.assertEqual(payload["channels"][0]["hls_url"], "/hls/Sky_One/")
 
     def test_channel_status_exposes_latest_status_json_when_present(self):
@@ -58,6 +59,71 @@ class APIServerTests(unittest.TestCase):
             self.assertEqual(status, 200)
             self.assertEqual(headers["content-type"], "application/json")
             self.assertEqual(json.loads(body), {"status": "complete", "channel": "Sky One", "blocks_completed": 2})
+
+    def test_channel_schedule_exposes_streamer_derived_now_and_next_blocks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            status_path = root / "status.json"
+            status_path.write_text(json.dumps({
+                "status": "running",
+                "channel": "Sky One",
+                "channel_output_dir": str(root / "Sky_One"),
+                "playlist": str(root / "Sky_One" / "Sky_One.m3u8"),
+                "events": [
+                    {
+                        "event": "block_start",
+                        "block_number": 1,
+                        "block": {"index": 10, "title": "Show A", "start_time": "2026-06-25T16:00:00", "end_time": "2026-06-25T16:30:00", "selection_reason": "current"},
+                    },
+                    {
+                        "event": "block_complete",
+                        "block_number": 1,
+                        "block": {"index": 10, "title": "Show A", "start_time": "2026-06-25T16:00:00", "end_time": "2026-06-25T16:30:00", "selection_reason": "current"},
+                        "plan_item_count": 12,
+                        "playlist": str(root / "Sky_One" / "Sky_One.m3u8"),
+                    },
+                    {
+                        "event": "block_start",
+                        "block_number": 2,
+                        "block": {"index": 11, "title": "Show B", "start_time": "2026-06-25T16:30:00", "end_time": "2026-06-25T17:00:00", "selection_reason": "next"},
+                    },
+                ],
+            }))
+            server = self._start_server(root, status_json=status_path)
+
+            status, headers, body = self._request(server, "/api/channels/Sky_One/schedule")
+
+            self.assertEqual(status, 200)
+            self.assertEqual(headers["content-type"], "application/json")
+            payload = json.loads(body)
+            self.assertEqual(payload["source"], "fs42stream-status")
+            self.assertEqual(payload["channel"], "Sky One")
+            self.assertEqual(payload["slug"], "Sky_One")
+            self.assertEqual(payload["active_block"]["title"], "Show B")
+            self.assertEqual(payload["previous_blocks"][0]["title"], "Show A")
+            self.assertEqual(payload["upcoming_blocks"], [])
+            self.assertEqual(payload["recent_events"][-1]["event"], "block_start")
+            self.assertEqual(payload["hls"]["playlist"], str(root / "Sky_One" / "Sky_One.m3u8"))
+
+    def test_channel_schedule_uses_live_top_level_schedule_fields(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            status_path = root / "status.json"
+            status_path.write_text(json.dumps({
+                "status": "running",
+                "channel": "Sky One",
+                "active_block": {"index": 20, "title": "Live Current", "start_time": "2026-06-25T18:00:00", "end_time": "2026-06-25T18:30:00"},
+                "upcoming_blocks": [{"index": 21, "title": "Live Next", "start_time": "2026-06-25T18:30:00", "end_time": "2026-06-25T19:00:00"}],
+                "events": [],
+            }))
+            server = self._start_server(root, status_json=status_path)
+
+            status, headers, body = self._request(server, "/api/channels/Sky_One/schedule")
+
+            self.assertEqual(status, 200)
+            payload = json.loads(body)
+            self.assertEqual(payload["active_block"]["title"], "Live Current")
+            self.assertEqual(payload["upcoming_blocks"][0]["title"], "Live Next")
 
     def test_channel_status_returns_json_error_when_missing_or_malformed(self):
         with tempfile.TemporaryDirectory() as tmp:
