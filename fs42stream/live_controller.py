@@ -349,6 +349,7 @@ def _complete_event(*, ordinal: int, block: Mapping[str, Any], diagnostics: Mapp
         "playlist_paths": {"playlist": playlist, "segments": segments},
         "ffmpeg_returncode": ffmpeg.get("returncode"),
         "runtime_fallback_diagnostics": _runtime_fallback_diagnostics(diagnostics),
+        "catch_up": diagnostics.get("catch_up"),
     }
     for key in ("plan_item_count", "plan_item_counts", "commercial_count", "ad_count", "commercial_paths", "commercial_path_count"):
         if key in diagnostics:

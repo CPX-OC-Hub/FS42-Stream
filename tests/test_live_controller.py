@@ -181,6 +181,7 @@ class LiveControllerTests(unittest.TestCase):
                 "commercial_count": 2,
                 "ad_count": 2,
                 "commercial_paths": ["/mnt/fs42/catalog/commercial/ad-a.mp4", "/mnt/fs42/catalog/commercial/ad-b.mp4"],
+                "catch_up": {"applied": True, "start_plan_index": 2, "media_seek": 510.0},
                 "plan": [],
             }
             controller = LiveController(schedule_client=FakeScheduleClient(), block_runner=runner)
@@ -193,6 +194,7 @@ class LiveControllerTests(unittest.TestCase):
         self.assertEqual(complete["commercial_count"], 2)
         self.assertEqual(complete["ad_count"], 2)
         self.assertEqual(complete["commercial_paths"], ["/mnt/fs42/catalog/commercial/ad-a.mp4", "/mnt/fs42/catalog/commercial/ad-b.mp4"])
+        self.assertEqual(complete["catch_up"], {"applied": True, "start_plan_index": 2, "media_seek": 510.0})
         self.assertEqual(result["plan_item_count"], 4)
         self.assertEqual(result["plan_item_counts"], {"feature": 1, "commercial": 2, "bump": 1})
         self.assertEqual(result["commercial_count"], 2)

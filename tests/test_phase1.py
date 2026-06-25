@@ -11,7 +11,7 @@ from fs42stream.ffmpeg import FFMpegHLSCommandBuilder
 from fs42stream.ffprobe import FFProbe, ProbeResult
 from fs42stream.paths import PathResolver
 from fs42stream.planner import BlockPlanner, plan_item_type_counts, plan_item_type_summary
-from fs42stream.run_block import select_current_or_next_block
+from fs42stream.run_block import BlockRunConfig, BlockRunner, select_current_or_next_block
 
 
 SCHEDULE = {
@@ -251,6 +251,83 @@ class BlockPlannerTests(unittest.TestCase):
         with self.assertRaisesRegex(FileNotFoundError, "missing commercial"):
             BlockPlanner(PathResolver(fs42_root="/mnt/fs42", sdtv_root="/mnt/media/SDTV"), probe).plan(schedule)
         probe.validate_video.assert_called_once_with(Path("/mnt/fs42/runtime/brb.png"))
+
+
+class CatchUpBlockRunnerTests(unittest.TestCase):
+    def _runner_for(self, schedule):
+        class FakeClient:
+            def fetch_schedule(self, channel, expected_blocks=None):
+                return schedule
+
+        class CapturingBuilder:
+            def __init__(self):
+                self.block = None
+                self.kwargs = None
+
+            def build(self, block, **kwargs):
+                self.block = block
+                self.kwargs = kwargs
+                return ["/usr/bin/ffmpeg", "-version"]
+
+        probe = mock.Mock(validate_video=mock.Mock(return_value=ProbeResult(1000, 640, 480, 25, 48000, 2)))
+        planner = BlockPlanner(PathResolver(fs42_root="/mnt/fs42", sdtv_root="/mnt/media/SDTV"), probe)
+        builder = CapturingBuilder()
+        return BlockRunner(client=FakeClient(), planner=planner, builder=builder), builder
+
+    def test_starting_mid_resumed_feature_seeks_to_plan_skip_plus_wallclock_offset(self):
+        schedule = {
+            "network_name": "Sky One",
+            "schedule_blocks": [
+                {
+                    "title": "Show With Breaks",
+                    "start_time": "2026-06-25T22:00:00",
+                    "end_time": "2026-06-25T23:00:00",
+                    "plan": [
+                        {"path": "catalog/SkyOne/show.mp4", "duration": 500, "skip": 0, "is_stream": False, "content_type": "feature"},
+                        {"path": "catalog/SkyOne/../commercial/ad.mp4", "duration": 30, "skip": 0, "is_stream": False, "content_type": "commercial"},
+                        {"path": "catalog/SkyOne/show.mp4", "duration": 500, "skip": 500, "is_stream": False, "content_type": "feature"},
+                    ],
+                }
+            ],
+        }
+        runner, builder = self._runner_for(schedule)
+
+        diagnostics = runner.run(BlockRunConfig(now=datetime(2026, 6, 25, 22, 9, 0), dry_run=True))
+
+        self.assertEqual(diagnostics["catch_up"]["applied"], True)
+        self.assertEqual(diagnostics["catch_up"]["start_plan_index"], 2)
+        self.assertEqual(builder.block.items[0].source["content_type"], "feature")
+        self.assertEqual(builder.block.items[0].skip, 510.0)
+        self.assertEqual(builder.block.items[0].duration, 490.0)
+        self.assertEqual(diagnostics["plan"][0]["skip"], 510.0)
+        self.assertEqual(diagnostics["plan"][0]["duration"], 490.0)
+
+    def test_starting_inside_commercial_keeps_commercial_as_first_remaining_item(self):
+        schedule = {
+            "network_name": "Sky One",
+            "schedule_blocks": [
+                {
+                    "title": "Show With Ad",
+                    "start_time": "2026-06-25T22:00:00",
+                    "end_time": "2026-06-25T22:30:00",
+                    "plan": [
+                        {"path": "catalog/SkyOne/show.mp4", "duration": 500, "skip": 0, "is_stream": False, "content_type": "feature"},
+                        {"path": "catalog/SkyOne/../commercial/ad.mp4", "duration": 30, "skip": 0, "is_stream": False, "content_type": "commercial"},
+                        {"path": "catalog/SkyOne/show.mp4", "duration": 500, "skip": 500, "is_stream": False, "content_type": "feature"},
+                    ],
+                }
+            ],
+        }
+        runner, builder = self._runner_for(schedule)
+
+        diagnostics = runner.run(BlockRunConfig(now=datetime(2026, 6, 25, 22, 8, 45), dry_run=True))
+
+        self.assertEqual(diagnostics["catch_up"]["start_plan_index"], 1)
+        self.assertEqual(builder.block.items[0].source["content_type"], "commercial")
+        self.assertEqual(builder.block.items[0].skip, 25.0)
+        self.assertEqual(builder.block.items[0].duration, 5.0)
+        self.assertEqual(builder.block.items[1].source["content_type"], "feature")
+        self.assertEqual(builder.block.items[1].skip, 500.0)
 
 
 class FFMpegCommandBuilderTests(unittest.TestCase):
