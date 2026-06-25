@@ -3,8 +3,9 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol, Sequence
 
@@ -25,8 +26,13 @@ from .run_block import (
     BlockRunner,
     SelectedBlock,
     _parse_datetime,
+    _schedule_now,
     select_current_or_next_block,
 )
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
 
 
 @dataclass(frozen=True)
@@ -39,6 +45,8 @@ class LiveControllerConfig:
     dry_run: bool = False
     status_callback: Callable[[Mapping[str, Any]], None] | None = None
     schedule_timezone: str | None = DEFAULT_SCHEDULE_TIMEZONE
+    clock: Callable[[], datetime] = _utc_now
+    sleep: Callable[[float], None] = time.sleep
 
 
 class ScheduleClient(Protocol):
@@ -67,12 +75,14 @@ class LiveController:
 
         events: list[dict[str, Any]] = []
         cursor = config.now
+        simulated_cursor = config.now is not None
         last_index = -1
 
         hls_start_number = 0
         for ordinal in range(config.max_blocks):
             schedule = self.schedule_client.fetch_schedule(config.channel, expected_blocks=None)
-            selected = _select_not_before(schedule, now=cursor, minimum_index=last_index + 1, schedule_timezone=config.schedule_timezone)
+            selection_now = cursor if simulated_cursor else config.clock()
+            selected = _select_not_before(schedule, now=selection_now, minimum_index=last_index + 1, schedule_timezone=config.schedule_timezone) if simulated_cursor else select_current_or_next_block(schedule, now=selection_now, schedule_timezone=config.schedule_timezone)
             block_info = _block_info(selected)
             cleanup = clean_hls_outputs(channel_output_dir) if ordinal == 0 else []
             events.append(
@@ -122,7 +132,30 @@ class LiveController:
             )
 
             last_index = selected.index
-            cursor = _parse_datetime(selected.block.get("end_time")) or block_now or cursor
+            block_end = _parse_datetime(selected.block.get("end_time"))
+            if not simulated_cursor and block_end is not None and ordinal < config.max_blocks - 1:
+                schedule_now = _schedule_now(config.clock(), config.schedule_timezone)
+                wait_seconds = max(0.0, (block_end - schedule_now).total_seconds())
+                if wait_seconds > 0:
+                    events.append(
+                        {
+                            "event": "block_wait_until_boundary",
+                            "block_number": ordinal + 1,
+                            "block": block_info,
+                            "wait_seconds": wait_seconds,
+                            "until": block_end.isoformat(),
+                        }
+                    )
+                    _emit_live_status(
+                        config,
+                        status="running",
+                        channel_output_dir=channel_output_dir,
+                        events=events,
+                        schedule=schedule,
+                        selected=selected,
+                    )
+                    config.sleep(wait_seconds)
+            cursor = block_end or block_now or cursor
 
         summary = _events_plan_summary(events)
         result = {

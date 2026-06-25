@@ -132,6 +132,38 @@ class LiveControllerTests(unittest.TestCase):
         self.assertEqual(updates[-1]["status"], "complete")
         self.assertEqual(result["status"], "complete")
 
+
+    def test_does_not_start_future_block_when_current_block_finishes_before_wallclock_boundary(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            sleeps = []
+            updates = []
+            current = [datetime(2026, 6, 17, 10, 5, 0)]
+
+            def sleep_until_boundary(seconds):
+                sleeps.append(seconds)
+                current[0] = datetime(2026, 6, 17, 10, 30, 0)
+
+            controller = LiveController(schedule_client=FakeScheduleClient(), block_runner=FakeBlockRunner())
+
+            result = controller.run(
+                LiveControllerConfig(
+                    channel="Sky One",
+                    output_root=Path(tmp),
+                    max_blocks=2,
+                    duration_limit=10,
+                    clock=lambda: current[0],
+                    sleep=sleep_until_boundary,
+                    status_callback=updates.append,
+                )
+            )
+
+        event_names = [event["event"] for event in result["events"]]
+        started = [event["block"]["title"] for event in result["events"] if event["event"] == "block_start"]
+        self.assertEqual(started, ["First Live Block", "Second Live Block"])
+        self.assertLess(event_names.index("block_wait_until_boundary"), event_names.index("block_start", 3))
+        self.assertEqual(sleeps, [1500.0])
+        self.assertEqual(updates[-1]["status"], "complete")
+
     def test_complete_event_exposes_plan_item_and_commercial_diagnostics(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
