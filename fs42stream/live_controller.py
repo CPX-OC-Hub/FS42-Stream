@@ -160,6 +160,11 @@ def _emit_live_status(
         "duration_limit": config.duration_limit,
         "active_block": active_block,
         "upcoming_blocks": upcoming_blocks,
+        "hls": {
+            "playlist": str(channel_output_dir / f"{FFMpegHLSCommandBuilder._slug(config.channel)}.m3u8"),
+            "channel_output_dir": str(channel_output_dir),
+            "output_root": str(config.output_root),
+        },
         "events": [dict(event) for event in events],
     }
     config.status_callback(payload)
