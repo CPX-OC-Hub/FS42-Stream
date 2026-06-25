@@ -10,8 +10,13 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol, Sequence, cast
 
 from .api_server import DEFAULT_HOST, DEFAULT_OUTPUT_ROOT, DEFAULT_PORT, create_server
+from .client import FS42ScheduleClient
+from .ffmpeg import FFMpegHLSCommandBuilder
+from .ffprobe import FFProbe
 from .live_controller import LiveController, LiveControllerConfig
-from .run_block import DEFAULT_CHANNEL
+from .paths import PathResolver
+from .planner import BlockPlanner
+from .run_block import DEFAULT_API_BASE_URL, DEFAULT_CHANNEL, DEFAULT_FFMPEG, DEFAULT_FFPROBE, DEFAULT_FS42_ROOT, DEFAULT_SDTV_ROOT, BlockRunner
 
 
 @dataclass(frozen=True)
@@ -23,6 +28,13 @@ class IntegratedRunnerConfig:
     max_blocks: int = 2
     duration_limit: float = 10.0
     dry_run: bool = False
+    api_base_url: str = DEFAULT_API_BASE_URL
+    fs42_root: Path = Path(DEFAULT_FS42_ROOT)
+    sdtv_root: Path = Path(DEFAULT_SDTV_ROOT)
+    ffmpeg: str = DEFAULT_FFMPEG
+    ffprobe: str = DEFAULT_FFPROBE
+    video_encoder: str = "libx264"
+    vaapi_device: str | None = None
 
 
 class IntegratedServer(Protocol):
@@ -135,6 +147,13 @@ def main(
     parser.add_argument("--output-root", type=Path, default=DEFAULT_OUTPUT_ROOT)
     parser.add_argument("--max-blocks", type=int, default=2)
     parser.add_argument("--duration-limit", type=float, default=10.0)
+    parser.add_argument("--api-base-url", default=DEFAULT_API_BASE_URL)
+    parser.add_argument("--fs42-root", type=Path, default=Path(DEFAULT_FS42_ROOT))
+    parser.add_argument("--sdtv-root", type=Path, default=Path(DEFAULT_SDTV_ROOT))
+    parser.add_argument("--ffmpeg", default=DEFAULT_FFMPEG)
+    parser.add_argument("--ffprobe", default=DEFAULT_FFPROBE)
+    parser.add_argument("--video-encoder", default="libx264", help="video encoder, e.g. libx264 or h264_vaapi")
+    parser.add_argument("--vaapi-device", help="VAAPI device path, e.g. /dev/dri/renderD128")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv)
 
@@ -146,14 +165,41 @@ def main(
         max_blocks=args.max_blocks,
         duration_limit=args.duration_limit,
         dry_run=args.dry_run,
+        api_base_url=args.api_base_url,
+        fs42_root=args.fs42_root,
+        sdtv_root=args.sdtv_root,
+        ffmpeg=args.ffmpeg,
+        ffprobe=args.ffprobe,
+        video_encoder=args.video_encoder,
+        vaapi_device=args.vaapi_device,
     )
+    effective_controller_factory = controller_factory
+    if controller_factory is LiveController:
+        effective_controller_factory = lambda: _create_controller(config)
     try:
-        result = run_integrated(config, server_factory=server_factory, controller_factory=controller_factory)
+        result = run_integrated(config, server_factory=server_factory, controller_factory=effective_controller_factory)
     except Exception as exc:
         print(json.dumps({"status": "error", "error_type": type(exc).__name__, "message": str(exc)}, indent=2, sort_keys=True), file=sys.stderr)
         return 1
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0
+
+
+def _create_controller(config: IntegratedRunnerConfig) -> LiveController:
+    schedule_client = FS42ScheduleClient(config.api_base_url)
+    block_runner = BlockRunner(
+        client=FS42ScheduleClient(config.api_base_url),
+        planner=BlockPlanner(
+            PathResolver(fs42_root=config.fs42_root, sdtv_root=config.sdtv_root),
+            FFProbe(config.ffprobe),
+        ),
+        builder=FFMpegHLSCommandBuilder(
+            config.ffmpeg,
+            video_encoder=config.video_encoder,
+            vaapi_device=config.vaapi_device,
+        ),
+    )
+    return LiveController(schedule_client=schedule_client, block_runner=block_runner)
 
 
 def _write_status(path: Path, payload: Mapping[str, Any]) -> None:

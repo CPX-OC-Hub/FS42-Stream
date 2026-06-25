@@ -9,8 +9,12 @@ from .planner import PlannedBlock
 class FFMpegHLSCommandBuilder:
     """Build a one-shot block-level normalized concat-filter HLS command."""
 
-    def __init__(self, ffmpeg: str = "/usr/bin/ffmpeg") -> None:
+    def __init__(self, ffmpeg: str = "/usr/bin/ffmpeg", *, video_encoder: str = "libx264", vaapi_device: str | None = None) -> None:
         self.ffmpeg = ffmpeg
+        self.video_encoder = video_encoder
+        self.vaapi_device = vaapi_device
+        if self.video_encoder.endswith("_vaapi") and not self.vaapi_device:
+            raise ValueError("vaapi_device is required when using a VAAPI video encoder")
 
     def build(self, block: PlannedBlock, *, output_dir: Path, duration_limit: float | None = None, output_name: str | None = None) -> list[str]:
         if not block.items:
@@ -19,6 +23,8 @@ class FFMpegHLSCommandBuilder:
             raise ValueError("duration_limit must be positive")
 
         cmd: list[str] = [self.ffmpeg, "-hide_banner", "-y"]
+        if self.vaapi_device:
+            cmd.extend(["-vaapi_device", self.vaapi_device])
         for item in block.items:
             if item.input_kind == "lavfi":
                 if item.duration > 0:
@@ -31,10 +37,15 @@ class FFMpegHLSCommandBuilder:
                 cmd.extend(["-t", self._num(item.duration)])
             cmd.extend(["-re", "-i", item.ffmpeg_input or str(item.resolved_path)])
 
-        filter_complex = self._filter_complex(block)
+        filter_complex = self._filter_complex(block, upload_to_vaapi=self.video_encoder.endswith("_vaapi"))
         output_slug = self._slug(output_name or block.title)
         playlist = output_dir / f"{output_slug}.m3u8"
         segment_pattern = output_dir / f"{output_slug}_%05d.ts"
+        video_args = ["-c:v", self.video_encoder]
+        if self.video_encoder.endswith("_vaapi"):
+            video_args.extend(["-qp", "23"])
+        else:
+            video_args.extend(["-preset", "veryfast", "-crf", "23"])
         cmd.extend(
             [
                 "-filter_complex",
@@ -43,12 +54,7 @@ class FFMpegHLSCommandBuilder:
                 "[vout]",
                 "-map",
                 "[aout]",
-                "-c:v",
-                "libx264",
-                "-preset",
-                "veryfast",
-                "-crf",
-                "23",
+                *video_args,
                 "-c:a",
                 "aac",
                 "-ar",
@@ -75,7 +81,7 @@ class FFMpegHLSCommandBuilder:
         return cmd
 
     @staticmethod
-    def _filter_complex(block: PlannedBlock) -> str:
+    def _filter_complex(block: PlannedBlock, *, upload_to_vaapi: bool = False) -> str:
         chains: list[str] = []
         labels: list[str] = []
         for idx, item in enumerate(block.items):
@@ -96,7 +102,10 @@ class FFMpegHLSCommandBuilder:
                     f"[a{idx}]"
                 )
             labels.append(f"[v{idx}][a{idx}]")
-        chains.append("".join(labels) + f"concat=n={len(block.items)}:v=1:a=1[vout][aout]")
+        concat_video = "vcat" if upload_to_vaapi else "vout"
+        chains.append("".join(labels) + f"concat=n={len(block.items)}:v=1:a=1[{concat_video}][aout]")
+        if upload_to_vaapi:
+            chains.append("[vcat]format=nv12,hwupload[vout]")
         return ";".join(chains)
 
     @staticmethod
