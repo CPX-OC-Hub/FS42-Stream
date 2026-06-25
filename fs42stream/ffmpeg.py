@@ -20,11 +20,16 @@ class FFMpegHLSCommandBuilder:
 
         cmd: list[str] = [self.ffmpeg, "-hide_banner", "-y"]
         for item in block.items:
+            if item.input_kind == "lavfi":
+                if item.duration > 0:
+                    cmd.extend(["-t", self._num(item.duration)])
+                cmd.extend(["-f", "lavfi", "-i", item.ffmpeg_input or "color=black"])
+                continue
             if item.skip > 0:
                 cmd.extend(["-ss", self._num(item.skip)])
             if item.duration > 0:
                 cmd.extend(["-t", self._num(item.duration)])
-            cmd.extend(["-i", str(item.resolved_path)])
+            cmd.extend(["-i", item.ffmpeg_input or str(item.resolved_path)])
 
         filter_complex = self._filter_complex(block)
         playlist = output_dir / f"{self._slug(block.title)}.m3u8"

@@ -142,6 +142,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--sdtv-root", type=Path, default=Path(DEFAULT_SDTV_ROOT))
     parser.add_argument("--ffmpeg", default=DEFAULT_FFMPEG)
     parser.add_argument("--ffprobe", default=DEFAULT_FFPROBE)
+    parser.add_argument("--fallback-slate-video", type=Path, help="optional prebuilt video used instead of generated black slate for runtime/off-air image entries")
     parser.add_argument("--timeout", type=float, default=10.0, help="FS42 API timeout in seconds")
     parser.add_argument("--now", help="override current time for deterministic tests, e.g. 2026-06-17T10:05:00")
     parser.add_argument("--dry-run", action="store_true", help="validate and print command without running ffmpeg")
@@ -149,7 +150,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     runner = BlockRunner(
         client=FS42ScheduleClient(args.api_base_url, timeout=args.timeout),
-        planner=BlockPlanner(PathResolver(fs42_root=args.fs42_root, sdtv_root=args.sdtv_root), FFProbe(args.ffprobe)),
+        planner=BlockPlanner(PathResolver(fs42_root=args.fs42_root, sdtv_root=args.sdtv_root), FFProbe(args.ffprobe), fallback_slate_video=args.fallback_slate_video),
         builder=FFMpegHLSCommandBuilder(args.ffmpeg),
     )
     config = BlockRunConfig(
@@ -203,6 +204,10 @@ def _diagnostics(
                 "duration": item.duration,
                 "content_type": item.source.get("content_type"),
                 "media_type": item.source.get("media_type"),
+                "input_kind": item.input_kind,
+                "ffmpeg_input": item.ffmpeg_input,
+                "runtime_action": item.runtime_action,
+                "diagnostic": item.diagnostic,
                 "probe": {
                     "duration": item.probe.duration,
                     "width": item.probe.width,
