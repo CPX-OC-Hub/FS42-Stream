@@ -4,6 +4,7 @@ import argparse
 import json
 import mimetypes
 import posixpath
+from datetime import datetime, timedelta
 from dataclasses import dataclass
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -279,14 +280,20 @@ def _derived_schedule_payload(status_payload: Mapping[str, Any], *, channel_slug
     raw_upcoming_blocks = status_payload.get("upcoming_blocks")
     if isinstance(raw_upcoming_blocks, list):
         upcoming_blocks = [dict(block) for block in raw_upcoming_blocks if isinstance(block, Mapping)]
+    timeline = _derive_plan_timeline(active_block) if isinstance(active_block, Mapping) else []
+    schedule_now = status_payload.get("schedule_now") or status_payload.get("updated_at")
+    current_plan_item = _current_plan_item(timeline, schedule_now)
     return {
         "source": "fs42stream-status",
         "channel": status_payload.get("channel") or DEFAULT_CHANNEL_NAME,
         "slug": channel_slug,
         "status": status_payload.get("status"),
+        "schedule_now": schedule_now,
         "active_block": active_block,
         "previous_blocks": previous_blocks,
         "upcoming_blocks": upcoming_blocks,
+        "timeline": timeline,
+        "current_plan_item": current_plan_item,
         "recent_events": block_events[-10:],
         "hls": {
             "playlist": playlist,
@@ -294,6 +301,80 @@ def _derived_schedule_payload(status_payload: Mapping[str, Any], *, channel_slug
             "output_root": status_payload.get("output_root"),
         },
     }
+
+
+def _derive_plan_timeline(active_block: Mapping[str, Any]) -> list[dict[str, Any]]:
+    raw_start = _parse_iso_datetime(active_block.get("start_time"))
+    plan = active_block.get("plan")
+    if raw_start is None or not isinstance(plan, list):
+        return []
+    cursor = raw_start
+    timeline: list[dict[str, Any]] = []
+    for index, item in enumerate(plan):
+        if not isinstance(item, Mapping):
+            continue
+        duration = _float_or_zero(item.get("duration"))
+        wallclock_start = cursor
+        wallclock_end = wallclock_start + timedelta(seconds=duration)
+        skip = _float_or_zero(item.get("skip"))
+        timeline.append(
+            {
+                "index": index,
+                "content_type": item.get("content_type"),
+                "media_type": item.get("media_type"),
+                "path": item.get("path"),
+                "duration": duration,
+                "skip": skip,
+                "is_stream": item.get("is_stream"),
+                "wallclock_start": _format_datetime(wallclock_start),
+                "wallclock_end": _format_datetime(wallclock_end),
+                "media_seek_start": skip,
+                "media_seek_end": skip + duration,
+            }
+        )
+        cursor = wallclock_end
+    return timeline
+
+
+def _current_plan_item(timeline: Sequence[Mapping[str, Any]], schedule_now: Any) -> dict[str, Any] | None:
+    now = _parse_iso_datetime(schedule_now)
+    if now is None:
+        return None
+    for item in timeline:
+        start = _parse_iso_datetime(item.get("wallclock_start"))
+        end = _parse_iso_datetime(item.get("wallclock_end"))
+        if start is None or end is None:
+            continue
+        if start <= now < end:
+            current = dict(item)
+            offset = (now - start).total_seconds()
+            current["current_offset_in_item"] = offset
+            current["media_seek"] = _float_or_zero(item.get("media_seek_start")) + offset
+            return current
+    return None
+
+
+def _parse_iso_datetime(value: Any) -> datetime | None:
+    if value is None or value == "":
+        return None
+    text = str(value)
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        return datetime.fromisoformat(text)
+    except ValueError:
+        return None
+
+
+def _format_datetime(value: datetime) -> str:
+    return value.isoformat()
+
+
+def _float_or_zero(value: Any) -> float:
+    try:
+        return float(value or 0)
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def _last_block_start_event(block_events: list[dict[str, Any]]) -> dict[str, Any] | None:

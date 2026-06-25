@@ -125,6 +125,51 @@ class APIServerTests(unittest.TestCase):
             self.assertEqual(payload["active_block"]["title"], "Live Current")
             self.assertEqual(payload["upcoming_blocks"][0]["title"], "Live Next")
 
+    def test_channel_schedule_exposes_derived_plan_timeline_and_current_item(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            status_path = root / "status.json"
+            status_path.write_text(json.dumps({
+                "status": "running",
+                "channel": "Sky One",
+                "schedule_now": "2026-06-25T22:09:05",
+                "active_block": {
+                    "index": 365,
+                    "title": "Star Trek The Next Generation",
+                    "start_time": "2026-06-25T22:00:00",
+                    "end_time": "2026-06-25T23:00:00",
+                    "plan": [
+                        {"content_type": "bump", "media_type": "video", "path": "ident.mp4", "duration": 10.0, "skip": 0, "is_stream": False},
+                        {"content_type": "feature", "media_type": "video", "path": "episode.avi", "duration": 500.0, "skip": 0, "is_stream": False},
+                        {"content_type": "bump", "media_type": "video", "path": "black.mp4", "duration": 1.0, "skip": 0, "is_stream": False},
+                        {"content_type": "commercial", "media_type": "video", "path": "ad-a.mp4", "duration": 30.0, "skip": 0, "is_stream": False},
+                        {"content_type": "feature", "media_type": "video", "path": "episode.avi", "duration": 500.0, "skip": 500.0, "is_stream": False},
+                    ],
+                },
+                "events": [],
+            }))
+            server = self._start_server(root, status_json=status_path)
+
+            status, headers, body = self._request(server, "/api/channels/Sky_One/schedule")
+
+            self.assertEqual(status, 200)
+            payload = json.loads(body)
+            self.assertEqual(payload["schedule_now"], "2026-06-25T22:09:05")
+            self.assertEqual(len(payload["timeline"]), 5)
+            self.assertEqual(payload["timeline"][0]["wallclock_start"], "2026-06-25T22:00:00")
+            self.assertEqual(payload["timeline"][0]["wallclock_end"], "2026-06-25T22:00:10")
+            self.assertEqual(payload["timeline"][3]["content_type"], "commercial")
+            self.assertEqual(payload["timeline"][3]["wallclock_start"], "2026-06-25T22:08:31")
+            self.assertEqual(payload["timeline"][3]["wallclock_end"], "2026-06-25T22:09:01")
+            current = payload["current_plan_item"]
+            self.assertEqual(current["index"], 4)
+            self.assertEqual(current["content_type"], "feature")
+            self.assertEqual(current["path"], "episode.avi")
+            self.assertEqual(current["current_offset_in_item"], 4.0)
+            self.assertEqual(current["media_seek"], 504.0)
+            self.assertEqual(current["wallclock_start"], "2026-06-25T22:09:01")
+            self.assertEqual(payload["timeline"][4]["media_seek_start"], 500.0)
+
     def test_channel_status_returns_json_error_when_missing_or_malformed(self):
         with tempfile.TemporaryDirectory() as tmp:
             server = self._start_server(Path(tmp), status_json=Path(tmp) / "missing.json")
