@@ -19,6 +19,7 @@ class ServiceConfig:
     duration_limit: float = 1800.0
     video_encoder: str = "h264_vaapi"
     vaapi_device: str = "/dev/dri/renderD128"
+    schedule_timezone: str = "Europe/London"
 
 
 def render_environment_file(config: ServiceConfig) -> str:
@@ -31,6 +32,7 @@ def render_environment_file(config: ServiceConfig) -> str:
         "FS42STREAM_DURATION_LIMIT": _num(config.duration_limit),
         "FS42STREAM_VIDEO_ENCODER": config.video_encoder,
         "FS42STREAM_VAAPI_DEVICE": config.vaapi_device,
+        "FS42STREAM_SCHEDULE_TIMEZONE": config.schedule_timezone,
     }
     lines = ["# Managed by FS42-Stream installer", "# Edit values here, then run: sudo systemctl restart fs42stream", ""]
     lines.extend(f'{key}="{_escape_env(value)}"' for key, value in values.items())
@@ -49,7 +51,7 @@ Type=simple
 User={config.user}
 WorkingDirectory={config.install_dir}
 EnvironmentFile={config.env_file}
-ExecStart={python} -m fs42stream.integrated_runner --channel "${{FS42STREAM_CHANNEL}}" --host ${{FS42STREAM_HOST}} --port ${{FS42STREAM_PORT}} --output-root ${{FS42STREAM_OUTPUT_ROOT}} --max-blocks ${{FS42STREAM_MAX_BLOCKS}} --duration-limit ${{FS42STREAM_DURATION_LIMIT}} --video-encoder ${{FS42STREAM_VIDEO_ENCODER}} --vaapi-device ${{FS42STREAM_VAAPI_DEVICE}}
+ExecStart={python} -m fs42stream.integrated_runner --channel "${{FS42STREAM_CHANNEL}}" --host ${{FS42STREAM_HOST}} --port ${{FS42STREAM_PORT}} --output-root ${{FS42STREAM_OUTPUT_ROOT}} --max-blocks ${{FS42STREAM_MAX_BLOCKS}} --duration-limit ${{FS42STREAM_DURATION_LIMIT}} --video-encoder ${{FS42STREAM_VIDEO_ENCODER}} --vaapi-device ${{FS42STREAM_VAAPI_DEVICE}} --schedule-timezone ${{FS42STREAM_SCHEDULE_TIMEZONE}}
 Restart=on-failure
 RestartSec=5
 KillSignal=SIGTERM

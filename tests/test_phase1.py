@@ -2,6 +2,7 @@ import json
 import subprocess
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
 
@@ -10,6 +11,7 @@ from fs42stream.ffmpeg import FFMpegHLSCommandBuilder
 from fs42stream.ffprobe import FFProbe, ProbeResult
 from fs42stream.paths import PathResolver
 from fs42stream.planner import BlockPlanner, plan_item_type_counts, plan_item_type_summary
+from fs42stream.run_block import select_current_or_next_block
 
 
 SCHEDULE = {
@@ -61,6 +63,23 @@ class FS42ScheduleClientTests(unittest.TestCase):
         client = FS42ScheduleClient("http://fs42.example:4242", opener=opener)
         with self.assertRaisesRegex(ValueError, "expected 338 schedule blocks"):
             client.fetch_schedule("Sky One", expected_blocks=338)
+
+
+class ScheduleSelectionTests(unittest.TestCase):
+    def test_selects_naive_fs42_schedule_using_configured_local_timezone(self):
+        schedule = {
+            "schedule_blocks": [
+                {"title": "Jeopardy", "start_time": "2026-06-25T18:30:00", "end_time": "2026-06-25T19:00:00"},
+                {"title": "The Nanny", "start_time": "2026-06-25T19:00:00", "end_time": "2026-06-25T19:30:00"},
+                {"title": "Married", "start_time": "2026-06-25T19:30:00", "end_time": "2026-06-25T20:00:00"},
+            ]
+        }
+        now_utc = datetime(2026, 6, 25, 18, 43, tzinfo=timezone.utc)
+
+        selected = select_current_or_next_block(schedule, now=now_utc, schedule_timezone="Europe/London")
+
+        self.assertEqual(selected.index, 2)
+        self.assertEqual(selected.block["title"], "Married")
 
 
 class PathResolverTests(unittest.TestCase):

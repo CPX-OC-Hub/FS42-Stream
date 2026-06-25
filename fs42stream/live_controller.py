@@ -19,6 +19,7 @@ from .run_block import (
     DEFAULT_FFMPEG,
     DEFAULT_FFPROBE,
     DEFAULT_FS42_ROOT,
+    DEFAULT_SCHEDULE_TIMEZONE,
     DEFAULT_SDTV_ROOT,
     BlockRunConfig,
     BlockRunner,
@@ -37,6 +38,7 @@ class LiveControllerConfig:
     now: datetime | None = None
     dry_run: bool = False
     status_callback: Callable[[Mapping[str, Any]], None] | None = None
+    schedule_timezone: str | None = DEFAULT_SCHEDULE_TIMEZONE
 
 
 class ScheduleClient(Protocol):
@@ -70,7 +72,7 @@ class LiveController:
         hls_start_number = 0
         for ordinal in range(config.max_blocks):
             schedule = self.schedule_client.fetch_schedule(config.channel, expected_blocks=None)
-            selected = _select_not_before(schedule, now=cursor, minimum_index=last_index + 1)
+            selected = _select_not_before(schedule, now=cursor, minimum_index=last_index + 1, schedule_timezone=config.schedule_timezone)
             block_info = _block_info(selected)
             cleanup = clean_hls_outputs(channel_output_dir) if ordinal == 0 else []
             events.append(
@@ -104,6 +106,7 @@ class LiveController:
                     output_name=FFMpegHLSCommandBuilder._slug(config.channel),
                     hls_start_number=block_hls_start_number,
                     hls_append=block_hls_append,
+                    schedule_timezone=config.schedule_timezone,
                 )
             )
             diagnostics_dict = dict(diagnostics)
@@ -158,6 +161,7 @@ def _emit_live_status(
         "output_root": str(config.output_root),
         "max_blocks": config.max_blocks,
         "duration_limit": config.duration_limit,
+        "schedule_timezone": config.schedule_timezone,
         "active_block": active_block,
         "upcoming_blocks": upcoming_blocks,
         "hls": {
@@ -224,6 +228,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--ffprobe", default=DEFAULT_FFPROBE)
     parser.add_argument("--video-encoder", default="libx264", help="video encoder, e.g. libx264 or h264_vaapi")
     parser.add_argument("--vaapi-device", help="VAAPI device path, e.g. /dev/dri/renderD128")
+    parser.add_argument("--schedule-timezone", default=DEFAULT_SCHEDULE_TIMEZONE, help="timezone for naive FS42 schedule timestamps, e.g. Europe/London")
     parser.add_argument("--fallback-slate-video", type=Path)
     parser.add_argument("--timeout", type=float, default=10.0)
     parser.add_argument("--now", help="override current time for deterministic tests, e.g. 2026-06-17T10:05:00")
@@ -244,6 +249,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         duration_limit=args.duration_limit,
         now=_parse_datetime(args.now) if args.now else None,
         dry_run=args.dry_run,
+        schedule_timezone=args.schedule_timezone,
     )
     try:
         result = controller.run(config)
@@ -254,8 +260,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     return 0
 
 
-def _select_not_before(schedule: Mapping[str, Any], *, now: datetime | None, minimum_index: int) -> SelectedBlock:
-    selected = select_current_or_next_block(schedule, now=now)
+def _select_not_before(schedule: Mapping[str, Any], *, now: datetime | None, minimum_index: int, schedule_timezone: str | None = DEFAULT_SCHEDULE_TIMEZONE) -> SelectedBlock:
+    selected = select_current_or_next_block(schedule, now=now, schedule_timezone=schedule_timezone)
     if selected.index >= minimum_index:
         return selected
     blocks = schedule.get("schedule_blocks")
