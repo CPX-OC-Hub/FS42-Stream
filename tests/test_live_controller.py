@@ -106,6 +106,31 @@ class LiveControllerTests(unittest.TestCase):
             self.assertEqual(complete_events[1]["runtime_fallback_diagnostics"], ["fallback used"])
             json.dumps(result)
 
+    def test_emits_live_status_updates_with_current_and_next_block(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            updates = []
+            controller = LiveController(schedule_client=FakeScheduleClient(), block_runner=FakeBlockRunner())
+
+            result = controller.run(
+                LiveControllerConfig(
+                    channel="Sky One",
+                    output_root=Path(tmp),
+                    max_blocks=1,
+                    duration_limit=10,
+                    now=datetime(2026, 6, 17, 10, 5, 0),
+                    status_callback=updates.append,
+                )
+            )
+
+        self.assertGreaterEqual(len(updates), 2)
+        first = updates[0]
+        self.assertEqual(first["status"], "running")
+        self.assertEqual(first["active_block"]["title"], "First Live Block")
+        self.assertEqual(first["upcoming_blocks"][0]["title"], "Second Live Block")
+        self.assertEqual(first["events"][-1]["event"], "block_start")
+        self.assertEqual(updates[-1]["status"], "complete")
+        self.assertEqual(result["status"], "complete")
+
     def test_complete_event_exposes_plan_item_and_commercial_diagnostics(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

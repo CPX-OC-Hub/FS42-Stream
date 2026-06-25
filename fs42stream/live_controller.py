@@ -6,7 +6,7 @@ import sys
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Mapping, Protocol, Sequence
+from typing import Any, Callable, Mapping, Protocol, Sequence
 
 from .client import FS42ScheduleClient
 from .ffmpeg import FFMpegHLSCommandBuilder
@@ -36,6 +36,7 @@ class LiveControllerConfig:
     duration_limit: float = 10.0
     now: datetime | None = None
     dry_run: bool = False
+    status_callback: Callable[[Mapping[str, Any]], None] | None = None
 
 
 class ScheduleClient(Protocol):
@@ -81,6 +82,14 @@ class LiveController:
                     "cleaned_stale_outputs": [str(path) for path in cleanup],
                 }
             )
+            _emit_live_status(
+                config,
+                status="running",
+                channel_output_dir=channel_output_dir,
+                events=events,
+                schedule=schedule,
+                selected=selected,
+            )
 
             block_now = _parse_datetime(selected.block.get("start_time")) or cursor
             block_hls_append = ordinal > 0
@@ -100,12 +109,20 @@ class LiveController:
             diagnostics_dict = dict(diagnostics)
             hls_start_number = int(diagnostics_dict.get("hls_next_start_number") or hls_start_number)
             events.append(_complete_event(ordinal=ordinal, block=block_info, diagnostics=diagnostics_dict))
+            _emit_live_status(
+                config,
+                status="running",
+                channel_output_dir=channel_output_dir,
+                events=events,
+                schedule=schedule,
+                selected=selected,
+            )
 
             last_index = selected.index
             cursor = _parse_datetime(selected.block.get("end_time")) or block_now or cursor
 
         summary = _events_plan_summary(events)
-        return {
+        result = {
             "status": "complete",
             "channel": config.channel,
             "channel_output_dir": str(channel_output_dir),
@@ -116,6 +133,58 @@ class LiveController:
             **summary,
             "events": events,
         }
+        if config.status_callback is not None:
+            config.status_callback(result)
+        return result
+
+
+def _emit_live_status(
+    config: LiveControllerConfig,
+    *,
+    status: str,
+    channel_output_dir: Path,
+    events: Sequence[Mapping[str, Any]],
+    schedule: Mapping[str, Any],
+    selected: SelectedBlock,
+) -> None:
+    if config.status_callback is None:
+        return
+    active_block = _block_info(selected)
+    upcoming_blocks = _upcoming_blocks(schedule, after_index=selected.index)
+    payload = {
+        "status": status,
+        "channel": config.channel,
+        "channel_output_dir": str(channel_output_dir),
+        "output_root": str(config.output_root),
+        "max_blocks": config.max_blocks,
+        "duration_limit": config.duration_limit,
+        "active_block": active_block,
+        "upcoming_blocks": upcoming_blocks,
+        "events": [dict(event) for event in events],
+    }
+    config.status_callback(payload)
+
+
+def _upcoming_blocks(schedule: Mapping[str, Any], *, after_index: int, limit: int = 5) -> list[dict[str, Any]]:
+    blocks = schedule.get("schedule_blocks")
+    if not isinstance(blocks, list):
+        return []
+    upcoming: list[dict[str, Any]] = []
+    for index, block in enumerate(blocks):
+        if index <= after_index or not isinstance(block, Mapping):
+            continue
+        upcoming.append(
+            {
+                "index": index,
+                "selection_reason": "upcoming",
+                "title": str(block.get("title") or "untitled"),
+                "start_time": block.get("start_time"),
+                "end_time": block.get("end_time"),
+            }
+        )
+        if len(upcoming) >= limit:
+            break
+    return upcoming
 
 
 def clean_hls_outputs(directory: Path) -> list[Path]:

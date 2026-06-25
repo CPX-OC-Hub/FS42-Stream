@@ -66,6 +66,7 @@ class FS42APIRequestHandler(BaseHTTPRequestHandler):
                             "name": DEFAULT_CHANNEL_NAME,
                             "slug": DEFAULT_CHANNEL_SLUG,
                             "status_url": f"/api/channels/{DEFAULT_CHANNEL_SLUG}/status",
+                            "schedule_url": f"/api/channels/{DEFAULT_CHANNEL_SLUG}/schedule",
                             "hls_url": f"/hls/{DEFAULT_CHANNEL_SLUG}/",
                         }
                     ]
@@ -75,6 +76,10 @@ class FS42APIRequestHandler(BaseHTTPRequestHandler):
 
         if request_path.startswith("/api/channels/") and request_path.endswith("/status"):
             self._handle_channel_status(request_path)
+            return
+
+        if request_path.startswith("/api/channels/") and request_path.endswith("/schedule"):
+            self._handle_channel_schedule(request_path)
             return
 
         if request_path.startswith("/hls/"):
@@ -99,28 +104,51 @@ class FS42APIRequestHandler(BaseHTTPRequestHandler):
         return
 
     def _handle_channel_status(self, request_path: str) -> None:
-        parts = request_path.strip("/").split("/")
-        if len(parts) != 4 or parts[:2] != ["api", "channels"] or parts[3] != "status":
-            self._send_error(HTTPStatus.NOT_FOUND, "not_found", f"no route for {request_path}")
+        channel_slug = self._validated_channel_slug(request_path, expected_leaf="status")
+        if channel_slug is None:
             return
+        payload = self._read_status_payload()
+        if payload is None:
+            return
+        self._send_json(HTTPStatus.OK, payload)
+
+    def _handle_channel_schedule(self, request_path: str) -> None:
+        channel_slug = self._validated_channel_slug(request_path, expected_leaf="schedule")
+        if channel_slug is None:
+            return
+        status_payload = self._read_status_payload()
+        if status_payload is None:
+            return
+        self._send_json(HTTPStatus.OK, _derived_schedule_payload(status_payload, channel_slug=channel_slug))
+
+    def _validated_channel_slug(self, request_path: str, *, expected_leaf: str) -> str | None:
+        parts = request_path.strip("/").split("/")
+        if len(parts) != 4 or parts[:2] != ["api", "channels"] or parts[3] != expected_leaf:
+            self._send_error(HTTPStatus.NOT_FOUND, "not_found", f"no route for {request_path}")
+            return None
         channel_slug = unquote(parts[2])
         if channel_slug != DEFAULT_CHANNEL_SLUG:
             self._send_error(HTTPStatus.NOT_FOUND, "channel_not_found", f"unknown channel: {channel_slug}")
-            return
+            return None
+        return channel_slug
 
+    def _read_status_payload(self) -> Mapping[str, Any] | None:
         status_path = self._api_server().status_json
         if not status_path.is_file():
             self._send_error(HTTPStatus.NOT_FOUND, "status_not_found", f"status JSON does not exist: {status_path}")
-            return
+            return None
         try:
             payload = json.loads(status_path.read_text(encoding="utf-8"))
         except json.JSONDecodeError as exc:
             self._send_error(HTTPStatus.BAD_GATEWAY, "invalid_status_json", f"status JSON is invalid: {exc.msg}")
-            return
+            return None
         except OSError as exc:
             self._send_error(HTTPStatus.BAD_GATEWAY, "status_unreadable", str(exc))
-            return
-        self._send_json(HTTPStatus.OK, payload)
+            return None
+        if not isinstance(payload, Mapping):
+            self._send_error(HTTPStatus.BAD_GATEWAY, "invalid_status_json", "status JSON must be an object")
+            return None
+        return payload
 
     def _handle_hls(self, request_path: str) -> None:
         prefix = f"/hls/{DEFAULT_CHANNEL_SLUG}/"
@@ -195,6 +223,97 @@ def _safe_hls_relative_path(raw_relative: str) -> Path | None:
     if normalized != decoded:
         return None
     return Path(*pure.parts)
+
+
+def _derived_schedule_payload(status_payload: Mapping[str, Any], *, channel_slug: str) -> dict[str, Any]:
+    events = status_payload.get("events")
+    event_list = [event for event in events if isinstance(event, Mapping)] if isinstance(events, list) else []
+    block_events: list[dict[str, Any]] = []
+    for event in event_list:
+        block = event.get("block")
+        if not isinstance(block, Mapping):
+            continue
+        block_events.append({
+            "event": event.get("event"),
+            "block_number": event.get("block_number"),
+            "block": dict(block),
+            "plan_item_count": event.get("plan_item_count"),
+            "playlist": event.get("playlist"),
+        })
+
+    active_event = _last_block_start_event(block_events) or (block_events[-1] if block_events else None)
+    active_index = _block_identity(active_event.get("block")) if active_event else None
+    previous_blocks: list[dict[str, Any]] = []
+    upcoming_blocks: list[dict[str, Any]] = []
+    seen_previous: set[tuple[Any, Any]] = set()
+    seen_upcoming: set[tuple[Any, Any]] = set()
+    for item in block_events:
+        block = item.get("block")
+        if not isinstance(block, Mapping):
+            continue
+        identity = _block_identity(block)
+        normalized = dict(block)
+        if active_index is not None and identity == active_index:
+            continue
+        if active_event is not None and item is active_event:
+            continue
+        if active_index is not None and _block_sort_key(identity) < _block_sort_key(active_index):
+            if identity not in seen_previous:
+                previous_blocks.append(normalized)
+                seen_previous.add(identity)
+        elif identity not in seen_upcoming:
+            upcoming_blocks.append(normalized)
+            seen_upcoming.add(identity)
+
+    playlist = status_payload.get("playlist")
+    if not playlist:
+        raw_hls = status_payload.get("hls")
+        if isinstance(raw_hls, Mapping):
+            playlist = raw_hls.get("playlist")
+
+    raw_active_block = status_payload.get("active_block")
+    if isinstance(raw_active_block, Mapping):
+        active_block = dict(raw_active_block)
+    else:
+        active_block = dict(active_event.get("block")) if active_event and isinstance(active_event.get("block"), Mapping) else None
+    raw_upcoming_blocks = status_payload.get("upcoming_blocks")
+    if isinstance(raw_upcoming_blocks, list):
+        upcoming_blocks = [dict(block) for block in raw_upcoming_blocks if isinstance(block, Mapping)]
+    return {
+        "source": "fs42stream-status",
+        "channel": status_payload.get("channel") or DEFAULT_CHANNEL_NAME,
+        "slug": channel_slug,
+        "status": status_payload.get("status"),
+        "active_block": active_block,
+        "previous_blocks": previous_blocks,
+        "upcoming_blocks": upcoming_blocks,
+        "recent_events": block_events[-10:],
+        "hls": {
+            "playlist": playlist,
+            "channel_output_dir": status_payload.get("channel_output_dir"),
+            "output_root": status_payload.get("output_root"),
+        },
+    }
+
+
+def _last_block_start_event(block_events: list[dict[str, Any]]) -> dict[str, Any] | None:
+    for event in reversed(block_events):
+        if event.get("event") == "block_start":
+            return event
+    return None
+
+
+def _block_identity(block: Any) -> tuple[Any, Any]:
+    if isinstance(block, Mapping):
+        return block.get("index"), block.get("start_time")
+    return None, None
+
+
+def _block_sort_key(identity: tuple[Any, Any]) -> tuple[int, str]:
+    index, start_time = identity
+    if isinstance(index, int):
+        return index, str(start_time or "")
+    return 10**9, str(start_time or "")
 
 
 def _hls_content_type(path: Path) -> str:
