@@ -103,15 +103,23 @@ class LiveController:
                 selected=selected,
             )
 
-            block_now = _parse_datetime(selected.block.get("start_time")) or cursor
+            block_start = _parse_datetime(selected.block.get("start_time"))
+            block_end = _parse_datetime(selected.block.get("end_time"))
+            run_now = selection_now if not simulated_cursor else (block_start or cursor)
+            effective_duration_limit = config.duration_limit
+            if not simulated_cursor and block_end is not None:
+                schedule_now = _schedule_now(selection_now, config.schedule_timezone)
+                remaining_seconds = max(0.0, (block_end - schedule_now).total_seconds())
+                if remaining_seconds > 0:
+                    effective_duration_limit = min(config.duration_limit, remaining_seconds)
             block_hls_append = ordinal > 0
             block_hls_start_number = 0 if block_hls_append else hls_start_number
             diagnostics = self.block_runner.run(
                 BlockRunConfig(
                     channel=config.channel,
-                    duration_limit=config.duration_limit,
+                    duration_limit=effective_duration_limit,
                     output_dir=channel_output_dir,
-                    now=block_now,
+                    now=run_now,
                     dry_run=config.dry_run,
                     output_name=FFMpegHLSCommandBuilder._slug(config.channel),
                     hls_start_number=block_hls_start_number,
@@ -132,7 +140,6 @@ class LiveController:
             )
 
             last_index = selected.index
-            block_end = _parse_datetime(selected.block.get("end_time"))
             if not simulated_cursor and block_end is not None and ordinal < config.max_blocks - 1:
                 schedule_now = _schedule_now(config.clock(), config.schedule_timezone)
                 wait_seconds = max(0.0, (block_end - schedule_now).total_seconds())
@@ -155,7 +162,7 @@ class LiveController:
                         selected=selected,
                     )
                     config.sleep(wait_seconds)
-            cursor = block_end or block_now or cursor
+            cursor = block_end or run_now or cursor
 
         summary = _events_plan_summary(events)
         result = {
