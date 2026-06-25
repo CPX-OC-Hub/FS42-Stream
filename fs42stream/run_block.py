@@ -114,7 +114,8 @@ class BlockRunner:
         if config.dry_run:
             return diagnostics
 
-        completed = subprocess.run(command, check=True, shell=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        completed = subprocess.run(command, check=False, shell=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        diagnostics["status"] = "ok" if completed.returncode == 0 else "ffmpeg-error"
         diagnostics["ffmpeg"] = {
             "returncode": completed.returncode,
             "stdout": completed.stdout,
