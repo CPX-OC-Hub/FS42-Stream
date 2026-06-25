@@ -101,6 +101,37 @@ class BlockRunnerTests(unittest.TestCase):
         self.assertEqual(diagnostics["status"], "dry-run")
         self.assertEqual(diagnostics["selection"]["reason"], "current")
 
+    def test_runner_reports_runtime_fallback_replacement_in_json_diagnostics(self):
+        schedule = {
+            "network_name": "Sky One",
+            "schedule_blocks": [
+                {
+                    "title": "Off Air",
+                    "start_time": "2026-06-17T10:00:00",
+                    "end_time": "2026-06-17T10:30:00",
+                    "plan": [
+                        {"path": "runtime/brb.png", "duration": 12, "skip": 0, "is_stream": False, "content_type": "slate", "media_type": "image"},
+                    ],
+                }
+            ],
+        }
+        client = mock.Mock(fetch_schedule=mock.Mock(return_value=schedule))
+        probe = mock.Mock()
+        runner = BlockRunner(
+            client=client,
+            planner=BlockPlanner(PathResolver(fs42_root="/mnt/fs42", sdtv_root="/mnt/media/SDTV"), probe),
+            builder=FFMpegHLSCommandBuilder("/usr/bin/ffmpeg"),
+        )
+
+        diagnostics = runner.run(BlockRunConfig(channel="Sky One", duration_limit=15, output_dir=Path("/tmp/out"), now=datetime(2026, 6, 17, 10, 5, 0), dry_run=True))
+
+        probe.validate_video.assert_not_called()
+        self.assertEqual(diagnostics["plan"][0]["resolved_path"], "/mnt/fs42/runtime/brb.png")
+        self.assertEqual(diagnostics["plan"][0]["input_kind"], "lavfi")
+        self.assertEqual(diagnostics["plan"][0]["runtime_action"], "generated_fallback_slate")
+        self.assertEqual(diagnostics["plan"][0]["diagnostic"], "known runtime/off-air image slate replaced with generated fallback video")
+        self.assertIn("lavfi", diagnostics["command"])
+
 
 class RunBlockCLITests(unittest.TestCase):
     def test_cli_prints_json_status_and_returns_zero_on_success(self):

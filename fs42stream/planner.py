@@ -17,6 +17,10 @@ class PlannedItem:
     skip: float
     duration: float
     probe: ProbeResult
+    input_kind: str = "file"
+    ffmpeg_input: str | None = None
+    runtime_action: str | None = None
+    diagnostic: str | None = None
 
 
 @dataclass(frozen=True)
@@ -31,9 +35,10 @@ class PlannedBlock:
 class BlockPlanner:
     """Build block-level plans without flattening or rewriting FS42's own plan entries."""
 
-    def __init__(self, resolver: PathResolver | None = None, probe: FFProbe | None = None) -> None:
+    def __init__(self, resolver: PathResolver | None = None, probe: FFProbe | None = None, *, fallback_slate_video: str | Path | None = None) -> None:
         self.resolver = resolver or PathResolver()
         self.probe = probe or FFProbe()
+        self.fallback_slate_video = Path(fallback_slate_video) if fallback_slate_video is not None else None
 
     def plan(self, schedule: Mapping[str, Any]) -> list[PlannedBlock]:
         raw_blocks = schedule.get("schedule_blocks")
@@ -71,10 +76,48 @@ class BlockPlanner:
         if raw_path is None:
             raise ValueError("plan item missing path/realpath")
         resolved = self.resolver.resolve(raw_path)
+        duration = float(item.get("duration") or 0.0)
+        if self._is_known_runtime_off_air_slate(item, resolved):
+            if self.fallback_slate_video is not None:
+                return PlannedItem(
+                    source=item,
+                    resolved_path=resolved,
+                    skip=0.0,
+                    duration=duration,
+                    probe=self.probe.validate_video(self.fallback_slate_video),
+                    input_kind="file",
+                    ffmpeg_input=str(self.fallback_slate_video),
+                    runtime_action="configured_fallback_slate",
+                    diagnostic="known runtime/off-air image slate replaced with configured fallback video",
+                )
+            return PlannedItem(
+                source=item,
+                resolved_path=resolved,
+                skip=0.0,
+                duration=duration,
+                probe=ProbeResult(duration=duration, width=640, height=480, fps=25.0, audio_sample_rate=0, audio_channels=0),
+                input_kind="lavfi",
+                ffmpeg_input="color=black",
+                runtime_action="generated_fallback_slate",
+                diagnostic="known runtime/off-air image slate replaced with generated fallback video",
+            )
         return PlannedItem(
             source=item,
             resolved_path=resolved,
             skip=float(item.get("skip") or 0.0),
-            duration=float(item.get("duration") or 0.0),
+            duration=duration,
             probe=self.probe.validate_video(resolved),
         )
+
+    def _is_known_runtime_off_air_slate(self, item: Mapping[str, Any], resolved: Path) -> bool:
+        try:
+            resolved.relative_to(self.resolver.fs42_root.resolve(strict=False) / "runtime")
+            under_runtime = True
+        except ValueError:
+            under_runtime = False
+        if not under_runtime:
+            return False
+        media_type = str(item.get("media_type") or "").lower()
+        content_type = str(item.get("content_type") or "").lower()
+        suffix = resolved.suffix.lower()
+        return media_type in {"image", "slate"} or content_type in {"slate", "off-air", "off_air", "brb"} or suffix in {".png", ".jpg", ".jpeg"}

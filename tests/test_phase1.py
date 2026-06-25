@@ -136,6 +136,59 @@ class BlockPlannerTests(unittest.TestCase):
         self.assertEqual(blocks[0].items[0].resolved_path, fs42_root / "catalog/SkyOne/late/South Park/episode.mp4")
         self.assertEqual(probe.validate_video.call_count, 2)
 
+    def test_replaces_known_runtime_image_slate_with_generated_fallback_without_probing_missing_png(self):
+        schedule = {
+            "schedule_blocks": [
+                {
+                    "title": "Off Air",
+                    "plan": [
+                        {
+                            "path": "runtime/brb.png",
+                            "duration": 10,
+                            "skip": 0,
+                            "is_stream": False,
+                            "content_type": "slate",
+                            "media_type": "image",
+                        }
+                    ],
+                }
+            ]
+        }
+        probe = mock.Mock()
+        block = BlockPlanner(PathResolver(fs42_root="/mnt/fs42", sdtv_root="/mnt/media/SDTV"), probe).plan(schedule)[0]
+
+        self.assertEqual(probe.validate_video.call_count, 0)
+        self.assertEqual(block.items[0].resolved_path, Path("/mnt/fs42/runtime/brb.png"))
+        self.assertEqual(block.items[0].input_kind, "lavfi")
+        self.assertIn("color=black", block.items[0].ffmpeg_input)
+        self.assertEqual(block.items[0].runtime_action, "generated_fallback_slate")
+
+    def test_can_use_configured_fallback_video_for_known_runtime_slate(self):
+        schedule = {
+            "schedule_blocks": [
+                {
+                    "title": "Off Air",
+                    "plan": [
+                        {"path": "runtime/brb.png", "duration": 10, "is_stream": False, "content_type": "slate", "media_type": "image"}
+                    ],
+                }
+            ]
+        }
+        fallback = Path("/tmp/fallback-slate.mp4")
+        probe = mock.Mock(validate_video=mock.Mock(return_value=ProbeResult(10, 640, 480, 25, 48000, 2)))
+        block = BlockPlanner(PathResolver(), probe, fallback_slate_video=fallback).plan(schedule)[0]
+
+        probe.validate_video.assert_called_once_with(fallback)
+        self.assertEqual(block.items[0].ffmpeg_input, str(fallback))
+        self.assertEqual(block.items[0].runtime_action, "configured_fallback_slate")
+
+    def test_does_not_replace_or_skip_missing_programme_media(self):
+        probe = mock.Mock()
+        probe.validate_video.side_effect = FileNotFoundError("missing programme")
+
+        with self.assertRaisesRegex(FileNotFoundError, "missing programme"):
+            BlockPlanner(PathResolver(), probe).plan(SCHEDULE)
+
 
 class FFMpegCommandBuilderTests(unittest.TestCase):
     def test_builds_block_level_concat_filter_hls_command_with_normalisation(self):
@@ -166,6 +219,27 @@ class FFMpegCommandBuilderTests(unittest.TestCase):
         self.assertIn("anullsrc=channel_layout=stereo:sample_rate=48000", joined)
         self.assertIn("atrim=duration=331.25", joined)
         self.assertNotIn("[0:a]aresample", joined)
+
+    def test_builds_lavfi_input_for_generated_runtime_slate_without_shell(self):
+        schedule = {
+            "schedule_blocks": [
+                {
+                    "title": "Off Air",
+                    "plan": [
+                        {"path": "runtime/brb.png", "duration": 7, "content_type": "slate", "media_type": "image", "is_stream": False}
+                    ],
+                }
+            ]
+        }
+        block = BlockPlanner(PathResolver(), mock.Mock()).plan(schedule)[0]
+        cmd = FFMpegHLSCommandBuilder(ffmpeg="/usr/bin/ffmpeg").build(block, output_dir=Path("/tmp/hls"))
+
+        self.assertIsInstance(cmd, list)
+        self.assertIn("-f", cmd)
+        self.assertIn("lavfi", cmd)
+        self.assertIn("color=black", cmd)
+        self.assertNotIn("/mnt/fs42/runtime/brb.png", cmd)
+        self.assertNotIn("shell=True", " ".join(cmd))
 
 
 if __name__ == "__main__":
