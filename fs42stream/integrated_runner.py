@@ -16,7 +16,7 @@ from .ffprobe import FFProbe
 from .live_controller import LiveController, LiveControllerConfig
 from .paths import PathResolver
 from .planner import BlockPlanner
-from .run_block import DEFAULT_API_BASE_URL, DEFAULT_CHANNEL, DEFAULT_FFMPEG, DEFAULT_FFPROBE, DEFAULT_FS42_ROOT, DEFAULT_SDTV_ROOT, BlockRunner
+from .run_block import DEFAULT_API_BASE_URL, DEFAULT_CHANNEL, DEFAULT_FFMPEG, DEFAULT_FFPROBE, DEFAULT_FS42_ROOT, DEFAULT_SCHEDULE_TIMEZONE, DEFAULT_SDTV_ROOT, BlockRunner
 
 
 @dataclass(frozen=True)
@@ -35,6 +35,7 @@ class IntegratedRunnerConfig:
     ffprobe: str = DEFAULT_FFPROBE
     video_encoder: str = "libx264"
     vaapi_device: str | None = None
+    schedule_timezone: str | None = DEFAULT_SCHEDULE_TIMEZONE
 
 
 class IntegratedServer(Protocol):
@@ -78,6 +79,7 @@ def run_integrated(
             "output_root": str(output_root),
             "max_blocks": config.max_blocks,
             "duration_limit": config.duration_limit,
+            "schedule_timezone": config.schedule_timezone,
             "updated_at": _utc_now(),
         },
     )
@@ -101,6 +103,7 @@ def run_integrated(
         "max_blocks": config.max_blocks,
         "blocks_completed": 0,
         "duration_limit": config.duration_limit,
+        "schedule_timezone": config.schedule_timezone,
         "updated_at": _utc_now(),
     }
     _write_status(status_json, running_status)
@@ -123,6 +126,7 @@ def run_integrated(
                     duration_limit=config.duration_limit,
                     dry_run=config.dry_run,
                     status_callback=write_live_status,
+                    schedule_timezone=config.schedule_timezone,
                 )
             )
         )
@@ -163,6 +167,7 @@ def main(
     parser.add_argument("--ffprobe", default=DEFAULT_FFPROBE)
     parser.add_argument("--video-encoder", default="libx264", help="video encoder, e.g. libx264 or h264_vaapi")
     parser.add_argument("--vaapi-device", help="VAAPI device path, e.g. /dev/dri/renderD128")
+    parser.add_argument("--schedule-timezone", default=DEFAULT_SCHEDULE_TIMEZONE, help="timezone for naive FS42 schedule timestamps, e.g. Europe/London")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv)
 
@@ -181,6 +186,7 @@ def main(
         ffprobe=args.ffprobe,
         video_encoder=args.video_encoder,
         vaapi_device=args.vaapi_device,
+        schedule_timezone=args.schedule_timezone,
     )
     effective_controller_factory = controller_factory
     if controller_factory is LiveController:

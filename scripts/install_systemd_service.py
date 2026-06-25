@@ -27,6 +27,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--duration-limit", type=float, default=1800.0)
     parser.add_argument("--video-encoder", default="h264_vaapi")
     parser.add_argument("--vaapi-device", default="/dev/dri/renderD128")
+    parser.add_argument("--schedule-timezone", default="Europe/London")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--skip-systemctl", action="store_true", help="write files but do not run systemctl daemon-reload/enable/restart")
     args = parser.parse_args(argv)
@@ -44,6 +45,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         duration_limit=args.duration_limit,
         video_encoder=args.video_encoder,
         vaapi_device=args.vaapi_device,
+        schedule_timezone=args.schedule_timezone,
     )
     env_text = render_environment_file(config)
     unit_text = render_unit_file(config)

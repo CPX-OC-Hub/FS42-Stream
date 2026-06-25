@@ -6,6 +6,7 @@ import subprocess
 import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -22,6 +23,7 @@ DEFAULT_FS42_ROOT = "/mnt/fs42"
 DEFAULT_SDTV_ROOT = "/mnt/media/SDTV"
 DEFAULT_FFMPEG = "/usr/bin/ffmpeg"
 DEFAULT_FFPROBE = "/usr/bin/ffprobe"
+DEFAULT_SCHEDULE_TIMEZONE = "Europe/London"
 
 
 @dataclass(frozen=True)
@@ -41,9 +43,10 @@ class BlockRunConfig:
     output_name: str | None = None
     hls_start_number: int = 0
     hls_append: bool = False
+    schedule_timezone: str | None = DEFAULT_SCHEDULE_TIMEZONE
 
 
-def select_current_or_next_block(schedule: Mapping[str, Any], *, now: datetime | None = None) -> SelectedBlock:
+def select_current_or_next_block(schedule: Mapping[str, Any], *, now: datetime | None = None, schedule_timezone: str | None = DEFAULT_SCHEDULE_TIMEZONE) -> SelectedBlock:
     """Return the current FS42 schedule block, or the next future block.
 
     Selection is deterministic: schedule order is preserved for tie-breaking, the
@@ -53,7 +56,7 @@ def select_current_or_next_block(schedule: Mapping[str, Any], *, now: datetime |
     clear diagnostic rather than a hidden fallback.
     """
 
-    current_time = now or datetime.now()
+    current_time = _schedule_now(now, schedule_timezone)
     blocks = schedule.get("schedule_blocks")
     if not isinstance(blocks, list) or not blocks:
         raise ValueError("schedule contains no schedule_blocks")
@@ -100,7 +103,7 @@ class BlockRunner:
         config.output_dir.mkdir(parents=True, exist_ok=True)
 
         schedule = self.client.fetch_schedule(config.channel, expected_blocks=None)
-        selected = select_current_or_next_block(schedule, now=config.now)
+        selected = select_current_or_next_block(schedule, now=config.now, schedule_timezone=config.schedule_timezone)
         planned = self.planner.plan_block(selected.block)
         command = self.builder.build(
             planned,
@@ -159,6 +162,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--ffprobe", default=DEFAULT_FFPROBE)
     parser.add_argument("--video-encoder", default="libx264", help="video encoder, e.g. libx264 or h264_vaapi")
     parser.add_argument("--vaapi-device", help="VAAPI device path, e.g. /dev/dri/renderD128")
+    parser.add_argument("--schedule-timezone", default=DEFAULT_SCHEDULE_TIMEZONE, help="timezone for naive FS42 schedule timestamps, e.g. Europe/London")
     parser.add_argument("--fallback-slate-video", type=Path, help="optional prebuilt video used instead of generated black slate for runtime/off-air image entries")
     parser.add_argument("--timeout", type=float, default=10.0, help="FS42 API timeout in seconds")
     parser.add_argument("--now", help="override current time for deterministic tests, e.g. 2026-06-17T10:05:00")
@@ -178,6 +182,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         now=_parse_datetime(args.now) if args.now else None,
         dry_run=args.dry_run,
         output_name=args.output_name,
+        schedule_timezone=args.schedule_timezone,
     )
     try:
         diagnostics = runner.run(config)
@@ -265,6 +270,16 @@ def _parse_datetime(value: Any) -> datetime | None:
         return datetime.fromisoformat(text)
     except ValueError as exc:
         raise ValueError(f"invalid schedule datetime: {value!r}") from exc
+
+
+def _schedule_now(now: datetime | None, schedule_timezone: str | None) -> datetime:
+    if schedule_timezone:
+        zone = ZoneInfo(schedule_timezone)
+        source = now or datetime.now(timezone.utc)
+        if source.tzinfo is None:
+            source = source.replace(tzinfo=zone)
+        return source.astimezone(zone).replace(tzinfo=None)
+    return now or datetime.now()
 
 
 def _coerce_now_for(parsed: Sequence[tuple[int, Mapping[str, Any], datetime | None, datetime | None]], now: datetime) -> datetime:

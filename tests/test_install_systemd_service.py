@@ -40,9 +40,14 @@ class InstallSystemdServiceTests(unittest.TestCase):
             ])
 
             self.assertEqual(rc, 0)
-            self.assertIn("FS42STREAM_OUTPUT_ROOT", env_file.read_text())
-            self.assertIn("ExecStart=/usr/bin/python3 -m fs42stream.integrated_runner", unit_file.read_text())
+            env_text = env_file.read_text()
+            unit_text = unit_file.read_text()
+            self.assertIn("FS42STREAM_OUTPUT_ROOT", env_text)
+            self.assertIn("FS42STREAM_SCHEDULE_TIMEZONE", env_text)
+            self.assertIn("--schedule-timezone ${FS42STREAM_SCHEDULE_TIMEZONE}", unit_text)
+            self.assertIn("ExecStart=/usr/bin/python3 -m fs42stream.integrated_runner", unit_text)
             self.assertTrue(output_root.exists())
+
     def test_script_can_run_directly_from_repo_root(self):
         completed = subprocess.run(
             [sys.executable, "scripts/install_systemd_service.py", "--dry-run"],
