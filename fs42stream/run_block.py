@@ -104,7 +104,8 @@ class BlockRunner:
 
         schedule = self.client.fetch_schedule(config.channel, expected_blocks=None)
         selected = select_current_or_next_block(schedule, now=config.now, schedule_timezone=config.schedule_timezone)
-        planned = self.planner.plan_block(selected.block)
+        catch_up_block, catch_up = _catch_up_block_to_wallclock(selected.block, now=config.now, schedule_timezone=config.schedule_timezone)
+        planned = self.planner.plan_block(catch_up_block)
         command = self.builder.build(
             planned,
             output_dir=config.output_dir,
@@ -126,6 +127,7 @@ class BlockRunner:
             output_name=config.output_name,
             hls_start_number=config.hls_start_number,
             hls_append=config.hls_append,
+            catch_up=catch_up,
         )
         if config.dry_run:
             return diagnostics
@@ -207,6 +209,7 @@ def _diagnostics(
     output_name: str | None = None,
     hls_start_number: int = 0,
     hls_append: bool = False,
+    catch_up: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     output_slug = FFMpegHLSCommandBuilder._slug(output_name or planned.title)
     playlist = output_dir / f"{output_slug}.m3u8"
@@ -220,6 +223,7 @@ def _diagnostics(
         "playlist": str(playlist),
         "hls_start_number": hls_start_number,
         "hls_append": hls_append,
+        "catch_up": dict(catch_up or {"applied": False}),
         **type_summary,
         "selection": {
             "index": selected.index,
@@ -256,6 +260,61 @@ def _diagnostics(
         "command": command,
     }
     return diagnostics
+
+
+def _catch_up_block_to_wallclock(block: Mapping[str, Any], *, now: datetime | None, schedule_timezone: str | None) -> tuple[Mapping[str, Any], dict[str, Any]]:
+    if now is None:
+        return block, {"applied": False, "reason": "no_now"}
+    block_start = _parse_datetime(block.get("start_time"))
+    if block_start is None:
+        return block, {"applied": False, "reason": "missing_block_start"}
+    schedule_now = _schedule_now(now, schedule_timezone)
+    elapsed = (schedule_now - block_start).total_seconds()
+    if elapsed <= 0:
+        return block, {"applied": False, "reason": "before_or_at_block_start", "block_elapsed": max(0.0, elapsed)}
+    raw_plan = block.get("plan")
+    if not isinstance(raw_plan, list):
+        return block, {"applied": False, "reason": "missing_plan", "block_elapsed": elapsed}
+
+    cursor = 0.0
+    for index, item in enumerate(raw_plan):
+        if not isinstance(item, Mapping):
+            continue
+        duration = _float_or_zero(item.get("duration"))
+        item_end = cursor + duration
+        if cursor <= elapsed < item_end:
+            offset_in_item = elapsed - cursor
+            adjusted_first = dict(item)
+            original_skip = _float_or_zero(adjusted_first.get("skip"))
+            adjusted_first["skip"] = original_skip + offset_in_item
+            adjusted_first["duration"] = max(0.0, duration - offset_in_item)
+            adjusted_first["catch_up_offset"] = offset_in_item
+            trimmed_plan = [adjusted_first]
+            trimmed_plan.extend(dict(next_item) for next_item in raw_plan[index + 1 :] if isinstance(next_item, Mapping))
+            caught_block = dict(block)
+            caught_block["plan"] = trimmed_plan
+            return caught_block, {
+                "applied": True,
+                "schedule_now": schedule_now.isoformat(),
+                "block_elapsed": elapsed,
+                "start_plan_index": index,
+                "offset_in_item": offset_in_item,
+                "original_skip": original_skip,
+                "media_seek": original_skip + offset_in_item,
+                "remaining_item_duration": max(0.0, duration - offset_in_item),
+                "dropped_plan_items": index,
+                "current_content_type": item.get("content_type") or item.get("type") or item.get("media_type"),
+                "current_path": item.get("path") or item.get("realpath"),
+            }
+        cursor = item_end
+    return block, {"applied": False, "reason": "after_plan_end", "block_elapsed": elapsed, "plan_duration": cursor}
+
+
+def _float_or_zero(value: Any) -> float:
+    try:
+        return float(value or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def _parse_datetime(value: Any) -> datetime | None:
