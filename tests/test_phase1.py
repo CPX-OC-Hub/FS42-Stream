@@ -301,6 +301,25 @@ class FFMpegCommandBuilderTests(unittest.TestCase):
         self.assertIn("/tmp/hls/Sky_One_%05d.ts", joined)
         self.assertEqual(cmd[-1], "/tmp/hls/Sky_One.m3u8")
 
+    def test_appends_later_blocks_without_resetting_hls_sequence(self):
+        resolver = PathResolver()
+        probe = mock.Mock(validate_video=mock.Mock(return_value=ProbeResult(1, 320, 240, 25, 44100, 1)))
+        block = BlockPlanner(resolver, probe).plan(SCHEDULE)[0]
+
+        cmd = FFMpegHLSCommandBuilder(ffmpeg="/usr/bin/ffmpeg").build(
+            block,
+            output_dir=Path("/tmp/hls"),
+            output_name="Sky_One",
+            hls_start_number=42,
+            hls_append=True,
+        )
+
+        joined = " ".join(cmd)
+        self.assertIn("-start_number 42", joined)
+        self.assertIn("-hls_flags append_list+discont_start", joined)
+        self.assertIn("/tmp/hls/Sky_One_%05d.ts", joined)
+        self.assertEqual(cmd[-1], "/tmp/hls/Sky_One.m3u8")
+
     def test_builds_silent_audio_chain_for_video_only_inputs(self):
         resolver = PathResolver()
         probe = mock.Mock(validate_video=mock.Mock(return_value=ProbeResult(1, 320, 240, 25, 0, 0)))
