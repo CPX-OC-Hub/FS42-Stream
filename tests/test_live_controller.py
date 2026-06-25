@@ -129,6 +129,8 @@ class LiveControllerTests(unittest.TestCase):
         self.assertEqual(first["upcoming_blocks"][0]["title"], "Second Live Block")
         self.assertEqual(first["hls"]["playlist"], str(Path(tmp) / "Sky_One" / "Sky_One.m3u8"))
         self.assertEqual(first["events"][-1]["event"], "block_start")
+        self.assertEqual(first["schedule_now"], "2026-06-17T10:05:00")
+        self.assertEqual(first["active_block"]["plan"][0]["path"], "catalog/first.mp4")
         self.assertEqual(updates[-1]["status"], "complete")
         self.assertEqual(result["status"], "complete")
 

@@ -101,8 +101,8 @@ class LiveController:
                 events=events,
                 schedule=schedule,
                 selected=selected,
+                schedule_now=selection_now,
             )
-
             block_start = _parse_datetime(selected.block.get("start_time"))
             block_end = _parse_datetime(selected.block.get("end_time"))
             run_now = selection_now if not simulated_cursor else (block_start or cursor)
@@ -137,6 +137,7 @@ class LiveController:
                 events=events,
                 schedule=schedule,
                 selected=selected,
+                schedule_now=selection_now,
             )
 
             last_index = selected.index
@@ -160,6 +161,7 @@ class LiveController:
                         events=events,
                         schedule=schedule,
                         selected=selected,
+                        schedule_now=config.clock(),
                     )
                     config.sleep(wait_seconds)
             cursor = block_end or run_now or cursor
@@ -189,10 +191,14 @@ def _emit_live_status(
     events: Sequence[Mapping[str, Any]],
     schedule: Mapping[str, Any],
     selected: SelectedBlock,
+    schedule_now: datetime | None,
 ) -> None:
     if config.status_callback is None:
         return
     active_block = _block_info(selected)
+    raw_plan = selected.block.get("plan")
+    if isinstance(raw_plan, list):
+        active_block["plan"] = [dict(item) for item in raw_plan if isinstance(item, Mapping)]
     upcoming_blocks = _upcoming_blocks(schedule, after_index=selected.index)
     payload = {
         "status": status,
@@ -202,6 +208,7 @@ def _emit_live_status(
         "max_blocks": config.max_blocks,
         "duration_limit": config.duration_limit,
         "schedule_timezone": config.schedule_timezone,
+        "schedule_now": schedule_now.isoformat() if schedule_now is not None else None,
         "active_block": active_block,
         "upcoming_blocks": upcoming_blocks,
         "hls": {
