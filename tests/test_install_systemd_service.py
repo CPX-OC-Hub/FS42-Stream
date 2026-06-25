@@ -1,0 +1,61 @@
+import json
+import subprocess
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+from unittest import mock
+
+from scripts.install_systemd_service import main
+
+
+class InstallSystemdServiceTests(unittest.TestCase):
+    def test_dry_run_prints_unit_and_env_without_writing(self):
+        with tempfile.TemporaryDirectory() as tmp, mock.patch("sys.stdout") as stdout:
+            rc = main([
+                "--dry-run",
+                "--install-dir", str(Path(tmp) / "opt"),
+                "--env-file", str(Path(tmp) / "etc" / "fs42stream.env"),
+                "--unit-file", str(Path(tmp) / "systemd" / "fs42stream.service"),
+            ])
+
+        self.assertEqual(rc, 0)
+        output = "".join(call.args[0] for call in stdout.write.call_args_list)
+        self.assertIn("[Unit]", output)
+        self.assertIn("FS42STREAM_CHANNEL", output)
+        self.assertIn("DRY_RUN", output)
+
+    def test_install_writes_env_and_unit_when_not_dry_run(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            env_file = root / "etc" / "fs42stream.env"
+            unit_file = root / "systemd" / "fs42stream.service"
+            output_root = root / "hls"
+            rc = main([
+                "--install-dir", str(root / "opt"),
+                "--env-file", str(env_file),
+                "--unit-file", str(unit_file),
+                "--output-root", str(output_root),
+                "--skip-systemctl",
+            ])
+
+            self.assertEqual(rc, 0)
+            self.assertIn("FS42STREAM_OUTPUT_ROOT", env_file.read_text())
+            self.assertIn("ExecStart=/usr/bin/python3 -m fs42stream.integrated_runner", unit_file.read_text())
+            self.assertTrue(output_root.exists())
+    def test_script_can_run_directly_from_repo_root(self):
+        completed = subprocess.run(
+            [sys.executable, "scripts/install_systemd_service.py", "--dry-run"],
+            cwd=Path(__file__).resolve().parents[1],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertIn("DRY_RUN", completed.stdout)
+        self.assertIn("fs42stream.integrated_runner", completed.stdout)
+
+
+if __name__ == "__main__":
+    unittest.main()
