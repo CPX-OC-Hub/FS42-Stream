@@ -76,7 +76,7 @@ class FFMpegHLSCommandBuilder:
         )
         if duration_limit is not None:
             cmd.extend(["-t", self._num(duration_limit)])
-        hls_args = ["-f", "hls", "-hls_time", "6", "-hls_playlist_type", "event"]
+        hls_args = ["-f", "hls", "-hls_time", "6"]
         if not hls_append or hls_start_number:
             hls_args.extend(["-start_number", str(hls_start_number)])
         if hls_append:

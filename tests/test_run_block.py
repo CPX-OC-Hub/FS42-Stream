@@ -79,11 +79,14 @@ class BlockRunnerTests(unittest.TestCase):
         client.fetch_schedule.assert_called_once_with("Sky One", expected_blocks=None)
         self.assertEqual(probe.validate_video.call_count, 2)
         self.assertEqual([call.args[0] for call in probe.validate_video.call_args_list], [Path("/mnt/fs42/catalog/SkyOne/current-first.mp4"), Path("/mnt/media/SDTV/Current Second.mp4")])
-        run.assert_called_once()
-        command = run.call_args.args[0]
-        self.assertEqual(command[0], "/usr/bin/ffmpeg")
-        self.assertIn(["-t", "120"], [command[index:index + 2] for index in range(len(command) - 1)])
-        self.assertLess(command.index("/mnt/fs42/catalog/SkyOne/current-first.mp4"), command.index("/mnt/media/SDTV/Current Second.mp4"))
+        self.assertEqual(run.call_count, 2)
+        commands = [call.args[0] for call in run.call_args_list]
+        self.assertEqual(commands[0][0], "/usr/bin/ffmpeg")
+        self.assertIn(["-t", "30"], [commands[0][index:index + 2] for index in range(len(commands[0]) - 1)])
+        self.assertIn(["-t", "60"], [commands[1][index:index + 2] for index in range(len(commands[1]) - 1)])
+        self.assertIn("/mnt/fs42/catalog/SkyOne/current-first.mp4", commands[0])
+        self.assertIn("/mnt/media/SDTV/Current Second.mp4", commands[1])
+        self.assertIn("-hls_flags", commands[1])
         self.assertEqual(diagnostics["status"], "ok")
         self.assertEqual(diagnostics["channel"], "Sky One")
         self.assertEqual(diagnostics["selection"]["reason"], "current")
@@ -170,7 +173,7 @@ class BlockRunnerTests(unittest.TestCase):
             builder=FFMpegHLSCommandBuilder("/usr/bin/ffmpeg"),
         )
 
-        diagnostics = runner.run(BlockRunConfig(channel="Sky One", duration_limit=15, output_dir=Path("/tmp/out"), now=datetime(2026, 6, 17, 10, 5, 0), dry_run=True))
+        diagnostics = runner.run(BlockRunConfig(channel="Sky One", duration_limit=120, output_dir=Path("/tmp/out"), now=datetime(2026, 6, 17, 10, 5, 0), dry_run=True))
 
         self.assertEqual(diagnostics["plan_item_counts"], {"feature": 1, "commercial": 2, "bump": 1})
         self.assertEqual(diagnostics["plan_item_count"], 4)
@@ -179,9 +182,10 @@ class BlockRunnerTests(unittest.TestCase):
         self.assertEqual(diagnostics["commercial_paths"], ["/mnt/fs42/catalog/commercial/ad-a.mp4", "/mnt/fs42/catalog/commercial/ad-b.mp4"])
         self.assertEqual([item["type"] for item in diagnostics["plan"]], ["feature", "commercial", "bump", "commercial"])
         self.assertEqual([item["index"] for item in diagnostics["plan"]], [0, 1, 2, 3])
-        self.assertIn("/mnt/fs42/catalog/commercial/ad-a.mp4", diagnostics["command"])
-        self.assertIn("/mnt/fs42/catalog/commercial/ad-b.mp4", diagnostics["command"])
-        self.assertNotIn("lavfi", diagnostics["command"])
+        flattened_commands = [part for command in diagnostics["commands"] for part in command]
+        self.assertIn("/mnt/fs42/catalog/commercial/ad-a.mp4", flattened_commands)
+        self.assertIn("/mnt/fs42/catalog/commercial/ad-b.mp4", flattened_commands)
+        self.assertNotIn("lavfi", flattened_commands)
 
 
 class RunBlockCLITests(unittest.TestCase):
