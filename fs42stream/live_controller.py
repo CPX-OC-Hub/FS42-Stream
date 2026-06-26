@@ -45,6 +45,7 @@ class LiveControllerConfig:
     dry_run: bool = False
     status_callback: Callable[[Mapping[str, Any]], None] | None = None
     schedule_timezone: str | None = DEFAULT_SCHEDULE_TIMEZONE
+    max_recovery_attempts_per_block: int = 1
     clock: Callable[[], datetime] = _utc_now
     sleep: Callable[[float], None] = time.sleep
 
@@ -140,6 +141,71 @@ class LiveController:
                 schedule_now=selection_now,
             )
 
+            if not simulated_cursor and _block_run_failed(diagnostics_dict):
+                recovery_attempt = 0
+                while recovery_attempt < config.max_recovery_attempts_per_block and block_end is not None:
+                    recovery_attempt += 1
+                    recovery_now = config.clock()
+                    schedule_now = _schedule_now(recovery_now, config.schedule_timezone)
+                    if schedule_now >= block_end:
+                        break
+                    recovery_selected = select_current_or_next_block(schedule, now=recovery_now, schedule_timezone=config.schedule_timezone)
+                    if recovery_selected.index != selected.index:
+                        break
+                    recovery_block_info = _block_info(recovery_selected)
+                    events.append(
+                        {
+                            "event": "block_recovery",
+                            "block_number": ordinal + 1,
+                            "attempt": recovery_attempt,
+                            "reason": str(diagnostics_dict.get("status") or "ffmpeg-error"),
+                            "block": recovery_block_info,
+                            "recover_at": schedule_now.isoformat(),
+                            "previous_status": diagnostics_dict.get("status"),
+                            "previous_ffmpeg_returncode": _ffmpeg_returncode(diagnostics_dict),
+                        }
+                    )
+                    _emit_live_status(
+                        config,
+                        status="recovering",
+                        channel_output_dir=channel_output_dir,
+                        events=events,
+                        schedule=schedule,
+                        selected=recovery_selected,
+                        schedule_now=recovery_now,
+                    )
+                    recovery_duration_limit = min(config.duration_limit, max(0.0, (block_end - schedule_now).total_seconds()))
+                    diagnostics_dict = dict(
+                        self.block_runner.run(
+                            BlockRunConfig(
+                                channel=config.channel,
+                                duration_limit=recovery_duration_limit,
+                                output_dir=channel_output_dir,
+                                now=recovery_now,
+                                dry_run=config.dry_run,
+                                output_name=FFMpegHLSCommandBuilder._slug(config.channel),
+                                hls_start_number=hls_start_number,
+                                hls_append=True,
+                                schedule_timezone=config.schedule_timezone,
+                            )
+                        )
+                    )
+                    hls_start_number = int(diagnostics_dict.get("hls_next_start_number") or hls_start_number)
+                    events.append(_complete_event(ordinal=ordinal, block=recovery_block_info, diagnostics=diagnostics_dict))
+                    _emit_live_status(
+                        config,
+                        status="running",
+                        channel_output_dir=channel_output_dir,
+                        events=events,
+                        schedule=schedule,
+                        selected=recovery_selected,
+                        schedule_now=recovery_now,
+                    )
+                    if not _block_run_failed(diagnostics_dict):
+                        selected = recovery_selected
+                        block_info = recovery_block_info
+                        break
+
             last_index = selected.index
             if not simulated_cursor and block_end is not None and ordinal < config.max_blocks - 1:
                 schedule_now = _schedule_now(config.clock(), config.schedule_timezone)
@@ -181,6 +247,21 @@ class LiveController:
         if config.status_callback is not None:
             config.status_callback(result)
         return result
+
+
+def _block_run_failed(diagnostics: Mapping[str, Any]) -> bool:
+    status = str(diagnostics.get("status") or "")
+    if status and status not in {"ok", "dry-run"}:
+        return True
+    returncode = _ffmpeg_returncode(diagnostics)
+    return isinstance(returncode, int) and returncode != 0
+
+
+def _ffmpeg_returncode(diagnostics: Mapping[str, Any]) -> Any:
+    raw_ffmpeg = diagnostics.get("ffmpeg")
+    if isinstance(raw_ffmpeg, Mapping):
+        return raw_ffmpeg.get("returncode")
+    return None
 
 
 def _emit_live_status(
@@ -277,6 +358,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--video-encoder", default="libx264", help="video encoder, e.g. libx264 or h264_vaapi")
     parser.add_argument("--vaapi-device", help="VAAPI device path, e.g. /dev/dri/renderD128")
     parser.add_argument("--schedule-timezone", default=DEFAULT_SCHEDULE_TIMEZONE, help="timezone for naive FS42 schedule timestamps, e.g. Europe/London")
+    parser.add_argument("--max-recovery-attempts-per-block", type=int, default=1, help="bounded ffmpeg failure recovery attempts within a schedule block")
     parser.add_argument("--fallback-slate-video", type=Path)
     parser.add_argument("--timeout", type=float, default=10.0)
     parser.add_argument("--now", help="override current time for deterministic tests, e.g. 2026-06-17T10:05:00")
@@ -298,6 +380,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         now=_parse_datetime(args.now) if args.now else None,
         dry_run=args.dry_run,
         schedule_timezone=args.schedule_timezone,
+        max_recovery_attempts_per_block=args.max_recovery_attempts_per_block,
     )
     try:
         result = controller.run(config)
