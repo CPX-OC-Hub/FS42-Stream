@@ -79,8 +79,10 @@ class FFMpegHLSCommandBuilder:
         hls_args = ["-f", "hls", "-hls_time", "6"]
         if not hls_append or hls_start_number:
             hls_args.extend(["-start_number", str(hls_start_number)])
+        hls_flags = ["omit_endlist"]
         if hls_append:
-            hls_args.extend(["-hls_flags", "append_list+discont_start"])
+            hls_flags.extend(["append_list", "discont_start"])
+        hls_args.extend(["-hls_flags", "+".join(hls_flags)])
         hls_args.extend(
             [
                 "-hls_segment_filename",

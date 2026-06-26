@@ -84,7 +84,7 @@ class HLSHarnessIntegrationTests(unittest.TestCase):
             inspection = inspect_hls_output(output_dir / "Sky_One_HLS_Harness.m3u8")
 
             self.assertEqual(command[0], "/usr/bin/ffmpeg")
-            self.assertTrue(inspection.has_endlist)
+            self.assertFalse(inspection.has_endlist)
             self.assertGreaterEqual(len(inspection.segments), 1)
             for segment in inspection.segments:
                 self.assertGreater(segment.stat().st_size, 0)
