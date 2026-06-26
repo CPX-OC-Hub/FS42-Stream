@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import subprocess
 import sys
 import time
 from dataclasses import dataclass
@@ -58,12 +59,78 @@ class SingleBlockRunner(Protocol):
     def run(self, config: BlockRunConfig) -> Mapping[str, Any]: ...
 
 
+class BoundaryFillerRunner(Protocol):
+    def run(self, *, output_dir: Path, output_name: str, duration: float, hls_start_number: int, hls_append: bool = True) -> Mapping[str, Any]: ...
+
+
+class HLSBlackSlateFillerRunner:
+    def __init__(self, ffmpeg: str = DEFAULT_FFMPEG) -> None:
+        self.ffmpeg = ffmpeg
+
+    def run(self, *, output_dir: Path, output_name: str, duration: float, hls_start_number: int, hls_append: bool = True) -> Mapping[str, Any]:
+        if duration <= 0:
+            raise ValueError("duration must be positive")
+        output_dir.mkdir(parents=True, exist_ok=True)
+        playlist = output_dir / f"{output_name}.m3u8"
+        segment_pattern = output_dir / f"{output_name}_%05d.ts"
+        command = [
+            self.ffmpeg,
+            "-hide_banner",
+            "-y",
+            "-re",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=black:s=640x480:r=25",
+            "-re",
+            "-f",
+            "lavfi",
+            "-i",
+            "anullsrc=channel_layout=stereo:sample_rate=48000",
+            "-t",
+            _num(duration),
+            "-c:v",
+            "libx264",
+            "-preset",
+            "veryfast",
+            "-crf",
+            "23",
+            "-c:a",
+            "aac",
+            "-ar",
+            "48000",
+            "-ac",
+            "2",
+            "-f",
+            "hls",
+            "-hls_time",
+            "6",
+            "-start_number",
+            str(hls_start_number),
+        ]
+        if hls_append:
+            command.extend(["-hls_flags", "append_list+discont_start"])
+        command.extend(["-hls_segment_filename", str(segment_pattern), str(playlist)])
+        completed = subprocess.run(command, check=False, shell=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        segment_count = _count_hls_segments_from(playlist, start_number=hls_start_number)
+        return {
+            "status": "ok" if completed.returncode == 0 else "ffmpeg-error",
+            "playlist": str(playlist),
+            "command": command,
+            "hls_start_number": hls_start_number,
+            "hls_next_start_number": hls_start_number + segment_count,
+            "hls": {"playlist": str(playlist), "segment_count": segment_count},
+            "ffmpeg": {"returncode": completed.returncode, "stdout": completed.stdout, "stderr": completed.stderr},
+        }
+
+
 class LiveController:
     """Bounded live block lifecycle controller for stable per-channel HLS output."""
 
-    def __init__(self, *, schedule_client: ScheduleClient | None = None, block_runner: SingleBlockRunner | None = None) -> None:
+    def __init__(self, *, schedule_client: ScheduleClient | None = None, block_runner: SingleBlockRunner | None = None, filler_runner: BoundaryFillerRunner | None = None) -> None:
         self.schedule_client = schedule_client or FS42ScheduleClient(DEFAULT_API_BASE_URL)
         self.block_runner = block_runner or BlockRunner()
+        self.filler_runner = filler_runner or HLSBlackSlateFillerRunner()
 
     def run(self, config: LiveControllerConfig) -> dict[str, Any]:
         if config.max_blocks <= 0:
@@ -114,7 +181,7 @@ class LiveController:
                 if remaining_seconds > 0:
                     effective_duration_limit = min(config.duration_limit, remaining_seconds)
             block_hls_append = ordinal > 0
-            block_hls_start_number = 0 if block_hls_append else hls_start_number
+            block_hls_start_number = hls_start_number
             diagnostics = self.block_runner.run(
                 BlockRunConfig(
                     channel=config.channel,
@@ -229,7 +296,39 @@ class LiveController:
                         selected=selected,
                         schedule_now=config.clock(),
                     )
-                    config.sleep(wait_seconds)
+                    filler_diagnostics = dict(
+                        self.filler_runner.run(
+                            output_dir=channel_output_dir,
+                            output_name=FFMpegHLSCommandBuilder._slug(config.channel),
+                            duration=wait_seconds,
+                            hls_start_number=hls_start_number,
+                            hls_append=True,
+                        )
+                    )
+                    events.append(
+                        {
+                            "event": "block_filler",
+                            "block_number": ordinal + 1,
+                            "block": block_info,
+                            "duration": wait_seconds,
+                            "until": block_end.isoformat(),
+                            "status": filler_diagnostics.get("status"),
+                            "playlist": filler_diagnostics.get("playlist"),
+                            "hls_start_number": hls_start_number,
+                            "hls_next_start_number": filler_diagnostics.get("hls_next_start_number"),
+                            "ffmpeg_returncode": _ffmpeg_returncode(filler_diagnostics),
+                        }
+                    )
+                    hls_start_number = int(filler_diagnostics.get("hls_next_start_number") or hls_start_number)
+                    _emit_live_status(
+                        config,
+                        status="running",
+                        channel_output_dir=channel_output_dir,
+                        events=events,
+                        schedule=schedule,
+                        selected=selected,
+                        schedule_now=config.clock(),
+                    )
             cursor = block_end or run_now or cursor
 
         summary = _events_plan_summary(events)
@@ -247,6 +346,25 @@ class LiveController:
         if config.status_callback is not None:
             config.status_callback(result)
         return result
+
+
+def _num(value: float) -> str:
+    return (f"{value:.6f}").rstrip("0").rstrip(".")
+
+
+def _count_hls_segments_from(playlist: Path, *, start_number: int) -> int:
+    if not playlist.exists():
+        return 0
+    count = 0
+    for line in playlist.read_text(errors="replace").splitlines():
+        text = line.strip()
+        if not text or text.startswith("#"):
+            continue
+        stem = Path(text).stem
+        suffix = stem.rsplit("_", 1)[-1]
+        if suffix.isdigit() and int(suffix) >= start_number:
+            count += 1
+    return count
 
 
 def _block_run_failed(diagnostics: Mapping[str, Any]) -> bool:
