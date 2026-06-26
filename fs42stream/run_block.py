@@ -106,14 +106,26 @@ class BlockRunner:
         selected = select_current_or_next_block(schedule, now=config.now, schedule_timezone=config.schedule_timezone)
         catch_up_block, catch_up = _catch_up_block_to_wallclock(selected.block, now=config.now, schedule_timezone=config.schedule_timezone)
         planned = self.planner.plan_block(catch_up_block)
-        command = self.builder.build(
-            planned,
-            output_dir=config.output_dir,
-            duration_limit=config.duration_limit,
-            output_name=config.output_name,
-            hls_start_number=config.hls_start_number,
-            hls_append=config.hls_append,
-        )
+        commands: list[list[str]] = []
+        item_blocks: list[PlannedBlock] = []
+        hls_start_number = config.hls_start_number
+        remaining_budget = config.duration_limit
+        for item_index, item in enumerate(planned.items):
+            if remaining_budget <= 0:
+                break
+            item_duration_limit = min(item.duration, remaining_budget) if item.duration > 0 else remaining_budget
+            item_block = _single_item_block(planned, item, item_index=item_index)
+            item_blocks.append(item_block)
+            command = self.builder.build(
+                item_block,
+                output_dir=config.output_dir,
+                duration_limit=item_duration_limit,
+                output_name=config.output_name,
+                hls_start_number=hls_start_number,
+                hls_append=config.hls_append or item_index > 0,
+            )
+            commands.append(command)
+            remaining_budget -= item_duration_limit
 
         diagnostics = _diagnostics(
             status="dry-run" if config.dry_run else "ok",
@@ -123,21 +135,42 @@ class BlockRunner:
             planned=planned,
             output_dir=config.output_dir,
             duration_limit=config.duration_limit,
-            command=command,
+            command=commands[0] if commands else [],
             output_name=config.output_name,
             hls_start_number=config.hls_start_number,
             hls_append=config.hls_append,
             catch_up=catch_up,
         )
+        diagnostics["render_mode"] = "sequential-plan-items"
+        diagnostics["commands"] = commands
+        diagnostics["item_command_count"] = len(commands)
         if config.dry_run:
             return diagnostics
 
-        completed = subprocess.run(command, check=False, shell=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        diagnostics["status"] = "ok" if completed.returncode == 0 else "ffmpeg-error"
+        ffmpeg_runs: list[dict[str, Any]] = []
+        final_returncode = 0
+        for run_index, command in enumerate(commands):
+            completed = subprocess.run(command, check=False, shell=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            run_info = {
+                "index": run_index,
+                "returncode": completed.returncode,
+                "stdout": completed.stdout,
+                "stderr": completed.stderr,
+            }
+            ffmpeg_runs.append(run_info)
+            final_returncode = completed.returncode
+            playlist = Path(diagnostics["playlist"])
+            if playlist.exists():
+                hls_start_number = _next_hls_start_number(playlist, fallback=hls_start_number)
+            if completed.returncode != 0:
+                break
+
+        diagnostics["status"] = "ok" if final_returncode == 0 else "ffmpeg-error"
         diagnostics["ffmpeg"] = {
-            "returncode": completed.returncode,
-            "stdout": completed.stdout,
-            "stderr": completed.stderr,
+            "returncode": final_returncode,
+            "runs": ffmpeg_runs,
+            "stdout": ffmpeg_runs[-1]["stdout"] if ffmpeg_runs else "",
+            "stderr": ffmpeg_runs[-1]["stderr"] if ffmpeg_runs else "",
         }
         playlist = Path(diagnostics["playlist"])
         if playlist.exists():
@@ -148,7 +181,7 @@ class BlockRunner:
                 "segment_count": len(inspection.segments),
                 "has_endlist": inspection.has_endlist,
             }
-            diagnostics["hls_next_start_number"] = config.hls_start_number + len(inspection.segments)
+            diagnostics["hls_next_start_number"] = _next_hls_start_number(playlist, fallback=hls_start_number)
         return diagnostics
 
 
@@ -194,6 +227,31 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 1
     print(json.dumps(diagnostics, indent=2, sort_keys=True))
     return 0
+
+
+def _single_item_block(block: PlannedBlock, item: Any, *, item_index: int) -> PlannedBlock:
+    return PlannedBlock(
+        title=block.title,
+        start_time=block.start_time,
+        end_time=block.end_time,
+        source=block.source,
+        items=[item],
+    )
+
+
+def _next_hls_start_number(playlist: Path, *, fallback: int) -> int:
+    if not playlist.exists():
+        return fallback
+    highest = fallback - 1
+    for line in playlist.read_text(errors="replace").splitlines():
+        text = line.strip()
+        if not text or text.startswith("#"):
+            continue
+        stem = Path(text).stem
+        suffix = stem.rsplit("_", 1)[-1]
+        if suffix.isdigit():
+            highest = max(highest, int(suffix))
+    return max(fallback, highest + 1)
 
 
 def _diagnostics(

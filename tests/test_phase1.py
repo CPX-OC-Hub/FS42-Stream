@@ -262,12 +262,17 @@ class CatchUpBlockRunnerTests(unittest.TestCase):
         class CapturingBuilder:
             def __init__(self):
                 self.block = None
+                self.blocks = []
                 self.kwargs = None
+                self.kwargs_by_call = []
 
             def build(self, block, **kwargs):
-                self.block = block
+                if self.block is None:
+                    self.block = block
+                self.blocks.append(block)
                 self.kwargs = kwargs
-                return ["/usr/bin/ffmpeg", "-version"]
+                self.kwargs_by_call.append(kwargs)
+                return ["/usr/bin/ffmpeg", "-version", str(len(self.blocks))]
 
         probe = mock.Mock(validate_video=mock.Mock(return_value=ProbeResult(1000, 640, 480, 25, 48000, 2)))
         planner = BlockPlanner(PathResolver(fs42_root="/mnt/fs42", sdtv_root="/mnt/media/SDTV"), probe)
@@ -326,8 +331,37 @@ class CatchUpBlockRunnerTests(unittest.TestCase):
         self.assertEqual(builder.block.items[0].source["content_type"], "commercial")
         self.assertEqual(builder.block.items[0].skip, 25.0)
         self.assertEqual(builder.block.items[0].duration, 5.0)
-        self.assertEqual(builder.block.items[1].source["content_type"], "feature")
-        self.assertEqual(builder.block.items[1].skip, 500.0)
+        self.assertEqual(builder.blocks[1].items[0].source["content_type"], "feature")
+        self.assertEqual(builder.blocks[1].items[0].skip, 500.0)
+
+    def test_sequential_renderer_builds_one_ffmpeg_command_per_remaining_plan_item(self):
+        schedule = {
+            "network_name": "Sky One",
+            "schedule_blocks": [
+                {
+                    "title": "Show With Ad Break",
+                    "start_time": "2026-06-25T22:00:00",
+                    "end_time": "2026-06-25T22:30:00",
+                    "plan": [
+                        {"path": "catalog/SkyOne/show.mp4", "duration": 60, "skip": 0, "is_stream": False, "content_type": "feature"},
+                        {"path": "catalog/SkyOne/../commercial/ad.mp4", "duration": 30, "skip": 0, "is_stream": False, "content_type": "commercial"},
+                        {"path": "catalog/SkyOne/show.mp4", "duration": 60, "skip": 60, "is_stream": False, "content_type": "feature"},
+                    ],
+                }
+            ],
+        }
+        runner, builder = self._runner_for(schedule)
+
+        diagnostics = runner.run(BlockRunConfig(now=datetime(2026, 6, 25, 22, 0, 0), dry_run=True, hls_start_number=7, output_name="Sky_One"))
+
+        self.assertEqual(len(builder.blocks), 3)
+        self.assertEqual([block.items[0].source["content_type"] for block in builder.blocks], ["feature", "commercial", "feature"])
+        self.assertEqual([len(block.items) for block in builder.blocks], [1, 1, 1])
+        self.assertEqual([kwargs["hls_start_number"] for kwargs in builder.kwargs_by_call], [7, 7, 7])
+        self.assertEqual([kwargs["hls_append"] for kwargs in builder.kwargs_by_call], [False, True, True])
+        self.assertEqual(len(diagnostics["commands"]), 3)
+        self.assertNotIn("concat=n=3", " ".join(" ".join(cmd) for cmd in diagnostics["commands"]))
+        self.assertEqual(diagnostics["render_mode"], "sequential-plan-items")
 
 
 class FFMpegCommandBuilderTests(unittest.TestCase):
@@ -361,6 +395,16 @@ class FFMpegCommandBuilderTests(unittest.TestCase):
         self.assertGreater(input_indexes, [])
         for index in input_indexes:
             self.assertIn("-re", cmd[max(0, index - 4):index])
+
+    def test_builds_live_playlist_without_event_endlist_mode(self):
+        resolver = PathResolver()
+        probe = mock.Mock(validate_video=mock.Mock(return_value=ProbeResult(1, 320, 240, 25, 44100, 1)))
+        block = BlockPlanner(resolver, probe).plan(SCHEDULE)[0]
+
+        cmd = FFMpegHLSCommandBuilder(ffmpeg="/usr/bin/ffmpeg").build(block, output_dir=Path("/tmp/hls"))
+
+        self.assertNotIn("-hls_playlist_type", cmd)
+        self.assertNotIn("event", cmd)
 
     def test_builds_vaapi_h264_command_when_requested(self):
         resolver = PathResolver()
