@@ -53,10 +53,42 @@ class FakeBlockRunner:
             "playlist": str(playlist),
             "hls": {"playlist": str(playlist), "segments": [str(segment)], "segment_count": 1, "has_endlist": True},
             "hls_next_start_number": index + 1,
-            "ffmpeg": {"returncode": index, "stdout": "", "stderr": ""},
+            "ffmpeg": {"returncode": 0, "stdout": "", "stderr": ""},
             "plan": [
                 {"runtime_action": "generated_fallback_slate" if index == 1 else None, "diagnostic": "fallback used" if index == 1 else None}
             ],
+        }
+
+
+class FailingThenRecoveringBlockRunner:
+    def __init__(self):
+        self.calls = []
+
+    def run(self, config):
+        self.calls.append(config)
+        index = len(self.calls) - 1
+        playlist = config.output_dir / f"recover-{index}.m3u8"
+        segment = config.output_dir / f"recover-{index}_00000.ts"
+        playlist.write_text(f"#EXTM3U\n{segment.name}\n#EXT-X-ENDLIST\n")
+        segment.write_text("segment")
+        if index == 0:
+            return {
+                "status": "ffmpeg-error",
+                "playlist": str(playlist),
+                "hls": {"playlist": str(playlist), "segments": [str(segment)], "segment_count": 1, "has_endlist": True},
+                "hls_next_start_number": 1,
+                "ffmpeg": {"returncode": 1, "stdout": "", "stderr": "boom"},
+                "catch_up": {"applied": True, "media_seek": 300.0},
+                "plan": [],
+            }
+        return {
+            "status": "ok",
+            "playlist": str(playlist),
+            "hls": {"playlist": str(playlist), "segments": [str(segment)], "segment_count": 1, "has_endlist": True},
+            "hls_next_start_number": 2,
+            "ffmpeg": {"returncode": 0, "stdout": "", "stderr": ""},
+            "catch_up": {"applied": True, "media_seek": 360.0},
+            "plan": [],
         }
 
 
@@ -101,7 +133,7 @@ class LiveControllerTests(unittest.TestCase):
             self.assertFalse(stale_playlist.exists())
             self.assertTrue(keep_file.exists())
             complete_events = [event for event in result["events"] if event["event"] == "block_complete"]
-            self.assertEqual([event["ffmpeg_returncode"] for event in complete_events], [0, 1])
+            self.assertEqual([event["ffmpeg_returncode"] for event in complete_events], [0, 0])
             self.assertEqual(complete_events[0]["playlist"], str(channel_dir / "fake-0.m3u8"))
             self.assertEqual(complete_events[1]["runtime_fallback_diagnostics"], ["fallback used"])
             json.dumps(result)
@@ -167,6 +199,45 @@ class LiveControllerTests(unittest.TestCase):
         self.assertEqual(sleeps, [1500.0])
         self.assertEqual([call.duration_limit for call in runner.calls], [1500.0, 1800])
         self.assertEqual(updates[-1]["status"], "complete")
+
+    def test_recovers_failed_ffmpeg_run_at_current_wallclock_without_advancing_block(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            ticks = [
+                datetime(2026, 6, 17, 10, 5, 0),
+                datetime(2026, 6, 17, 10, 6, 0),
+                datetime(2026, 6, 17, 10, 30, 0),
+            ]
+
+            def clock():
+                return ticks.pop(0) if ticks else datetime(2026, 6, 17, 10, 30, 0)
+
+            runner = FailingThenRecoveringBlockRunner()
+            controller = LiveController(schedule_client=FakeScheduleClient(), block_runner=runner)
+
+            result = controller.run(
+                LiveControllerConfig(
+                    channel="Sky One",
+                    output_root=root,
+                    max_blocks=1,
+                    duration_limit=1800,
+                    clock=clock,
+                    sleep=lambda seconds: None,
+                    status_callback=lambda update: None,
+                )
+            )
+
+        self.assertEqual(len(runner.calls), 2)
+        self.assertEqual([call.now for call in runner.calls], [datetime(2026, 6, 17, 10, 5, 0), datetime(2026, 6, 17, 10, 6, 0)])
+        self.assertEqual([call.hls_append for call in runner.calls], [False, True])
+        self.assertEqual([call.hls_start_number for call in runner.calls], [0, 1])
+        self.assertEqual([event["event"] for event in result["events"]], ["block_start", "block_complete", "block_recovery", "block_complete"])
+        self.assertEqual([event["block"]["title"] for event in result["events"] if event["event"] == "block_complete"], ["First Live Block", "First Live Block"])
+        recovery = [event for event in result["events"] if event["event"] == "block_recovery"][0]
+        self.assertEqual(recovery["attempt"], 1)
+        self.assertEqual(recovery["reason"], "ffmpeg-error")
+        self.assertEqual(recovery["recover_at"], "2026-06-17T10:06:00")
+        self.assertEqual(result["status"], "complete")
 
     def test_complete_event_exposes_plan_item_and_commercial_diagnostics(self):
         with tempfile.TemporaryDirectory() as tmp:
