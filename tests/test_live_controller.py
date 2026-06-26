@@ -92,6 +92,24 @@ class FailingThenRecoveringBlockRunner:
         }
 
 
+class FakeFillerRunner:
+    def __init__(self, on_run=None):
+        self.calls = []
+        self.on_run = on_run
+
+    def run(self, **kwargs):
+        self.calls.append(kwargs)
+        if self.on_run is not None:
+            self.on_run(kwargs)
+        return {
+            "status": "ok",
+            "playlist": str(kwargs["output_dir"] / f"{kwargs['output_name']}.m3u8"),
+            "hls_next_start_number": kwargs["hls_start_number"] + 3,
+            "hls": {"segment_count": 3, "segments": []},
+            "ffmpeg": {"returncode": 0, "stdout": "", "stderr": ""},
+        }
+
+
 class LiveControllerTests(unittest.TestCase):
     def test_runs_two_blocks_in_order_cleans_stale_hls_files_and_emits_json_events(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -127,7 +145,7 @@ class LiveControllerTests(unittest.TestCase):
             self.assertEqual([call.output_dir for call in runner.calls], [channel_dir, channel_dir])
             self.assertEqual([call.output_name for call in runner.calls], ["Sky_One", "Sky_One"])
             self.assertEqual([call.duration_limit for call in runner.calls], [10, 10])
-            self.assertEqual([call.hls_start_number for call in runner.calls], [0, 0])
+            self.assertEqual([call.hls_start_number for call in runner.calls], [0, 1])
             self.assertEqual([call.hls_append for call in runner.calls], [False, True])
             self.assertFalse(stale_segment.exists())
             self.assertFalse(stale_playlist.exists())
@@ -178,7 +196,8 @@ class LiveControllerTests(unittest.TestCase):
                 current[0] = datetime(2026, 6, 17, 10, 30, 0)
 
             runner = FakeBlockRunner()
-            controller = LiveController(schedule_client=FakeScheduleClient(), block_runner=runner)
+            filler = FakeFillerRunner(on_run=lambda kwargs: current.__setitem__(0, datetime(2026, 6, 17, 10, 30, 0)))
+            controller = LiveController(schedule_client=FakeScheduleClient(), block_runner=runner, filler_runner=filler)
 
             result = controller.run(
                 LiveControllerConfig(
@@ -196,9 +215,49 @@ class LiveControllerTests(unittest.TestCase):
         started = [event["block"]["title"] for event in result["events"] if event["event"] == "block_start"]
         self.assertEqual(started, ["First Live Block", "Second Live Block"])
         self.assertLess(event_names.index("block_wait_until_boundary"), event_names.index("block_start", 3))
-        self.assertEqual(sleeps, [1500.0])
+        self.assertIn("block_filler", event_names)
+        self.assertEqual(sleeps, [])
         self.assertEqual([call.duration_limit for call in runner.calls], [1500.0, 1800])
         self.assertEqual(updates[-1]["status"], "complete")
+
+    def test_runs_filler_hls_during_wait_when_block_finishes_before_boundary(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            sleeps = []
+            updates = []
+            current = [datetime(2026, 6, 17, 10, 5, 0)]
+
+            def sleep_until_boundary(seconds):
+                sleeps.append(seconds)
+                current[0] = datetime(2026, 6, 17, 10, 30, 0)
+
+            runner = FakeBlockRunner()
+            filler = FakeFillerRunner(on_run=lambda kwargs: current.__setitem__(0, datetime(2026, 6, 17, 10, 30, 0)))
+            controller = LiveController(schedule_client=FakeScheduleClient(), block_runner=runner, filler_runner=filler)
+
+            result = controller.run(
+                LiveControllerConfig(
+                    channel="Sky One",
+                    output_root=Path(tmp),
+                    max_blocks=2,
+                    duration_limit=1800,
+                    clock=lambda: current[0],
+                    sleep=sleep_until_boundary,
+                    status_callback=updates.append,
+                )
+            )
+
+        self.assertEqual(len(filler.calls), 1)
+        self.assertEqual(filler.calls[0]["duration"], 1500.0)
+        self.assertEqual(filler.calls[0]["hls_append"], True)
+        self.assertEqual(filler.calls[0]["hls_start_number"], 1)
+        self.assertEqual(filler.calls[0]["output_name"], "Sky_One")
+        self.assertEqual(sleeps, [])
+        self.assertIn("block_filler", [event["event"] for event in result["events"]])
+        filler_event = [event for event in result["events"] if event["event"] == "block_filler"][0]
+        self.assertEqual(filler_event["duration"], 1500.0)
+        self.assertEqual(filler_event["hls_start_number"], 1)
+        self.assertEqual(filler_event["hls_next_start_number"], 4)
+        self.assertEqual([call.hls_start_number for call in runner.calls], [0, 4])
 
     def test_recovers_failed_ffmpeg_run_at_current_wallclock_without_advancing_block(self):
         with tempfile.TemporaryDirectory() as tmp:
