@@ -396,6 +396,38 @@ class FFMpegCommandBuilderTests(unittest.TestCase):
         for index in input_indexes:
             self.assertIn("-re", cmd[max(0, index - 4):index])
 
+    def test_builds_transition_safe_hls_profile_for_vlc_live_edge(self):
+        resolver = PathResolver()
+        probe = mock.Mock(validate_video=mock.Mock(return_value=ProbeResult(1, 320, 240, 25, 44100, 1)))
+        block = BlockPlanner(resolver, probe).plan(SCHEDULE)[0]
+
+        cmd = FFMpegHLSCommandBuilder(ffmpeg="/usr/bin/ffmpeg").build(block, output_dir=Path("/tmp/hls"))
+
+        joined = " ".join(cmd)
+        self.assertIn("-hls_time 2", joined)
+        self.assertIn("-hls_list_size 12", joined)
+        self.assertIn("-g 50", joined)
+        self.assertIn("-keyint_min 50", joined)
+        self.assertIn("-sc_threshold 0", joined)
+
+    def test_builds_vaapi_transition_safe_gop_without_unsupported_x264_scene_cut_flags(self):
+        resolver = PathResolver()
+        probe = mock.Mock(validate_video=mock.Mock(return_value=ProbeResult(1, 320, 240, 25, 44100, 1)))
+        block = BlockPlanner(resolver, probe).plan(SCHEDULE)[0]
+
+        cmd = FFMpegHLSCommandBuilder(
+            ffmpeg="/usr/bin/ffmpeg",
+            video_encoder="h264_vaapi",
+            vaapi_device="/dev/dri/renderD128",
+        ).build(block, output_dir=Path("/tmp/hls"), output_name="Sky_One")
+
+        joined = " ".join(cmd)
+        self.assertIn("-hls_time 2", joined)
+        self.assertIn("-hls_list_size 12", joined)
+        self.assertIn("-g 50", joined)
+        self.assertNotIn("-keyint_min", cmd)
+        self.assertNotIn("-sc_threshold", cmd)
+
     def test_builds_live_playlist_without_event_endlist_mode(self):
         resolver = PathResolver()
         probe = mock.Mock(validate_video=mock.Mock(return_value=ProbeResult(1, 320, 240, 25, 44100, 1)))

@@ -54,9 +54,9 @@ class FFMpegHLSCommandBuilder:
         segment_pattern = output_dir / f"{output_slug}_%05d.ts"
         video_args = ["-c:v", self.video_encoder]
         if self.video_encoder.endswith("_vaapi"):
-            video_args.extend(["-qp", "23"])
+            video_args.extend(["-qp", "23", "-g", "50"])
         else:
-            video_args.extend(["-preset", "veryfast", "-crf", "23"])
+            video_args.extend(["-preset", "veryfast", "-crf", "23", "-g", "50", "-keyint_min", "50", "-sc_threshold", "0"])
         cmd.extend(
             [
                 "-filter_complex",
@@ -76,7 +76,7 @@ class FFMpegHLSCommandBuilder:
         )
         if duration_limit is not None:
             cmd.extend(["-t", self._num(duration_limit)])
-        hls_args = ["-f", "hls", "-hls_time", "6"]
+        hls_args = ["-f", "hls", "-hls_time", "2", "-hls_list_size", "12"]
         if not hls_append or hls_start_number:
             hls_args.extend(["-start_number", str(hls_start_number)])
         hls_flags = ["omit_endlist"]
