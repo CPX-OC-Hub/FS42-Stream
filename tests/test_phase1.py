@@ -405,6 +405,20 @@ class FFMpegCommandBuilderTests(unittest.TestCase):
 
         self.assertNotIn("-hls_playlist_type", cmd)
         self.assertNotIn("event", cmd)
+        joined = " ".join(cmd)
+        self.assertIn("omit_endlist", joined)
+
+    def test_append_commands_omit_endlist_between_internal_plan_items(self):
+        resolver = PathResolver()
+        probe = mock.Mock(validate_video=mock.Mock(return_value=ProbeResult(1, 320, 240, 25, 44100, 1)))
+        block = BlockPlanner(resolver, probe).plan(SCHEDULE)[0]
+
+        cmd = FFMpegHLSCommandBuilder(ffmpeg="/usr/bin/ffmpeg").build(block, output_dir=Path("/tmp/hls"), hls_append=True, hls_start_number=10)
+
+        joined = " ".join(cmd)
+        self.assertIn("append_list", joined)
+        self.assertIn("discont_start", joined)
+        self.assertIn("omit_endlist", joined)
 
     def test_builds_vaapi_h264_command_when_requested(self):
         resolver = PathResolver()
@@ -456,7 +470,7 @@ class FFMpegCommandBuilderTests(unittest.TestCase):
 
         joined = " ".join(cmd)
         self.assertIn("-start_number 42", joined)
-        self.assertIn("-hls_flags append_list+discont_start", joined)
+        self.assertIn("-hls_flags omit_endlist+append_list+discont_start", joined)
         self.assertIn("/tmp/hls/Sky_One_%05d.ts", joined)
         self.assertEqual(cmd[-1], "/tmp/hls/Sky_One.m3u8")
 
