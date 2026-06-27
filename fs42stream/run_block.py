@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from .client import FS42ScheduleClient
-from .ffmpeg import FFMpegHLSCommandBuilder
+from .ffmpeg import FFMpegHLSCommandBuilder, StreamProfile
 from .ffprobe import FFProbe
 from .hls_harness import inspect_hls_output
 from .paths import PathResolver
@@ -44,6 +44,7 @@ class BlockRunConfig:
     hls_start_number: int = 0
     hls_append: bool = False
     schedule_timezone: str | None = DEFAULT_SCHEDULE_TIMEZONE
+    stream_profile: StreamProfile = "direct"
 
 
 def select_current_or_next_block(schedule: Mapping[str, Any], *, now: datetime | None = None, schedule_timezone: str | None = DEFAULT_SCHEDULE_TIMEZONE) -> SelectedBlock:
@@ -100,6 +101,8 @@ class BlockRunner:
     def run(self, config: BlockRunConfig) -> dict[str, Any]:
         if config.duration_limit <= 0:
             raise ValueError("duration_limit must be positive")
+        if config.stream_profile not in {"direct", "jellyfin"}:
+            raise ValueError("stream_profile must be 'direct' or 'jellyfin'")
         config.output_dir.mkdir(parents=True, exist_ok=True)
 
         schedule = self.client.fetch_schedule(config.channel, expected_blocks=None)
@@ -110,22 +113,36 @@ class BlockRunner:
         item_blocks: list[PlannedBlock] = []
         hls_start_number = config.hls_start_number
         remaining_budget = config.duration_limit
-        for item_index, item in enumerate(planned.items):
-            if remaining_budget <= 0:
-                break
-            item_duration_limit = min(item.duration, remaining_budget) if item.duration > 0 else remaining_budget
-            item_block = _single_item_block(planned, item, item_index=item_index)
-            item_blocks.append(item_block)
+        if config.stream_profile == "jellyfin":
+            item_blocks.append(planned)
             command = self.builder.build(
-                item_block,
+                planned,
                 output_dir=config.output_dir,
-                duration_limit=item_duration_limit,
+                duration_limit=config.duration_limit,
                 output_name=config.output_name,
-                hls_start_number=hls_start_number,
-                hls_append=config.hls_append or item_index > 0,
+                hls_start_number=config.hls_start_number,
+                hls_append=False,
+                stream_profile=config.stream_profile,
             )
             commands.append(command)
-            remaining_budget -= item_duration_limit
+        else:
+            for item_index, item in enumerate(planned.items):
+                if remaining_budget <= 0:
+                    break
+                item_duration_limit = min(item.duration, remaining_budget) if item.duration > 0 else remaining_budget
+                item_block = _single_item_block(planned, item, item_index=item_index)
+                item_blocks.append(item_block)
+                command = self.builder.build(
+                    item_block,
+                    output_dir=config.output_dir,
+                    duration_limit=item_duration_limit,
+                    output_name=config.output_name,
+                    hls_start_number=hls_start_number,
+                    hls_append=config.hls_append or item_index > 0,
+                    stream_profile=config.stream_profile,
+                )
+                commands.append(command)
+                remaining_budget -= item_duration_limit
 
         diagnostics = _diagnostics(
             status="dry-run" if config.dry_run else "ok",
@@ -139,9 +156,11 @@ class BlockRunner:
             output_name=config.output_name,
             hls_start_number=config.hls_start_number,
             hls_append=config.hls_append,
+            stream_profile=config.stream_profile,
             catch_up=catch_up,
         )
-        diagnostics["render_mode"] = "sequential-plan-items"
+        diagnostics["render_mode"] = "jellyfin-monotonic-block" if config.stream_profile == "jellyfin" else "sequential-plan-items"
+        diagnostics["stream_profile"] = config.stream_profile
         diagnostics["commands"] = commands
         diagnostics["item_command_count"] = len(commands)
         if config.dry_run:
@@ -203,6 +222,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--now", help="override current time for deterministic tests, e.g. 2026-06-17T10:05:00")
     parser.add_argument("--output-name", help="stable HLS playlist/segment prefix, e.g. Sky_One")
     parser.add_argument("--dry-run", action="store_true", help="validate and print command without running ffmpeg")
+    parser.add_argument("--stream-profile", choices=("direct", "jellyfin"), default="direct", help="HLS packaging profile; jellyfin avoids discontinuity tags and offsets timestamps")
     args = parser.parse_args(argv)
 
     runner = BlockRunner(
@@ -218,6 +238,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         dry_run=args.dry_run,
         output_name=args.output_name,
         schedule_timezone=args.schedule_timezone,
+        stream_profile=args.stream_profile,
     )
     try:
         diagnostics = runner.run(config)
@@ -267,6 +288,7 @@ def _diagnostics(
     output_name: str | None = None,
     hls_start_number: int = 0,
     hls_append: bool = False,
+    stream_profile: StreamProfile = "direct",
     catch_up: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     output_slug = FFMpegHLSCommandBuilder._slug(output_name or planned.title)
@@ -281,6 +303,7 @@ def _diagnostics(
         "playlist": str(playlist),
         "hls_start_number": hls_start_number,
         "hls_append": hls_append,
+        "stream_profile": stream_profile,
         "catch_up": dict(catch_up or {"applied": False}),
         **type_summary,
         "selection": {

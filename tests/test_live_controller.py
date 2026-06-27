@@ -267,6 +267,31 @@ class LiveControllerTests(unittest.TestCase):
         self.assertEqual(updates[-1]["status"], "complete")
         self.assertEqual(result["status"], "complete")
 
+    def test_jellyfin_profile_writes_isolated_hls_directory_and_passes_profile_to_runner(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runner = FakeBlockRunner()
+            updates = []
+            controller = LiveController(schedule_client=FakeScheduleClient(), block_runner=runner)
+
+            result = controller.run(
+                LiveControllerConfig(
+                    channel="Sky One",
+                    output_root=Path(tmp),
+                    max_blocks=1,
+                    duration_limit=10,
+                    now=datetime(2026, 6, 17, 10, 5, 0),
+                    status_callback=updates.append,
+                    stream_profile="jellyfin",
+                )
+            )
+
+        jellyfin_dir = Path(tmp) / "Sky_One" / "jellyfin"
+        self.assertEqual(runner.calls[0].output_dir, jellyfin_dir)
+        self.assertEqual(runner.calls[0].output_name, "Sky_One")
+        self.assertEqual(runner.calls[0].stream_profile, "jellyfin")
+        self.assertEqual(result["stream_profile"], "jellyfin")
+        self.assertEqual(result["channel_output_dir"], str(jellyfin_dir))
+        self.assertEqual(updates[0]["hls"]["playlist"], str(jellyfin_dir / "Sky_One.m3u8"))
 
     def test_does_not_start_future_block_when_current_block_finishes_before_wallclock_boundary(self):
         with tempfile.TemporaryDirectory() as tmp:

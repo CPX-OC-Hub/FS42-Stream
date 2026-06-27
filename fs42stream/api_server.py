@@ -75,6 +75,8 @@ class FS42APIRequestHandler(BaseHTTPRequestHandler):
                             "epg_url": f"/api/channels/{DEFAULT_CHANNEL_SLUG}/epg",
                             "hls_url": f"/hls/{DEFAULT_CHANNEL_SLUG}/",
                             "hls_playlist_url": f"/hls/{DEFAULT_CHANNEL_SLUG}/{DEFAULT_CHANNEL_SLUG}.m3u8",
+                            "jellyfin_hls_playlist_url": f"/hls/{DEFAULT_CHANNEL_SLUG}/jellyfin/{DEFAULT_CHANNEL_SLUG}.m3u8",
+                            "jellyfin_iptv_url": "/iptv/jellyfin/channels.m3u",
                         }
                     ]
                 },
@@ -107,6 +109,10 @@ class FS42APIRequestHandler(BaseHTTPRequestHandler):
 
         if request_path == "/iptv/channels.m3u":
             self._handle_iptv_channels_m3u()
+            return
+
+        if request_path == "/iptv/jellyfin/channels.m3u":
+            self._handle_iptv_channels_m3u(stream_profile="jellyfin")
             return
 
         iptv_channel_prefix = "/iptv/channels/"
@@ -196,11 +202,11 @@ class FS42APIRequestHandler(BaseHTTPRequestHandler):
             return
         self._send_json(HTTPStatus.OK, _epg_payload(status_payload, channel_slug=channel_slug))
 
-    def _handle_iptv_channels_m3u(self, *, single_slug: str | None = None) -> None:
+    def _handle_iptv_channels_m3u(self, *, single_slug: str | None = None, stream_profile: str = "direct") -> None:
         if single_slug is not None and single_slug != DEFAULT_CHANNEL_SLUG:
             self._send_error(HTTPStatus.NOT_FOUND, "channel_not_found", f"unknown channel: {single_slug}")
             return
-        body = _m3u_payload(base_url=self._request_base_url()).encode("utf-8")
+        body = _m3u_payload(base_url=self._request_base_url(), stream_profile=stream_profile).encode("utf-8")
         self._send_bytes(HTTPStatus.OK, body, "application/vnd.apple.mpegurl")
 
     def _handle_iptv_xmltv(self) -> None:
@@ -561,12 +567,17 @@ def _programme_rows(status_payload: Mapping[str, Any], *, channel_id: str) -> li
     return rows
 
 
-def _m3u_payload(*, base_url: str) -> str:
+def _m3u_payload(*, base_url: str, stream_profile: str = "direct") -> str:
     channel = _channel_metadata()
-    hls_url = f"{base_url}/hls/{channel['slug']}/{channel['slug']}.m3u8"
+    display_name = channel["name"]
+    if stream_profile == "jellyfin":
+        display_name = f"{channel['name']} (Jellyfin)"
+        hls_url = f"{base_url}/hls/{channel['slug']}/jellyfin/{channel['slug']}.m3u8"
+    else:
+        hls_url = f"{base_url}/hls/{channel['slug']}/{channel['slug']}.m3u8"
     return "\n".join([
         "#EXTM3U",
-        f"#EXTINF:-1 tvg-id=\"{channel['id']}\" tvg-name=\"{channel['name']}\" tvg-logo=\"\" group-title=\"FS42\",{channel['name']}",
+        f"#EXTINF:-1 tvg-id=\"{channel['id']}\" tvg-name=\"{display_name}\" tvg-logo=\"\" group-title=\"FS42\",{display_name}",
         hls_url,
         "",
     ])
