@@ -2,11 +2,12 @@ import json
 import subprocess
 import tempfile
 import unittest
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from unittest import mock
 
-from fs42stream.live_controller import LiveController, LiveControllerConfig, main
+from fs42stream.live_controller import HLSBlackSlateFillerRunner, LiveController, LiveControllerConfig, main
+from fs42stream.systemd_service import ServiceConfig
 
 
 SCHEDULE = {
@@ -110,7 +111,89 @@ class FakeFillerRunner:
         }
 
 
+class DurationConsumingBlockRunner:
+    def __init__(self, current):
+        self.calls = []
+        self.current = current
+
+    def run(self, config):
+        self.calls.append(config)
+        self.current[0] = self.current[0] + timedelta(seconds=config.duration_limit)
+        playlist = config.output_dir / "consume.m3u8"
+        segment = config.output_dir / "consume_00000.ts"
+        playlist.write_text(f"#EXTM3U\n{segment.name}\n")
+        segment.write_text("segment")
+        return {
+            "status": "ok",
+            "playlist": str(playlist),
+            "hls": {"playlist": str(playlist), "segments": [str(segment)], "segment_count": 1, "has_endlist": False},
+            "hls_next_start_number": len(self.calls),
+            "ffmpeg": {"returncode": 0, "stdout": "", "stderr": ""},
+            "plan": [],
+        }
+
+
+class LongBlockScheduleClient:
+    def fetch_schedule(self, channel, expected_blocks=None):
+        return {
+            "network_name": "Sky One",
+            "schedule_blocks": [
+                {
+                    "title": "Wwf Raw Is War",
+                    "start_time": "2026-06-27T11:00:00",
+                    "end_time": "2026-06-27T12:30:00",
+                    "plan": [{"path": "catalog/raw.mp4", "duration": 5400, "skip": 0, "is_stream": False}],
+                },
+                {
+                    "title": "Next Block",
+                    "start_time": "2026-06-27T12:30:00",
+                    "end_time": "2026-06-27T13:00:00",
+                    "plan": [{"path": "catalog/next.mp4", "duration": 1800, "skip": 0, "is_stream": False}],
+                },
+            ],
+        }
+
+
 class LiveControllerTests(unittest.TestCase):
+    def test_boundary_filler_uses_transition_safe_hls_cadence(self):
+        with tempfile.TemporaryDirectory() as tmp, mock.patch(
+            "subprocess.run",
+            return_value=subprocess.CompletedProcess(["ffmpeg"], 0, stdout="", stderr=""),
+        ) as run:
+            HLSBlackSlateFillerRunner("/usr/bin/ffmpeg").run(
+                output_dir=Path(tmp),
+                output_name="Sky_One",
+                duration=3596,
+                hls_start_number=12,
+                hls_append=True,
+            )
+
+        command = run.call_args.args[0]
+        self.assertIn(["-hls_time", "2"], [command[index:index + 2] for index in range(len(command) - 1)])
+        self.assertIn("-hls_flags", command)
+        self.assertIn("omit_endlist+append_list+discont_start", command)
+
+    def test_service_duration_default_spans_ninety_minute_block_without_boundary_filler(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            current = [datetime(2026, 6, 27, 11, 0, 0)]
+            runner = DurationConsumingBlockRunner(current)
+            filler = FakeFillerRunner()
+            controller = LiveController(schedule_client=LongBlockScheduleClient(), block_runner=runner, filler_runner=filler)
+
+            result = controller.run(
+                LiveControllerConfig(
+                    channel="Sky One",
+                    output_root=Path(tmp),
+                    max_blocks=2,
+                    duration_limit=ServiceConfig().duration_limit,
+                    clock=lambda: current[0],
+                )
+            )
+
+        self.assertEqual(runner.calls[0].duration_limit, 5400.0)
+        self.assertEqual(filler.calls, [])
+        self.assertNotIn("block_filler", [event["event"] for event in result["events"]])
+
     def test_runs_two_blocks_in_order_cleans_stale_hls_files_and_emits_json_events(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

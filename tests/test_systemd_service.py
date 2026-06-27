@@ -5,6 +5,14 @@ from fs42stream.systemd_service import ServiceConfig, render_environment_file, r
 
 
 class SystemdServiceTests(unittest.TestCase):
+    def test_service_default_duration_covers_long_fs42_blocks(self):
+        config = ServiceConfig()
+
+        env = render_environment_file(config)
+
+        self.assertGreaterEqual(config.duration_limit, 5400.0)
+        self.assertIn('FS42STREAM_DURATION_LIMIT="7200"', env)
+
     def test_renders_environment_file_with_service_defaults(self):
         config = ServiceConfig(
             channel="Sky One",
@@ -12,7 +20,7 @@ class SystemdServiceTests(unittest.TestCase):
             port=8088,
             output_root=Path("/var/lib/fs42stream/hls"),
             max_blocks=1000000,
-            duration_limit=1800.0,
+            duration_limit=7200.0,
             video_encoder="h264_vaapi",
             vaapi_device="/dev/dri/renderD128",
         )
@@ -24,7 +32,7 @@ class SystemdServiceTests(unittest.TestCase):
         self.assertIn('FS42STREAM_PORT="8088"', env)
         self.assertIn('FS42STREAM_OUTPUT_ROOT="/var/lib/fs42stream/hls"', env)
         self.assertIn('FS42STREAM_MAX_BLOCKS="1000000"', env)
-        self.assertIn('FS42STREAM_DURATION_LIMIT="1800"', env)
+        self.assertIn('FS42STREAM_DURATION_LIMIT="7200"', env)
         self.assertIn('FS42STREAM_VIDEO_ENCODER="h264_vaapi"', env)
         self.assertIn('FS42STREAM_VAAPI_DEVICE="/dev/dri/renderD128"', env)
 
