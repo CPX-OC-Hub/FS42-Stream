@@ -11,7 +11,7 @@ from typing import Any, Callable, Mapping, Protocol, Sequence, cast
 
 from .api_server import DEFAULT_HOST, DEFAULT_OUTPUT_ROOT, DEFAULT_PORT, create_server
 from .client import FS42ScheduleClient
-from .ffmpeg import FFMpegHLSCommandBuilder
+from .ffmpeg import FFMpegHLSCommandBuilder, StreamProfile
 from .ffprobe import FFProbe
 from .live_controller import LiveController, LiveControllerConfig
 from .paths import PathResolver
@@ -36,6 +36,7 @@ class IntegratedRunnerConfig:
     video_encoder: str = "libx264"
     vaapi_device: str | None = None
     schedule_timezone: str | None = DEFAULT_SCHEDULE_TIMEZONE
+    stream_profiles: tuple[StreamProfile, ...] = ("direct", "jellyfin")
 
 
 class IntegratedServer(Protocol):
@@ -66,6 +67,14 @@ def run_integrated(
         raise ValueError("max_blocks must be positive")
     if config.duration_limit <= 0:
         raise ValueError("duration_limit must be positive")
+    stream_profiles = tuple(config.stream_profiles)
+    if not stream_profiles:
+        raise ValueError("at least one stream profile is required")
+    invalid_profiles = [profile for profile in stream_profiles if profile not in {"direct", "jellyfin"}]
+    if invalid_profiles:
+        raise ValueError("stream_profiles must contain only 'direct' or 'jellyfin'")
+    if len(set(stream_profiles)) != len(stream_profiles):
+        raise ValueError("stream_profiles must not contain duplicates")
 
     output_root = Path(config.output_root)
     output_root.mkdir(parents=True, exist_ok=True)
@@ -79,6 +88,7 @@ def run_integrated(
             "output_root": str(output_root),
             "max_blocks": config.max_blocks,
             "duration_limit": config.duration_limit,
+            "stream_profiles": list(stream_profiles),
             "schedule_timezone": config.schedule_timezone,
             "updated_at": _utc_now(),
         },
@@ -103,33 +113,63 @@ def run_integrated(
         "max_blocks": config.max_blocks,
         "blocks_completed": 0,
         "duration_limit": config.duration_limit,
+        "stream_profiles": list(stream_profiles),
         "schedule_timezone": config.schedule_timezone,
         "updated_at": _utc_now(),
     }
     _write_status(status_json, running_status)
 
     try:
-        controller = controller_factory()
+        primary_profile = "direct" if "direct" in stream_profiles else stream_profiles[0]
 
         def write_live_status(update: Mapping[str, Any]) -> None:
             live_status = dict(running_status)
             live_status.update(dict(update))
+            live_status["stream_profiles"] = list(stream_profiles)
             live_status["updated_at"] = _utc_now()
             _write_status(status_json, live_status)
 
-        result = dict(
-            controller.run(
-                LiveControllerConfig(
-                    channel=config.channel,
-                    output_root=output_root,
-                    max_blocks=config.max_blocks,
-                    duration_limit=config.duration_limit,
-                    dry_run=config.dry_run,
-                    status_callback=write_live_status,
-                    schedule_timezone=config.schedule_timezone,
+        results: dict[StreamProfile, dict[str, Any]] = {}
+        errors: dict[StreamProfile, BaseException] = {}
+        result_lock = threading.Lock()
+
+        def run_profile(profile: StreamProfile) -> None:
+            try:
+                controller = controller_factory()
+                profile_result = dict(
+                    controller.run(
+                        LiveControllerConfig(
+                            channel=config.channel,
+                            output_root=output_root,
+                            max_blocks=config.max_blocks,
+                            duration_limit=config.duration_limit,
+                            dry_run=config.dry_run,
+                            status_callback=write_live_status if profile == primary_profile else None,
+                            schedule_timezone=config.schedule_timezone,
+                            stream_profile=profile,
+                        )
+                    )
                 )
-            )
-        )
+            except BaseException as exc:
+                with result_lock:
+                    errors[profile] = exc
+                return
+            with result_lock:
+                results[profile] = profile_result
+
+        profile_threads = [threading.Thread(target=run_profile, args=(profile,), name=f"fs42stream-{profile}") for profile in stream_profiles]
+        for profile_thread in profile_threads:
+            profile_thread.start()
+        for profile_thread in profile_threads:
+            profile_thread.join()
+
+        if errors:
+            profile, exc = next(iter(errors.items()))
+            raise RuntimeError(f"{profile} stream profile failed: {exc}") from exc
+
+        result = dict(results[primary_profile])
+        result["stream_profiles"] = list(stream_profiles)
+        result["profile_statuses"] = {profile: results[profile] for profile in stream_profiles}
         final_status = dict(running_status)
         final_status.update(result)
         final_status["status"] = str(result.get("status") or "complete")
