@@ -104,12 +104,16 @@ class HLSBlackSlateFillerRunner:
             "-f",
             "hls",
             "-hls_time",
-            "6",
+            "2",
+            "-hls_list_size",
+            "12",
             "-start_number",
             str(hls_start_number),
         ]
         if hls_append:
-            command.extend(["-hls_flags", "append_list+discont_start"])
+            command.extend(["-hls_flags", "omit_endlist+append_list+discont_start"])
+        else:
+            command.extend(["-hls_flags", "omit_endlist"])
         command.extend(["-hls_segment_filename", str(segment_pattern), str(playlist)])
         completed = subprocess.run(command, check=False, shell=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         segment_count = _count_hls_segments_from(playlist, start_number=hls_start_number)
