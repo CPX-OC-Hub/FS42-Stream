@@ -47,6 +47,8 @@ class APIServerTests(unittest.TestCase):
             self.assertEqual(payload["channels"][0]["status_url"], "/api/channels/Sky_One/status")
             self.assertEqual(payload["channels"][0]["schedule_url"], "/api/channels/Sky_One/schedule")
             self.assertEqual(payload["channels"][0]["hls_url"], "/hls/Sky_One/")
+            self.assertEqual(payload["channels"][0]["jellyfin_hls_playlist_url"], "/hls/Sky_One/jellyfin/Sky_One.m3u8")
+            self.assertEqual(payload["channels"][0]["jellyfin_iptv_url"], "/iptv/jellyfin/channels.m3u")
 
     def test_channel_status_exposes_latest_status_json_when_present(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -363,6 +365,13 @@ class APIServerTests(unittest.TestCase):
             self.assertEqual([programme.attrib["channel"] for programme in programmes], ["fs42.sky_one", "fs42.sky_one"])
             self.assertEqual(programmes[0].findtext("title"), "Show A")
             self.assertEqual(programmes[0].attrib["start"], "20260625220000 +0100")
+
+            status, headers, body = self._request(server, "/iptv/jellyfin/channels.m3u")
+            self.assertEqual(status, 200)
+            self.assertEqual(headers["content-type"], "application/vnd.apple.mpegurl")
+            jellyfin_m3u = body.decode("utf-8")
+            self.assertIn('#EXTINF:-1 tvg-id="fs42.sky_one" tvg-name="Sky One (Jellyfin)" tvg-logo="" group-title="FS42",Sky One (Jellyfin)', jellyfin_m3u)
+            self.assertIn(f"http://127.0.0.1:{port}/hls/Sky_One/jellyfin/Sky_One.m3u8", jellyfin_m3u)
 
             status, headers, body = self._request(server, "/api/channels/Sky_One/epg")
             self.assertEqual(status, 200)

@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol, Sequence
 
 from .client import FS42ScheduleClient
-from .ffmpeg import FFMpegHLSCommandBuilder
+from .ffmpeg import FFMpegHLSCommandBuilder, StreamProfile
 from .ffprobe import FFProbe
 from .paths import PathResolver
 from .planner import BlockPlanner
@@ -49,6 +49,7 @@ class LiveControllerConfig:
     max_recovery_attempts_per_block: int = 1
     clock: Callable[[], datetime] = _utc_now
     sleep: Callable[[float], None] = time.sleep
+    stream_profile: StreamProfile = "direct"
 
 
 class ScheduleClient(Protocol):
@@ -60,14 +61,14 @@ class SingleBlockRunner(Protocol):
 
 
 class BoundaryFillerRunner(Protocol):
-    def run(self, *, output_dir: Path, output_name: str, duration: float, hls_start_number: int, hls_append: bool = True) -> Mapping[str, Any]: ...
+    def run(self, *, output_dir: Path, output_name: str, duration: float, hls_start_number: int, hls_append: bool = True, stream_profile: StreamProfile = "direct") -> Mapping[str, Any]: ...
 
 
 class HLSBlackSlateFillerRunner:
     def __init__(self, ffmpeg: str = DEFAULT_FFMPEG) -> None:
         self.ffmpeg = ffmpeg
 
-    def run(self, *, output_dir: Path, output_name: str, duration: float, hls_start_number: int, hls_append: bool = True) -> Mapping[str, Any]:
+    def run(self, *, output_dir: Path, output_name: str, duration: float, hls_start_number: int, hls_append: bool = True, stream_profile: StreamProfile = "direct") -> Mapping[str, Any]:
         if duration <= 0:
             raise ValueError("duration must be positive")
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -110,8 +111,13 @@ class HLSBlackSlateFillerRunner:
             "-start_number",
             str(hls_start_number),
         ]
+        if stream_profile == "jellyfin":
+            command.extend(["-avoid_negative_ts", "make_zero"])
+            if hls_start_number > 0:
+                command.extend(["-output_ts_offset", _num(hls_start_number * 2.0)])
         if hls_append:
-            command.extend(["-hls_flags", "omit_endlist+append_list+discont_start"])
+            hls_flags = "omit_endlist+append_list" if stream_profile == "jellyfin" else "omit_endlist+append_list+discont_start"
+            command.extend(["-hls_flags", hls_flags])
         else:
             command.extend(["-hls_flags", "omit_endlist"])
         command.extend(["-hls_segment_filename", str(segment_pattern), str(playlist)])
@@ -141,8 +147,12 @@ class LiveController:
             raise ValueError("max_blocks must be positive")
         if config.duration_limit <= 0:
             raise ValueError("duration_limit must be positive")
+        if config.stream_profile not in {"direct", "jellyfin"}:
+            raise ValueError("stream_profile must be 'direct' or 'jellyfin'")
 
         channel_output_dir = config.output_root / FFMpegHLSCommandBuilder._slug(config.channel)
+        if config.stream_profile == "jellyfin":
+            channel_output_dir = channel_output_dir / "jellyfin"
         channel_output_dir.mkdir(parents=True, exist_ok=True)
 
         events: list[dict[str, Any]] = []
@@ -197,6 +207,7 @@ class LiveController:
                     hls_start_number=block_hls_start_number,
                     hls_append=block_hls_append,
                     schedule_timezone=config.schedule_timezone,
+                    stream_profile=config.stream_profile,
                 )
             )
             diagnostics_dict = dict(diagnostics)
@@ -258,6 +269,7 @@ class LiveController:
                                 hls_start_number=hls_start_number,
                                 hls_append=True,
                                 schedule_timezone=config.schedule_timezone,
+                                stream_profile=config.stream_profile,
                             )
                         )
                     )
@@ -307,6 +319,7 @@ class LiveController:
                             duration=wait_seconds,
                             hls_start_number=hls_start_number,
                             hls_append=True,
+                            stream_profile=config.stream_profile,
                         )
                     )
                     events.append(
@@ -344,6 +357,7 @@ class LiveController:
             "max_blocks": config.max_blocks,
             "blocks_completed": config.max_blocks,
             "duration_limit": config.duration_limit,
+            "stream_profile": config.stream_profile,
             **summary,
             "events": events,
         }
@@ -412,6 +426,7 @@ def _emit_live_status(
         "max_blocks": config.max_blocks,
         "duration_limit": config.duration_limit,
         "schedule_timezone": config.schedule_timezone,
+        "stream_profile": config.stream_profile,
         "schedule_now": local_schedule_now.isoformat() if local_schedule_now is not None else None,
         "active_block": active_block,
         "upcoming_blocks": upcoming_blocks,
@@ -485,6 +500,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--timeout", type=float, default=10.0)
     parser.add_argument("--now", help="override current time for deterministic tests, e.g. 2026-06-17T10:05:00")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--stream-profile", choices=("direct", "jellyfin"), default="direct", help="HLS packaging profile; jellyfin writes under <channel>/jellyfin")
     args = parser.parse_args(argv)
 
     schedule_client = FS42ScheduleClient(args.api_base_url, timeout=args.timeout)
@@ -503,6 +519,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         dry_run=args.dry_run,
         schedule_timezone=args.schedule_timezone,
         max_recovery_attempts_per_block=args.max_recovery_attempts_per_block,
+        stream_profile=args.stream_profile,
     )
     try:
         result = controller.run(config)
