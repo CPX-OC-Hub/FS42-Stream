@@ -3,6 +3,7 @@ import json
 import tempfile
 import threading
 import unittest
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 from fs42stream.api_server import create_server, main
@@ -169,6 +170,216 @@ class APIServerTests(unittest.TestCase):
             self.assertEqual(current["media_seek"], 504.0)
             self.assertEqual(current["wallclock_start"], "2026-06-25T22:09:01")
             self.assertEqual(payload["timeline"][4]["media_seek_start"], 500.0)
+
+    def test_runtime_route_derives_current_next_item_transition_ffmpeg_and_hls_health(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            channel_dir = root / "Sky_One"
+            channel_dir.mkdir()
+            playlist = channel_dir / "Sky_One.m3u8"
+            segment = channel_dir / "Sky_One_00012.ts"
+            segment.write_bytes(b"segment")
+            playlist.write_text("\n".join([
+                "#EXTM3U",
+                "#EXT-X-TARGETDURATION:2",
+                "#EXT-X-MEDIA-SEQUENCE:10",
+                "#EXTINF:2.0,",
+                "Sky_One_00011.ts",
+                "#EXTINF:2.0,",
+                "Sky_One_00012.ts",
+                "",
+            ]))
+            status_path = root / "status.json"
+            status_path.write_text(json.dumps({
+                "status": "running",
+                "channel": "Sky One",
+                "updated_at": "2026-06-25T21:09:10+00:00",
+                "schedule_now": "2026-06-25T22:08:35+01:00",
+                "channel_output_dir": str(channel_dir),
+                "active_block": {
+                    "index": 365,
+                    "title": "Star Trek The Next Generation",
+                    "start_time": "2026-06-25T22:00:00+01:00",
+                    "end_time": "2026-06-25T23:00:00+01:00",
+                    "selection_reason": "current",
+                    "plan": [
+                        {"content_type": "bump", "media_type": "video", "path": "ident.mp4", "duration": 10.0, "skip": 0},
+                        {"content_type": "feature", "media_type": "video", "path": "episode.avi", "duration": 500.0, "skip": 0},
+                        {"content_type": "commercial", "media_type": "video", "path": "ad-a.mp4", "duration": 30.0, "skip": 0},
+                    ],
+                },
+                "upcoming_blocks": [{
+                    "index": 366,
+                    "title": "The Simpsons",
+                    "start_time": "2026-06-25T23:00:00+01:00",
+                    "end_time": "2026-06-25T23:30:00+01:00",
+                }],
+                "ffmpeg": {"pid": 18422, "state": "running", "started_at": "2026-06-25T22:00:01+01:00", "last_exit_code": None, "last_error": None},
+                "events": [
+                    {"event": "block_start", "at": "2026-06-25T22:00:00+01:00", "block_number": 1, "block": {"index": 365, "title": "Star Trek The Next Generation"}},
+                    {"event": "item_advance", "at": "2026-06-25T22:08:30+01:00", "reason": "item_advance", "block_number": 1},
+                ],
+            }))
+            server = self._start_server(root, status_json=status_path)
+
+            status, headers, body = self._request(server, "/api/channels/Sky_One/runtime")
+
+            self.assertEqual(status, 200)
+            self.assertEqual(headers["content-type"], "application/json")
+            payload = json.loads(body)
+            self.assertEqual(payload["channel"], {"id": "fs42.sky_one", "slug": "Sky_One", "name": "Sky One"})
+            self.assertEqual(payload["block"]["current"]["title"], "Star Trek The Next Generation")
+            self.assertEqual(payload["block"]["current"]["seconds_remaining"], 3085.0)
+            self.assertEqual(payload["block"]["next"]["title"], "The Simpsons")
+            self.assertEqual(payload["item"]["current"]["index"], 2)
+            self.assertEqual(payload["item"]["current"]["content_type"], "commercial")
+            self.assertEqual(payload["item"]["current"]["seconds_remaining"], 25.0)
+            self.assertEqual(payload["transition"]["last_reason"], "item_advance")
+            self.assertEqual(payload["ffmpeg"]["pid"], 18422)
+            self.assertEqual(payload["ffmpeg"]["state"], "running")
+            self.assertEqual(payload["hls"]["playlist_url"], "/hls/Sky_One/Sky_One.m3u8")
+            self.assertEqual(payload["hls"]["playlist_path"], str(playlist))
+            self.assertEqual(payload["hls"]["media_sequence"], 10)
+            self.assertEqual(payload["hls"]["target_duration"], 2)
+            self.assertEqual(payload["hls"]["segment_count"], 2)
+            self.assertEqual(payload["hls"]["last_segment_name"], "Sky_One_00012.ts")
+            self.assertIn(payload["hls"]["freshness"], {"fresh", "degraded"})
+
+    def test_runtime_playlist_url_uses_resolved_canonical_playlist_name(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            channel_dir = root / "Sky_One"
+            channel_dir.mkdir()
+            playlist = channel_dir / "live.m3u8"
+            segment = channel_dir / "segment0.ts"
+            segment.write_bytes(b"segment")
+            playlist.write_text("#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXT-X-MEDIA-SEQUENCE:1\n#EXTINF:2,\nsegment0.ts\n")
+            status_path = root / "status.json"
+            status_path.write_text(json.dumps({
+                "status": "running",
+                "channel": "Sky One",
+                "schedule_now": "2026-06-25T22:10:00+01:00",
+                "hls": {"playlist": str(playlist)},
+                "active_block": {"index": 1, "title": "Show", "start_time": "2026-06-25T22:00:00+01:00", "end_time": "2026-06-25T22:30:00+01:00"},
+                "ffmpeg": {"pid": 123, "state": "running"},
+                "events": [],
+            }))
+            server = self._start_server(root, status_json=status_path)
+
+            status, headers, body = self._request(server, "/api/channels/Sky_One/runtime")
+
+            self.assertEqual(status, 200)
+            payload = json.loads(body)
+            self.assertEqual(payload["hls"]["playlist_path"], str(playlist))
+            self.assertEqual(payload["hls"]["playlist_url"], "/hls/Sky_One/live.m3u8")
+
+            status, headers, body = self._request(server, payload["hls"]["playlist_url"])
+            self.assertEqual(status, 200)
+            self.assertEqual(headers["content-type"], "application/vnd.apple.mpegurl")
+            self.assertEqual(body, playlist.read_bytes())
+
+    def test_channel_health_reports_ok_degraded_or_error_from_runtime_checks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            channel_dir = root / "Sky_One"
+            channel_dir.mkdir()
+            (channel_dir / "Sky_One_00001.ts").write_bytes(b"segment")
+            (channel_dir / "Sky_One.m3u8").write_text("#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXT-X-MEDIA-SEQUENCE:1\n#EXTINF:2,\nSky_One_00001.ts\n")
+            status_path = root / "status.json"
+            status_path.write_text(json.dumps({
+                "status": "running",
+                "channel": "Sky One",
+                "schedule_now": "2026-06-25T22:10:00+01:00",
+                "active_block": {"index": 1, "title": "Show", "start_time": "2026-06-25T22:00:00+01:00", "end_time": "2026-06-25T22:30:00+01:00"},
+                "ffmpeg": {"pid": 123, "state": "running"},
+                "events": [],
+            }))
+            server = self._start_server(root, status_json=status_path)
+
+            status, headers, body = self._request(server, "/api/channels/Sky_One/health")
+
+            self.assertEqual(status, 200)
+            payload = json.loads(body)
+            self.assertEqual(payload["channel_id"], "fs42.sky_one")
+            self.assertIn(payload["status"], {"ok", "degraded"})
+            self.assertEqual(payload["checks"]["service_state"], "ok")
+            self.assertEqual(payload["checks"]["active_block_present"], "ok")
+            self.assertEqual(payload["checks"]["ffmpeg_running"], "ok")
+            self.assertEqual(payload["checks"]["playlist_present"], "ok")
+            self.assertIn("media_sequence", payload["details"])
+
+    def test_events_route_returns_bounded_recent_transition_history(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            status_path = root / "status.json"
+            status_path.write_text(json.dumps({
+                "status": "running",
+                "channel": "Sky One",
+                "events": [{"event": f"event_{index}", "reason": f"reason_{index}"} for index in range(15)],
+            }))
+            server = self._start_server(root, status_json=status_path)
+
+            status, headers, body = self._request(server, "/api/channels/Sky_One/events")
+
+            self.assertEqual(status, 200)
+            payload = json.loads(body)
+            self.assertEqual(payload["channel"]["id"], "fs42.sky_one")
+            self.assertEqual(len(payload["events"]), 10)
+            self.assertEqual(payload["events"][0]["event"], "event_5")
+            self.assertEqual(payload["events"][-1]["event"], "event_14")
+
+    def test_iptv_m3u_xmltv_and_epg_share_stable_channel_id(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            status_path = root / "status.json"
+            status_path.write_text(json.dumps({
+                "status": "running",
+                "channel": "Sky One",
+                "schedule_now": "2026-06-25T22:05:00+01:00",
+                "active_block": {"index": 1, "title": "Show A", "start_time": "2026-06-25T22:00:00+01:00", "end_time": "2026-06-25T22:30:00+01:00"},
+                "upcoming_blocks": [
+                    {"index": 2, "title": "Show B", "start_time": "2026-06-25T22:30:00+01:00", "end_time": "2026-06-25T23:00:00+01:00"},
+                ],
+                "events": [],
+            }))
+            server = self._start_server(root, status_json=status_path)
+            port = server.server_address[1]
+
+            status, headers, body = self._request(server, "/iptv/channels.m3u")
+            self.assertEqual(status, 200)
+            self.assertEqual(headers["content-type"], "application/vnd.apple.mpegurl")
+            m3u = body.decode("utf-8")
+            self.assertIn('#EXTINF:-1 tvg-id="fs42.sky_one" tvg-name="Sky One" tvg-logo="" group-title="FS42",Sky One', m3u)
+            self.assertIn(f"http://127.0.0.1:{port}/hls/Sky_One/Sky_One.m3u8", m3u)
+
+            status, headers, body = self._request(server, "/iptv/xmltv.xml")
+            self.assertEqual(status, 200)
+            self.assertEqual(headers["content-type"], "application/xml; charset=utf-8")
+            root_xml = ET.fromstring(body)
+            channel = root_xml.find("channel")
+            self.assertIsNotNone(channel)
+            self.assertEqual(channel.attrib["id"], "fs42.sky_one")
+            programmes = root_xml.findall("programme")
+            self.assertEqual([programme.attrib["channel"] for programme in programmes], ["fs42.sky_one", "fs42.sky_one"])
+            self.assertEqual(programmes[0].findtext("title"), "Show A")
+            self.assertEqual(programmes[0].attrib["start"], "20260625220000 +0100")
+
+            status, headers, body = self._request(server, "/api/channels/Sky_One/epg")
+            self.assertEqual(status, 200)
+            epg = json.loads(body)
+            self.assertEqual(epg["channel"]["id"], "fs42.sky_one")
+            self.assertEqual(epg["programmes"][0]["channel_id"], "fs42.sky_one")
+
+    def test_unknown_iptv_channel_playlist_returns_channel_not_found(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            server = self._start_server(Path(tmp))
+
+            status, headers, body = self._request(server, "/iptv/channels/Other.m3u")
+
+            self.assertEqual(status, 404)
+            payload = json.loads(body)
+            self.assertEqual(payload["error"], "channel_not_found")
+            self.assertIn("Other", payload["message"])
 
     def test_channel_status_returns_json_error_when_missing_or_malformed(self):
         with tempfile.TemporaryDirectory() as tmp:
