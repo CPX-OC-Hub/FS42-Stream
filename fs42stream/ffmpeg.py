@@ -28,6 +28,7 @@ class FFMpegHLSCommandBuilder:
         duration_limit: float | None = None,
         output_name: str | None = None,
         hls_start_number: int = 0,
+        hls_start_time_offset: float | None = None,
         hls_append: bool = False,
         stream_profile: StreamProfile = "direct",
     ) -> list[str]:
@@ -37,6 +38,8 @@ class FFMpegHLSCommandBuilder:
             raise ValueError("duration_limit must be positive")
         if hls_start_number < 0:
             raise ValueError("hls_start_number must be non-negative")
+        if hls_start_time_offset is not None and hls_start_time_offset < 0:
+            raise ValueError("hls_start_time_offset must be non-negative")
         if stream_profile not in {"direct", "jellyfin"}:
             raise ValueError("stream_profile must be 'direct' or 'jellyfin'")
 
@@ -87,8 +90,8 @@ class FFMpegHLSCommandBuilder:
             cmd.extend(["-t", self._num(duration_limit)])
         if stream_profile == "jellyfin":
             cmd.extend(["-avoid_negative_ts", "make_zero"])
-            if hls_start_number > 0:
-                cmd.extend(["-output_ts_offset", self._num(hls_start_number * 2.0)])
+            if hls_start_time_offset is not None:
+                cmd.extend(["-output_ts_offset", self._num(hls_start_time_offset)])
         hls_args = ["-f", "hls", "-hls_time", "2", "-hls_list_size", "12"]
         if not hls_append or hls_start_number:
             hls_args.extend(["-start_number", str(hls_start_number)])
