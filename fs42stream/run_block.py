@@ -24,6 +24,7 @@ DEFAULT_SDTV_ROOT = "/mnt/media/SDTV"
 DEFAULT_FFMPEG = "/usr/bin/ffmpeg"
 DEFAULT_FFPROBE = "/usr/bin/ffprobe"
 DEFAULT_SCHEDULE_TIMEZONE = "Europe/London"
+HLS_TARGET_SEGMENT_DURATION = 2.0
 
 
 @dataclass(frozen=True)
@@ -42,6 +43,7 @@ class BlockRunConfig:
     dry_run: bool = False
     output_name: str | None = None
     hls_start_number: int = 0
+    hls_start_time_offset: float | None = None
     hls_append: bool = False
     schedule_timezone: str | None = DEFAULT_SCHEDULE_TIMEZONE
     stream_profile: StreamProfile = "direct"
@@ -121,6 +123,7 @@ class BlockRunner:
                 duration_limit=config.duration_limit,
                 output_name=config.output_name,
                 hls_start_number=config.hls_start_number,
+                hls_start_time_offset=config.hls_start_time_offset,
                 hls_append=False,
                 stream_profile=config.stream_profile,
             )
@@ -155,6 +158,7 @@ class BlockRunner:
             command=commands[0] if commands else [],
             output_name=config.output_name,
             hls_start_number=config.hls_start_number,
+            hls_start_time_offset=config.hls_start_time_offset,
             hls_append=config.hls_append,
             stream_profile=config.stream_profile,
             catch_up=catch_up,
@@ -201,6 +205,10 @@ class BlockRunner:
                 "has_endlist": inspection.has_endlist,
             }
             diagnostics["hls_next_start_number"] = _next_hls_start_number(playlist, fallback=hls_start_number)
+            if config.hls_start_time_offset is not None:
+                new_duration = _hls_segment_duration_since(playlist, start_number=config.hls_start_number)
+                diagnostics["hls_segment_duration"] = new_duration
+                diagnostics["hls_next_start_time_offset"] = config.hls_start_time_offset + new_duration
         return diagnostics
 
 
@@ -275,6 +283,56 @@ def _next_hls_start_number(playlist: Path, *, fallback: int) -> int:
     return max(fallback, highest + 1)
 
 
+def _hls_segment_duration_since(playlist: Path, *, start_number: int) -> float:
+    """Return elapsed HLS duration from start_number through the current live playlist.
+
+    FS42's HLS output uses a two-second target duration and forces 25 fps output
+    with a 50-frame GOP/keyframe cadence for both normal blocks and boundary
+    filler. A live playlist with hls_list_size=12 rolls older EXTINF lines out of
+    the m3u8, so visible EXTINF values alone undercount long runs. Segment file
+    numbers remain monotonic; for rolled-off full segments before the first
+    visible segment, use the configured emitted cadence, then use actual EXTINF
+    values for the visible tail where partial final segments can occur.
+    """
+    if not playlist.exists():
+        return 0.0
+
+    numbered_durations: list[tuple[int, float]] = []
+    pending_duration: float | None = None
+    for line in playlist.read_text(errors="replace").splitlines():
+        text = line.strip()
+        if text.startswith("#EXTINF:"):
+            duration_text = text.removeprefix("#EXTINF:").split(",", 1)[0]
+            try:
+                pending_duration = float(duration_text)
+            except ValueError:
+                pending_duration = None
+            continue
+        if not text or text.startswith("#"):
+            continue
+        segment_number = _hls_segment_number(text)
+        if segment_number is not None and segment_number >= start_number and pending_duration is not None:
+            numbered_durations.append((segment_number, pending_duration))
+        pending_duration = None
+
+    total = 0.0
+    expected_number = start_number
+    for segment_number, duration in sorted(numbered_durations):
+        if segment_number > expected_number:
+            total += (segment_number - expected_number) * HLS_TARGET_SEGMENT_DURATION
+        total += duration
+        expected_number = max(expected_number, segment_number + 1)
+    return total
+
+
+def _hls_segment_number(segment_uri: str) -> int | None:
+    stem = Path(segment_uri).stem
+    suffix = stem.rsplit("_", 1)[-1]
+    if suffix.isdigit():
+        return int(suffix)
+    return None
+
+
 def _diagnostics(
     *,
     status: str,
@@ -287,6 +345,7 @@ def _diagnostics(
     command: list[str],
     output_name: str | None = None,
     hls_start_number: int = 0,
+    hls_start_time_offset: float | None = None,
     hls_append: bool = False,
     stream_profile: StreamProfile = "direct",
     catch_up: Mapping[str, Any] | None = None,
@@ -302,6 +361,7 @@ def _diagnostics(
         "output_dir": str(output_dir),
         "playlist": str(playlist),
         "hls_start_number": hls_start_number,
+        "hls_start_time_offset": hls_start_time_offset,
         "hls_append": hls_append,
         "stream_profile": stream_profile,
         "catch_up": dict(catch_up or {"applied": False}),

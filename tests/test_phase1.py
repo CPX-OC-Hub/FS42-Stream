@@ -542,7 +542,7 @@ class FFMpegCommandBuilderTests(unittest.TestCase):
         self.assertIn("/tmp/hls/Sky_One_%05d.ts", joined)
         self.assertEqual(cmd[-1], "/tmp/hls/Sky_One.m3u8")
 
-    def test_jellyfin_profile_offsets_timestamps_and_avoids_discontinuity_tags(self):
+    def test_jellyfin_profile_uses_explicit_elapsed_timestamp_offset_and_avoids_discontinuity_tags(self):
         resolver = PathResolver()
         probe = mock.Mock(validate_video=mock.Mock(return_value=ProbeResult(1, 320, 240, 25, 44100, 1)))
         block = BlockPlanner(resolver, probe).plan(SCHEDULE)[0]
@@ -552,6 +552,7 @@ class FFMpegCommandBuilderTests(unittest.TestCase):
             output_dir=Path("/tmp/hls"),
             output_name="Sky_One",
             hls_start_number=42,
+            hls_start_time_offset=83.25,
             hls_append=True,
             stream_profile="jellyfin",
         )
@@ -559,7 +560,8 @@ class FFMpegCommandBuilderTests(unittest.TestCase):
         joined = " ".join(cmd)
         self.assertIn("-fflags +genpts", joined)
         self.assertIn("-avoid_negative_ts make_zero", joined)
-        self.assertIn("-output_ts_offset 84", joined)
+        self.assertIn("-output_ts_offset 83.25", joined)
+        self.assertNotIn("-output_ts_offset 84", joined)
         self.assertIn("-hls_flags omit_endlist+append_list", joined)
         self.assertNotIn("discont_start", joined)
 

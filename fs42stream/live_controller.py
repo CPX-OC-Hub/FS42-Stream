@@ -27,6 +27,8 @@ from .run_block import (
     BlockRunner,
     SelectedBlock,
     _parse_datetime,
+    _hls_segment_duration_since,
+    _next_hls_start_number,
     _schedule_now,
     select_current_or_next_block,
 )
@@ -61,16 +63,18 @@ class SingleBlockRunner(Protocol):
 
 
 class BoundaryFillerRunner(Protocol):
-    def run(self, *, output_dir: Path, output_name: str, duration: float, hls_start_number: int, hls_append: bool = True, stream_profile: StreamProfile = "direct") -> Mapping[str, Any]: ...
+    def run(self, *, output_dir: Path, output_name: str, duration: float, hls_start_number: int, hls_start_time_offset: float | None = None, hls_append: bool = True, stream_profile: StreamProfile = "direct") -> Mapping[str, Any]: ...
 
 
 class HLSBlackSlateFillerRunner:
     def __init__(self, ffmpeg: str = DEFAULT_FFMPEG) -> None:
         self.ffmpeg = ffmpeg
 
-    def run(self, *, output_dir: Path, output_name: str, duration: float, hls_start_number: int, hls_append: bool = True, stream_profile: StreamProfile = "direct") -> Mapping[str, Any]:
+    def run(self, *, output_dir: Path, output_name: str, duration: float, hls_start_number: int, hls_start_time_offset: float | None = None, hls_append: bool = True, stream_profile: StreamProfile = "direct") -> Mapping[str, Any]:
         if duration <= 0:
             raise ValueError("duration must be positive")
+        if hls_start_time_offset is not None and hls_start_time_offset < 0:
+            raise ValueError("hls_start_time_offset must be non-negative")
         output_dir.mkdir(parents=True, exist_ok=True)
         playlist = output_dir / f"{output_name}.m3u8"
         segment_pattern = output_dir / f"{output_name}_%05d.ts"
@@ -96,6 +100,12 @@ class HLSBlackSlateFillerRunner:
             "veryfast",
             "-crf",
             "23",
+            "-g",
+            "50",
+            "-keyint_min",
+            "50",
+            "-sc_threshold",
+            "0",
             "-c:a",
             "aac",
             "-ar",
@@ -113,8 +123,8 @@ class HLSBlackSlateFillerRunner:
         ]
         if stream_profile == "jellyfin":
             command.extend(["-avoid_negative_ts", "make_zero"])
-            if hls_start_number > 0:
-                command.extend(["-output_ts_offset", _num(hls_start_number * 2.0)])
+            if hls_start_time_offset is not None:
+                command.extend(["-output_ts_offset", _num(hls_start_time_offset)])
         if hls_append:
             hls_flags = "omit_endlist+append_list" if stream_profile == "jellyfin" else "omit_endlist+append_list+discont_start"
             command.extend(["-hls_flags", hls_flags])
@@ -122,14 +132,18 @@ class HLSBlackSlateFillerRunner:
             command.extend(["-hls_flags", "omit_endlist"])
         command.extend(["-hls_segment_filename", str(segment_pattern), str(playlist)])
         completed = subprocess.run(command, check=False, shell=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        segment_count = _count_hls_segments_from(playlist, start_number=hls_start_number)
+        hls_next_start_number = _next_hls_start_number(playlist, fallback=hls_start_number)
+        segment_duration = _hls_segment_duration_since(playlist, start_number=hls_start_number)
         return {
             "status": "ok" if completed.returncode == 0 else "ffmpeg-error",
             "playlist": str(playlist),
             "command": command,
             "hls_start_number": hls_start_number,
-            "hls_next_start_number": hls_start_number + segment_count,
-            "hls": {"playlist": str(playlist), "segment_count": segment_count},
+            "hls_start_time_offset": hls_start_time_offset,
+            "hls_next_start_number": hls_next_start_number,
+            "hls_segment_duration": segment_duration,
+            "hls_next_start_time_offset": (hls_start_time_offset + segment_duration) if hls_start_time_offset is not None else None,
+            "hls": {"playlist": str(playlist), "segment_count": max(0, hls_next_start_number - hls_start_number)},
             "ffmpeg": {"returncode": completed.returncode, "stdout": completed.stdout, "stderr": completed.stderr},
         }
 
@@ -161,6 +175,7 @@ class LiveController:
         last_index = -1
 
         hls_start_number = 0
+        hls_start_time_offset = 0.0
         for ordinal in range(config.max_blocks):
             schedule = self.schedule_client.fetch_schedule(config.channel, expected_blocks=None)
             selection_now = cursor if simulated_cursor else config.clock()
@@ -205,6 +220,7 @@ class LiveController:
                     dry_run=config.dry_run,
                     output_name=FFMpegHLSCommandBuilder._slug(config.channel),
                     hls_start_number=block_hls_start_number,
+                    hls_start_time_offset=hls_start_time_offset if config.stream_profile == "jellyfin" else None,
                     hls_append=block_hls_append,
                     schedule_timezone=config.schedule_timezone,
                     stream_profile=config.stream_profile,
@@ -212,6 +228,7 @@ class LiveController:
             )
             diagnostics_dict = dict(diagnostics)
             hls_start_number = int(diagnostics_dict.get("hls_next_start_number") or hls_start_number)
+            hls_start_time_offset = _next_hls_start_time_offset(diagnostics_dict, fallback=hls_start_time_offset)
             events.append(_complete_event(ordinal=ordinal, block=block_info, diagnostics=diagnostics_dict))
             _emit_live_status(
                 config,
@@ -267,6 +284,7 @@ class LiveController:
                                 dry_run=config.dry_run,
                                 output_name=FFMpegHLSCommandBuilder._slug(config.channel),
                                 hls_start_number=hls_start_number,
+                                hls_start_time_offset=hls_start_time_offset if config.stream_profile == "jellyfin" else None,
                                 hls_append=True,
                                 schedule_timezone=config.schedule_timezone,
                                 stream_profile=config.stream_profile,
@@ -274,6 +292,7 @@ class LiveController:
                         )
                     )
                     hls_start_number = int(diagnostics_dict.get("hls_next_start_number") or hls_start_number)
+                    hls_start_time_offset = _next_hls_start_time_offset(diagnostics_dict, fallback=hls_start_time_offset)
                     events.append(_complete_event(ordinal=ordinal, block=recovery_block_info, diagnostics=diagnostics_dict))
                     _emit_live_status(
                         config,
@@ -318,6 +337,7 @@ class LiveController:
                             output_name=FFMpegHLSCommandBuilder._slug(config.channel),
                             duration=wait_seconds,
                             hls_start_number=hls_start_number,
+                            hls_start_time_offset=hls_start_time_offset if config.stream_profile == "jellyfin" else None,
                             hls_append=True,
                             stream_profile=config.stream_profile,
                         )
@@ -332,11 +352,14 @@ class LiveController:
                             "status": filler_diagnostics.get("status"),
                             "playlist": filler_diagnostics.get("playlist"),
                             "hls_start_number": hls_start_number,
+                            "hls_start_time_offset": hls_start_time_offset if config.stream_profile == "jellyfin" else None,
                             "hls_next_start_number": filler_diagnostics.get("hls_next_start_number"),
+                            "hls_next_start_time_offset": filler_diagnostics.get("hls_next_start_time_offset"),
                             "ffmpeg_returncode": _ffmpeg_returncode(filler_diagnostics),
                         }
                     )
                     hls_start_number = int(filler_diagnostics.get("hls_next_start_number") or hls_start_number)
+                    hls_start_time_offset = _next_hls_start_time_offset(filler_diagnostics, fallback=hls_start_time_offset)
                     _emit_live_status(
                         config,
                         status="running",
@@ -398,6 +421,13 @@ def _ffmpeg_returncode(diagnostics: Mapping[str, Any]) -> Any:
     if isinstance(raw_ffmpeg, Mapping):
         return raw_ffmpeg.get("returncode")
     return None
+
+
+def _next_hls_start_time_offset(diagnostics: Mapping[str, Any], *, fallback: float) -> float:
+    raw_offset = diagnostics.get("hls_next_start_time_offset")
+    if isinstance(raw_offset, (int, float)):
+        return float(raw_offset)
+    return fallback
 
 
 def _emit_live_status(
