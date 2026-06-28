@@ -114,38 +114,28 @@ class BlockRunner:
         commands: list[list[str]] = []
         item_blocks: list[PlannedBlock] = []
         hls_start_number = config.hls_start_number
+        hls_start_time_offset = config.hls_start_time_offset
         remaining_budget = config.duration_limit
-        if config.stream_profile == "jellyfin":
-            item_blocks.append(planned)
+        for item_index, item in enumerate(planned.items):
+            if remaining_budget <= 0:
+                break
+            item_duration_limit = min(item.duration, remaining_budget) if item.duration > 0 else remaining_budget
+            item_block = _single_item_block(planned, item, item_index=item_index)
+            item_blocks.append(item_block)
             command = self.builder.build(
-                planned,
+                item_block,
                 output_dir=config.output_dir,
-                duration_limit=config.duration_limit,
+                duration_limit=item_duration_limit,
                 output_name=config.output_name,
-                hls_start_number=config.hls_start_number,
-                hls_start_time_offset=config.hls_start_time_offset,
-                hls_append=False,
+                hls_start_number=hls_start_number,
+                hls_start_time_offset=hls_start_time_offset if config.stream_profile == "jellyfin" else None,
+                hls_append=config.hls_append or item_index > 0,
                 stream_profile=config.stream_profile,
             )
             commands.append(command)
-        else:
-            for item_index, item in enumerate(planned.items):
-                if remaining_budget <= 0:
-                    break
-                item_duration_limit = min(item.duration, remaining_budget) if item.duration > 0 else remaining_budget
-                item_block = _single_item_block(planned, item, item_index=item_index)
-                item_blocks.append(item_block)
-                command = self.builder.build(
-                    item_block,
-                    output_dir=config.output_dir,
-                    duration_limit=item_duration_limit,
-                    output_name=config.output_name,
-                    hls_start_number=hls_start_number,
-                    hls_append=config.hls_append or item_index > 0,
-                    stream_profile=config.stream_profile,
-                )
-                commands.append(command)
-                remaining_budget -= item_duration_limit
+            remaining_budget -= item_duration_limit
+            if config.stream_profile == "jellyfin" and hls_start_time_offset is not None:
+                hls_start_time_offset += item_duration_limit
 
         diagnostics = _diagnostics(
             status="dry-run" if config.dry_run else "ok",
@@ -163,7 +153,7 @@ class BlockRunner:
             stream_profile=config.stream_profile,
             catch_up=catch_up,
         )
-        diagnostics["render_mode"] = "jellyfin-monotonic-block" if config.stream_profile == "jellyfin" else "sequential-plan-items"
+        diagnostics["render_mode"] = "jellyfin-sequential-monotonic-items" if config.stream_profile == "jellyfin" else "sequential-plan-items"
         diagnostics["stream_profile"] = config.stream_profile
         diagnostics["commands"] = commands
         diagnostics["item_command_count"] = len(commands)
@@ -172,6 +162,8 @@ class BlockRunner:
 
         ffmpeg_runs: list[dict[str, Any]] = []
         final_returncode = 0
+        command_hls_start_number = config.hls_start_number
+        command_hls_start_time_offset = config.hls_start_time_offset
         for run_index, command in enumerate(commands):
             completed = subprocess.run(command, check=False, shell=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
             run_info = {
@@ -179,12 +171,19 @@ class BlockRunner:
                 "returncode": completed.returncode,
                 "stdout": completed.stdout,
                 "stderr": completed.stderr,
+                "hls_start_number": command_hls_start_number,
+                "hls_start_time_offset": command_hls_start_time_offset,
             }
             ffmpeg_runs.append(run_info)
             final_returncode = completed.returncode
             playlist = Path(diagnostics["playlist"])
             if playlist.exists():
+                previous_hls_start_number = command_hls_start_number
                 hls_start_number = _next_hls_start_number(playlist, fallback=hls_start_number)
+                command_hls_start_number = hls_start_number
+                if config.stream_profile == "jellyfin" and command_hls_start_time_offset is not None:
+                    emitted_duration = _hls_segment_duration_since(playlist, start_number=previous_hls_start_number)
+                    command_hls_start_time_offset += emitted_duration
             if completed.returncode != 0:
                 break
 

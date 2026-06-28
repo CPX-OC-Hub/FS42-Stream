@@ -363,7 +363,7 @@ class CatchUpBlockRunnerTests(unittest.TestCase):
         self.assertNotIn("concat=n=3", " ".join(" ".join(cmd) for cmd in diagnostics["commands"]))
         self.assertEqual(diagnostics["render_mode"], "sequential-plan-items")
 
-    def test_jellyfin_profile_builds_one_timestamp_offset_command_for_remaining_block(self):
+    def test_jellyfin_profile_builds_sequential_timestamp_offset_commands_for_remaining_block(self):
         schedule = {
             "network_name": "Sky One",
             "schedule_blocks": [
@@ -386,17 +386,19 @@ class CatchUpBlockRunnerTests(unittest.TestCase):
                 now=datetime(2026, 6, 25, 22, 0, 0),
                 dry_run=True,
                 hls_start_number=42,
+                hls_start_time_offset=100.0,
                 output_name="Sky_One",
                 stream_profile="jellyfin",
             )
         )
 
-        self.assertEqual(len(builder.blocks), 1)
-        self.assertEqual([item.source["content_type"] for item in builder.block.items], ["feature", "commercial", "feature"])
-        self.assertEqual(builder.kwargs["hls_append"], False)
-        self.assertEqual(builder.kwargs["stream_profile"], "jellyfin")
-        self.assertEqual(builder.kwargs["hls_start_number"], 42)
-        self.assertEqual(diagnostics["render_mode"], "jellyfin-monotonic-block")
+        self.assertEqual(len(builder.blocks), 3)
+        self.assertEqual([block.items[0].source["content_type"] for block in builder.blocks], ["feature", "commercial", "feature"])
+        self.assertEqual([kwargs["stream_profile"] for kwargs in builder.kwargs_by_call], ["jellyfin", "jellyfin", "jellyfin"])
+        self.assertEqual([kwargs["hls_start_number"] for kwargs in builder.kwargs_by_call], [42, 42, 42])
+        self.assertEqual([kwargs["hls_append"] for kwargs in builder.kwargs_by_call], [False, True, True])
+        self.assertEqual([kwargs["hls_start_time_offset"] for kwargs in builder.kwargs_by_call], [100.0, 160.0, 190.0])
+        self.assertEqual(diagnostics["render_mode"], "jellyfin-sequential-monotonic-items")
         self.assertEqual(diagnostics["stream_profile"], "jellyfin")
 
 
