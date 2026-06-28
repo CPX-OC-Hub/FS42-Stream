@@ -235,6 +235,72 @@ class BlockRunnerTests(unittest.TestCase):
         self.assertEqual(diagnostics["hls_segment_duration"], 40.0)
         self.assertEqual(diagnostics["hls_next_start_time_offset"], 140.0)
 
+    def test_jellyfin_runner_rebuilds_later_item_commands_from_actual_emitted_state(self):
+        schedule = {
+            "network_name": "Sky One",
+            "schedule_blocks": [
+                {
+                    "title": "Two Part Block",
+                    "start_time": "2026-06-17T10:00:00",
+                    "end_time": "2026-06-17T10:30:00",
+                    "plan": [
+                        {"path": "catalog/SkyOne/part-a.mp4", "duration": 30, "skip": 0, "is_stream": False, "content_type": "feature"},
+                        {"path": "catalog/SkyOne/part-b.mp4", "duration": 30, "skip": 0, "is_stream": False, "content_type": "commercial"},
+                    ],
+                }
+            ],
+        }
+        client = mock.Mock(fetch_schedule=mock.Mock(return_value=schedule))
+        probe = mock.Mock(validate_video=mock.Mock(return_value=ProbeResult(30, 640, 480, 25, 48000, 2)))
+        runner = BlockRunner(
+            client=client,
+            planner=BlockPlanner(PathResolver(fs42_root="/mnt/fs42", sdtv_root="/mnt/media/SDTV"), probe),
+            builder=FFMpegHLSCommandBuilder("/usr/bin/ffmpeg"),
+        )
+
+        calls: list[list[str]] = []
+
+        def write_progressive_playlists(command, check, shell, stdout, stderr, text):
+            calls.append(command)
+            playlist = Path(command[-1])
+            playlist.parent.mkdir(parents=True, exist_ok=True)
+            if len(calls) == 1:
+                lines = ["#EXTM3U", "#EXT-X-VERSION:3", "#EXT-X-TARGETDURATION:2", "#EXT-X-MEDIA-SEQUENCE:12"]
+                for number in range(12, 19):
+                    lines.extend(["#EXTINF:2.000000,", f"Sky_One_{number:05d}.ts"])
+                    (playlist.parent / f"Sky_One_{number:05d}.ts").write_bytes(b"")
+            else:
+                lines = ["#EXTM3U", "#EXT-X-VERSION:3", "#EXT-X-TARGETDURATION:2", "#EXT-X-MEDIA-SEQUENCE:12"]
+                for number in range(12, 27):
+                    lines.extend(["#EXTINF:2.000000,", f"Sky_One_{number:05d}.ts"])
+                    (playlist.parent / f"Sky_One_{number:05d}.ts").write_bytes(b"")
+            playlist.write_text("\n".join(lines) + "\n")
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+        with tempfile.TemporaryDirectory() as tmp, mock.patch("subprocess.run", side_effect=write_progressive_playlists):
+            diagnostics = runner.run(
+                BlockRunConfig(
+                    channel="Sky One",
+                    duration_limit=60,
+                    output_dir=Path(tmp),
+                    now=datetime(2026, 6, 17, 10, 0, 0),
+                    output_name="Sky_One",
+                    hls_start_number=0,
+                    hls_start_time_offset=100.0,
+                    stream_profile="jellyfin",
+                )
+            )
+
+        self.assertEqual(len(calls), 2)
+        first_joined = " ".join(calls[0])
+        second_joined = " ".join(calls[1])
+        self.assertIn("-start_number 0", first_joined)
+        self.assertIn("-output_ts_offset 100", first_joined)
+        self.assertIn("-start_number 19", second_joined)
+        self.assertIn("-output_ts_offset 138", second_joined)
+        self.assertEqual(diagnostics["hls_next_start_number"], 27)
+        self.assertEqual(diagnostics["hls_next_start_time_offset"], 154.0)
+
 
 class HLSTimestampOffsetTests(unittest.TestCase):
     def test_segment_duration_since_accounts_for_live_window_rollover(self):
