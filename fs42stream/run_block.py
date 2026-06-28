@@ -113,6 +113,7 @@ class BlockRunner:
         planned = self.planner.plan_block(catch_up_block)
         commands: list[list[str]] = []
         item_blocks: list[PlannedBlock] = []
+        item_duration_limits: list[float] = []
         hls_start_number = config.hls_start_number
         hls_start_time_offset = config.hls_start_time_offset
         remaining_budget = config.duration_limit
@@ -122,6 +123,7 @@ class BlockRunner:
             item_duration_limit = min(item.duration, remaining_budget) if item.duration > 0 else remaining_budget
             item_block = _single_item_block(planned, item, item_index=item_index)
             item_blocks.append(item_block)
+            item_duration_limits.append(item_duration_limit)
             command = self.builder.build(
                 item_block,
                 output_dir=config.output_dir,
@@ -161,10 +163,22 @@ class BlockRunner:
             return diagnostics
 
         ffmpeg_runs: list[dict[str, Any]] = []
+        executed_commands: list[list[str]] = []
         final_returncode = 0
         command_hls_start_number = config.hls_start_number
         command_hls_start_time_offset = config.hls_start_time_offset
-        for run_index, command in enumerate(commands):
+        for run_index, item_block in enumerate(item_blocks):
+            command = self.builder.build(
+                item_block,
+                output_dir=config.output_dir,
+                duration_limit=item_duration_limits[run_index],
+                output_name=config.output_name,
+                hls_start_number=command_hls_start_number,
+                hls_start_time_offset=command_hls_start_time_offset if config.stream_profile == "jellyfin" else None,
+                hls_append=config.hls_append or run_index > 0,
+                stream_profile=config.stream_profile,
+            )
+            executed_commands.append(command)
             completed = subprocess.run(command, check=False, shell=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
             run_info = {
                 "index": run_index,
@@ -188,6 +202,7 @@ class BlockRunner:
                 break
 
         diagnostics["status"] = "ok" if final_returncode == 0 else "ffmpeg-error"
+        diagnostics["commands"] = executed_commands
         diagnostics["ffmpeg"] = {
             "returncode": final_returncode,
             "runs": ffmpeg_runs,
