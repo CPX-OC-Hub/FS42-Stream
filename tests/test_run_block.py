@@ -8,6 +8,7 @@ from unittest import mock
 
 from fs42stream.ffmpeg import FFMpegHLSCommandBuilder
 from fs42stream.ffprobe import ProbeResult
+from fs42stream.hls_harness import create_fixture_clips
 from fs42stream.paths import PathResolver
 from fs42stream.planner import BlockPlanner
 from fs42stream.run_block import BlockRunConfig, BlockRunner, _hls_segment_duration_since, select_current_or_next_block
@@ -296,10 +297,68 @@ class BlockRunnerTests(unittest.TestCase):
         second_joined = " ".join(calls[1])
         self.assertIn("-start_number 0", first_joined)
         self.assertIn("-output_ts_offset 100", first_joined)
-        self.assertIn("-start_number 19", second_joined)
+        self.assertNotIn("-start_number", second_joined)
         self.assertIn("-output_ts_offset 138", second_joined)
         self.assertEqual(diagnostics["hls_next_start_number"], 27)
         self.assertEqual(diagnostics["hls_next_start_time_offset"], 154.0)
+
+    @unittest.skipUnless(Path("/usr/bin/ffmpeg").exists() and Path("/usr/bin/ffprobe").exists(), "requires system ffmpeg/ffprobe")
+    def test_jellyfin_runner_keeps_dense_segment_numbering_across_item_boundaries(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            clips = create_fixture_clips(root / "clips", count=3, duration=2.2)
+            schedule = {
+                "network_name": "Sky One",
+                "schedule_blocks": [
+                    {
+                        "title": "Transition Test",
+                        "start_time": "2026-06-17T10:00:00",
+                        "end_time": "2026-06-17T10:00:09",
+                        "plan": [
+                            {"realpath": str(clips[0]), "duration": 2.2, "skip": 0, "is_stream": False, "content_type": "feature", "media_type": "video"},
+                            {"realpath": str(clips[1]), "duration": 2.2, "skip": 0, "is_stream": False, "content_type": "commercial", "media_type": "video"},
+                            {"realpath": str(clips[2]), "duration": 2.2, "skip": 0, "is_stream": False, "content_type": "bump", "media_type": "video"},
+                        ],
+                    }
+                ],
+            }
+            client = mock.Mock(fetch_schedule=mock.Mock(return_value=schedule))
+            runner = BlockRunner(
+                client=client,
+                planner=BlockPlanner(PathResolver(fs42_root=root, sdtv_root=root), mock.Mock()),
+                builder=FFMpegHLSCommandBuilder("/usr/bin/ffmpeg"),
+            )
+            runner.planner.probe.validate_video.return_value = ProbeResult(2.2, 640, 480, 25, 48000, 2)
+            diagnostics = runner.run(
+                BlockRunConfig(
+                    channel="Sky One",
+                    duration_limit=6.6,
+                    output_dir=root / "out",
+                    now=datetime(2026, 6, 17, 10, 0, 0),
+                    output_name="Sky_One",
+                    hls_start_time_offset=0.0,
+                    stream_profile="jellyfin",
+                )
+            )
+            playlist = Path(diagnostics["playlist"]).read_text()
+
+        joined_commands = [" ".join(command) for command in diagnostics["commands"]]
+        self.assertIn("-start_number 0", joined_commands[0])
+        self.assertTrue(all("-start_number" not in joined for joined in joined_commands[1:]))
+        self.assertIn("#EXT-X-MEDIA-SEQUENCE:0", playlist)
+        self.assertNotIn("Sky_One_00010.ts", playlist)
+        self.assertEqual(
+            [Path(path).name for path in diagnostics["hls"]["segments"]],
+            [
+                "Sky_One_00000.ts",
+                "Sky_One_00001.ts",
+                "Sky_One_00002.ts",
+                "Sky_One_00003.ts",
+                "Sky_One_00004.ts",
+                "Sky_One_00005.ts",
+            ],
+        )
+        self.assertEqual(diagnostics["hls_next_start_number"], 6)
 
 
 class HLSTimestampOffsetTests(unittest.TestCase):

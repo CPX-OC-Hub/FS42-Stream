@@ -197,6 +197,7 @@ class LiveControllerTests(unittest.TestCase):
         self.assertIn("-output_ts_offset 31.5", joined)
         self.assertNotIn("-output_ts_offset 24", joined)
         self.assertIn("-hls_flags omit_endlist+append_list", joined)
+        self.assertNotIn("-start_number", joined)
         self.assertNotIn("discont_start", joined)
 
     def test_jellyfin_boundary_filler_reports_elapsed_offset_after_live_window_rollover(self):
