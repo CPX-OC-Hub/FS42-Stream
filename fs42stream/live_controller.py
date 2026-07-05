@@ -118,9 +118,12 @@ class HLSBlackSlateFillerRunner:
             "2",
             "-hls_list_size",
             "12",
-            "-start_number",
-            str(hls_start_number),
         ]
+        if stream_profile != "jellyfin" or not hls_append:
+            command.extend([
+                "-start_number",
+                str(hls_start_number),
+            ])
         if stream_profile == "jellyfin":
             command.extend(["-avoid_negative_ts", "make_zero"])
             if hls_start_time_offset is not None:
