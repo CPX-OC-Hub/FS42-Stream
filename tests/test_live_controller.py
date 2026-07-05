@@ -2,11 +2,18 @@ import json
 import subprocess
 import tempfile
 import unittest
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from unittest import mock
 
-from fs42stream.live_controller import LiveController, LiveControllerConfig, main
+from fs42stream.ffmpeg import FFMpegHLSCommandBuilder
+from fs42stream.ffprobe import FFProbe, ProbeResult
+from fs42stream.hls_harness import create_fixture_clips, inspect_hls_output
+from fs42stream.live_controller import HLSBlackSlateFillerRunner, LiveController, LiveControllerConfig, main
+from fs42stream.paths import PathResolver
+from fs42stream.planner import BlockPlanner
+from fs42stream.run_block import BlockRunner
+from fs42stream.systemd_service import ServiceConfig
 
 
 SCHEDULE = {
@@ -110,7 +117,355 @@ class FakeFillerRunner:
         }
 
 
+class DurationConsumingBlockRunner:
+    def __init__(self, current):
+        self.calls = []
+        self.current = current
+
+    def run(self, config):
+        self.calls.append(config)
+        self.current[0] = self.current[0] + timedelta(seconds=config.duration_limit)
+        playlist = config.output_dir / "consume.m3u8"
+        segment = config.output_dir / "consume_00000.ts"
+        playlist.write_text(f"#EXTM3U\n{segment.name}\n")
+        segment.write_text("segment")
+        return {
+            "status": "ok",
+            "playlist": str(playlist),
+            "hls": {"playlist": str(playlist), "segments": [str(segment)], "segment_count": 1, "has_endlist": False},
+            "hls_next_start_number": len(self.calls),
+            "ffmpeg": {"returncode": 0, "stdout": "", "stderr": ""},
+            "plan": [],
+        }
+
+
+class LongBlockScheduleClient:
+    def fetch_schedule(self, channel, expected_blocks=None):
+        return {
+            "network_name": "Sky One",
+            "schedule_blocks": [
+                {
+                    "title": "Wwf Raw Is War",
+                    "start_time": "2026-06-27T11:00:00",
+                    "end_time": "2026-06-27T12:30:00",
+                    "plan": [{"path": "catalog/raw.mp4", "duration": 5400, "skip": 0, "is_stream": False}],
+                },
+                {
+                    "title": "Next Block",
+                    "start_time": "2026-06-27T12:30:00",
+                    "end_time": "2026-06-27T13:00:00",
+                    "plan": [{"path": "catalog/next.mp4", "duration": 1800, "skip": 0, "is_stream": False}],
+                },
+            ],
+        }
+
+
 class LiveControllerTests(unittest.TestCase):
+    @unittest.skipUnless(Path("/usr/bin/ffmpeg").exists() and Path("/usr/bin/ffprobe").exists(), "requires system ffmpeg/ffprobe")
+    def test_direct_profile_keeps_dense_segment_numbering_across_block_boundary(self):
+        class FixtureScheduleClient:
+            def __init__(self, schedule):
+                self.schedule = schedule
+
+            def fetch_schedule(self, channel, expected_blocks=None):
+                return self.schedule
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            clips = create_fixture_clips(root / "clips", count=4, duration=2.2)
+            schedule = {
+                "network_name": "Sky One",
+                "schedule_blocks": [
+                    {
+                        "title": "Show A",
+                        "start_time": "2026-06-17T10:00:00",
+                        "end_time": "2026-06-17T10:00:05",
+                        "plan": [
+                            {"realpath": str(clips[0]), "duration": 2.2, "skip": 0, "is_stream": False, "content_type": "feature", "media_type": "video"},
+                            {"realpath": str(clips[1]), "duration": 2.2, "skip": 0, "is_stream": False, "content_type": "commercial", "media_type": "video"},
+                        ],
+                    },
+                    {
+                        "title": "Show B",
+                        "start_time": "2026-06-17T10:00:05",
+                        "end_time": "2026-06-17T10:00:10",
+                        "plan": [
+                            {"realpath": str(clips[2]), "duration": 2.2, "skip": 0, "is_stream": False, "content_type": "bump", "media_type": "video"},
+                            {"realpath": str(clips[3]), "duration": 2.2, "skip": 0, "is_stream": False, "content_type": "feature", "media_type": "video"},
+                        ],
+                    },
+                ],
+            }
+            client = FixtureScheduleClient(schedule)
+            runner = BlockRunner(
+                client=client,
+                planner=BlockPlanner(PathResolver(fs42_root=root, sdtv_root=root), FFProbe("/usr/bin/ffprobe")),
+                builder=FFMpegHLSCommandBuilder("/usr/bin/ffmpeg"),
+            )
+            controller = LiveController(schedule_client=client, block_runner=runner)
+
+            result = controller.run(
+                LiveControllerConfig(
+                    channel="Sky One",
+                    output_root=root / "out",
+                    max_blocks=2,
+                    duration_limit=10,
+                    now=datetime(2026, 6, 17, 10, 0, 0),
+                )
+            )
+            playlist = Path(result["channel_output_dir"]) / "Sky_One.m3u8"
+            inspection = inspect_hls_output(playlist)
+            playlist_text = playlist.read_text()
+
+        self.assertEqual([Path(path).name for path in inspection.segments], [
+            "Sky_One_00000.ts",
+            "Sky_One_00001.ts",
+            "Sky_One_00002.ts",
+            "Sky_One_00003.ts",
+            "Sky_One_00004.ts",
+            "Sky_One_00005.ts",
+            "Sky_One_00006.ts",
+            "Sky_One_00007.ts",
+        ])
+        self.assertIn("#EXT-X-MEDIA-SEQUENCE:0", playlist_text)
+
+    @unittest.skipUnless(Path("/usr/bin/ffmpeg").exists() and Path("/usr/bin/ffprobe").exists(), "requires system ffmpeg/ffprobe")
+    def test_jellyfin_profile_marks_real_block_boundaries_when_segment_timestamps_reset(self):
+        class FixtureScheduleClient:
+            def __init__(self, schedule):
+                self.schedule = schedule
+
+            def fetch_schedule(self, channel, expected_blocks=None):
+                return self.schedule
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            clips = create_fixture_clips(root / "clips", count=4, duration=2.2)
+            schedule = {
+                "network_name": "Sky One",
+                "schedule_blocks": [
+                    {
+                        "title": "Show A",
+                        "start_time": "2026-06-17T10:00:00",
+                        "end_time": "2026-06-17T10:00:05",
+                        "plan": [
+                            {"realpath": str(clips[0]), "duration": 2.2, "skip": 0, "is_stream": False, "content_type": "feature", "media_type": "video"},
+                            {"realpath": str(clips[1]), "duration": 2.2, "skip": 0, "is_stream": False, "content_type": "commercial", "media_type": "video"},
+                        ],
+                    },
+                    {
+                        "title": "Show B",
+                        "start_time": "2026-06-17T10:00:05",
+                        "end_time": "2026-06-17T10:00:10",
+                        "plan": [
+                            {"realpath": str(clips[2]), "duration": 2.2, "skip": 0, "is_stream": False, "content_type": "bump", "media_type": "video"},
+                            {"realpath": str(clips[3]), "duration": 2.2, "skip": 0, "is_stream": False, "content_type": "feature", "media_type": "video"},
+                        ],
+                    },
+                ],
+            }
+            client = FixtureScheduleClient(schedule)
+            runner = BlockRunner(
+                client=client,
+                planner=BlockPlanner(PathResolver(fs42_root=root, sdtv_root=root), FFProbe("/usr/bin/ffprobe")),
+                builder=FFMpegHLSCommandBuilder("/usr/bin/ffmpeg"),
+            )
+            controller = LiveController(schedule_client=client, block_runner=runner)
+
+            result = controller.run(
+                LiveControllerConfig(
+                    channel="Sky One",
+                    output_root=root / "out",
+                    max_blocks=2,
+                    duration_limit=10,
+                    now=datetime(2026, 6, 17, 10, 0, 0),
+                    stream_profile="jellyfin",
+                )
+            )
+            playlist = Path(result["channel_output_dir"]) / "Sky_One.m3u8"
+            inspection = inspect_hls_output(playlist)
+            playlist_text = playlist.read_text()
+
+        self.assertEqual([Path(path).name for path in inspection.segments], [
+            "Sky_One_00000.ts",
+            "Sky_One_00001.ts",
+            "Sky_One_00002.ts",
+            "Sky_One_00003.ts",
+            "Sky_One_00004.ts",
+            "Sky_One_00005.ts",
+        ])
+        self.assertIn("#EXT-X-MEDIA-SEQUENCE:0", playlist_text)
+        self.assertEqual(playlist_text.count("#EXT-X-DISCONTINUITY"), 1)
+
+    def test_boundary_filler_uses_transition_safe_hls_cadence(self):
+        with tempfile.TemporaryDirectory() as tmp, mock.patch(
+            "subprocess.run",
+            return_value=subprocess.CompletedProcess(["ffmpeg"], 0, stdout="", stderr=""),
+        ) as run:
+            HLSBlackSlateFillerRunner("/usr/bin/ffmpeg").run(
+                output_dir=Path(tmp),
+                output_name="Sky_One",
+                duration=3596,
+                hls_start_number=12,
+                hls_append=True,
+            )
+
+        command = run.call_args.args[0]
+        self.assertIn(["-hls_time", "2"], [command[index:index + 2] for index in range(len(command) - 1)])
+        self.assertIn(["-g", "50"], [command[index:index + 2] for index in range(len(command) - 1)])
+        self.assertIn(["-keyint_min", "50"], [command[index:index + 2] for index in range(len(command) - 1)])
+        self.assertIn(["-sc_threshold", "0"], [command[index:index + 2] for index in range(len(command) - 1)])
+        self.assertIn("-hls_flags", command)
+        self.assertIn("omit_endlist+append_list+discont_start", command)
+
+    def test_jellyfin_boundary_filler_uses_explicit_elapsed_timestamp_offset(self):
+        with tempfile.TemporaryDirectory() as tmp, mock.patch(
+            "subprocess.run",
+            return_value=subprocess.CompletedProcess(["ffmpeg"], 0, stdout="", stderr=""),
+        ) as run:
+            HLSBlackSlateFillerRunner("/usr/bin/ffmpeg").run(
+                output_dir=Path(tmp),
+                output_name="Sky_One",
+                duration=7.3,
+                hls_start_number=12,
+                hls_start_time_offset=31.5,
+                hls_append=True,
+                stream_profile="jellyfin",
+            )
+
+        command = run.call_args.args[0]
+        joined = " ".join(command)
+        self.assertIn("-avoid_negative_ts make_zero", joined)
+        self.assertIn("-output_ts_offset 31.5", joined)
+        self.assertNotIn("-output_ts_offset 24", joined)
+        self.assertIn("-hls_flags omit_endlist+append_list", joined)
+        self.assertNotIn("-start_number", joined)
+        self.assertNotIn("discont_start", joined)
+
+    def test_jellyfin_boundary_filler_reports_elapsed_offset_after_live_window_rollover(self):
+        def write_rolled_playlist(command, check, shell, stdout, stderr, text):
+            playlist = Path(command[-1])
+            lines = ["#EXTM3U", "#EXT-X-VERSION:3", "#EXT-X-TARGETDURATION:2", "#EXT-X-MEDIA-SEQUENCE:8"]
+            for number in range(8, 20):
+                lines.extend(["#EXTINF:2.000000,", f"Sky_One_{number:05d}.ts"])
+            playlist.write_text("\n".join(lines) + "\n")
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+        with tempfile.TemporaryDirectory() as tmp, mock.patch("subprocess.run", side_effect=write_rolled_playlist):
+            diagnostics = HLSBlackSlateFillerRunner("/usr/bin/ffmpeg").run(
+                output_dir=Path(tmp),
+                output_name="Sky_One",
+                duration=40.0,
+                hls_start_number=0,
+                hls_start_time_offset=10.0,
+                hls_append=True,
+                stream_profile="jellyfin",
+            )
+            playlist_text = (Path(tmp) / "Sky_One.m3u8").read_text()
+
+        self.assertEqual(diagnostics["hls_next_start_number"], 20)
+        self.assertEqual(diagnostics["hls_segment_duration"], 40.0)
+        self.assertEqual(diagnostics["hls_next_start_time_offset"], 50.0)
+        self.assertNotIn("#EXT-X-DISCONTINUITY\n#EXT-X-DISCONTINUITY", playlist_text)
+
+    @unittest.skipUnless(Path("/usr/bin/ffmpeg").exists() and Path("/usr/bin/ffprobe").exists(), "requires system ffmpeg/ffprobe")
+    def test_jellyfin_live_repro_shows_timestamp_reset_at_process_boundaries_and_keeps_boundary_markers(self):
+        class FixtureScheduleClient:
+            def __init__(self, schedule):
+                self.schedule = schedule
+
+            def fetch_schedule(self, channel, expected_blocks=None):
+                return self.schedule
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            clips = create_fixture_clips(root / "clips", count=4, duration=2.2)
+            schedule = {
+                "network_name": "Sky One",
+                "schedule_blocks": [
+                    {
+                        "title": "Show A",
+                        "start_time": "2026-06-17T10:00:00",
+                        "end_time": "2026-06-17T10:00:08",
+                        "plan": [
+                            {"realpath": str(clips[0]), "duration": 2.2, "skip": 0, "is_stream": False, "content_type": "feature", "media_type": "video"},
+                            {"realpath": str(clips[1]), "duration": 2.2, "skip": 0, "is_stream": False, "content_type": "commercial", "media_type": "video"},
+                        ],
+                    },
+                    {
+                        "title": "Show B",
+                        "start_time": "2026-06-17T10:00:08",
+                        "end_time": "2026-06-17T10:00:14",
+                        "plan": [
+                            {"realpath": str(clips[2]), "duration": 2.2, "skip": 0, "is_stream": False, "content_type": "bump", "media_type": "video"},
+                            {"realpath": str(clips[3]), "duration": 2.2, "skip": 0, "is_stream": False, "content_type": "feature", "media_type": "video"},
+                        ],
+                    },
+                ],
+            }
+            current = [
+                datetime(2026, 6, 17, 10, 0, 0),
+                datetime(2026, 6, 17, 10, 0, 5),
+                datetime(2026, 6, 17, 10, 0, 8),
+                datetime(2026, 6, 17, 10, 0, 8),
+            ]
+
+            def clock():
+                return current.pop(0) if current else datetime(2026, 6, 17, 10, 0, 8)
+
+            client = FixtureScheduleClient(schedule)
+            runner = BlockRunner(
+                client=client,
+                planner=BlockPlanner(PathResolver(fs42_root=root, sdtv_root=root), FFProbe("/usr/bin/ffprobe")),
+                builder=FFMpegHLSCommandBuilder("/usr/bin/ffmpeg"),
+            )
+            controller = LiveController(
+                schedule_client=client,
+                block_runner=runner,
+                filler_runner=HLSBlackSlateFillerRunner("/usr/bin/ffmpeg"),
+            )
+
+            result = controller.run(
+                LiveControllerConfig(
+                    channel="Sky One",
+                    output_root=root / "out",
+                    max_blocks=2,
+                    duration_limit=7200,
+                    clock=clock,
+                    stream_profile="jellyfin",
+                )
+            )
+            playlist = Path(result["channel_output_dir"]) / "Sky_One.m3u8"
+            playlist_text = playlist.read_text()
+            first = json.loads(subprocess.check_output(["/usr/bin/ffprobe", "-v", "error", "-show_entries", "format=start_time", "-of", "json", str(playlist.parent / "Sky_One_00000.ts")], text=True))
+            filler = json.loads(subprocess.check_output(["/usr/bin/ffprobe", "-v", "error", "-show_entries", "format=start_time", "-of", "json", str(playlist.parent / "Sky_One_00003.ts")], text=True))
+            next_block = json.loads(subprocess.check_output(["/usr/bin/ffprobe", "-v", "error", "-show_entries", "format=start_time", "-of", "json", str(playlist.parent / "Sky_One_00005.ts")], text=True))
+
+        self.assertEqual(playlist_text.count("#EXT-X-DISCONTINUITY"), 2)
+        self.assertAlmostEqual(float(first["format"]["start_time"]), float(filler["format"]["start_time"]), places=3)
+        self.assertAlmostEqual(float(first["format"]["start_time"]), float(next_block["format"]["start_time"]), places=3)
+
+    def test_service_duration_default_spans_ninety_minute_block_without_boundary_filler(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            current = [datetime(2026, 6, 27, 11, 0, 0)]
+            runner = DurationConsumingBlockRunner(current)
+            filler = FakeFillerRunner()
+            controller = LiveController(schedule_client=LongBlockScheduleClient(), block_runner=runner, filler_runner=filler)
+
+            result = controller.run(
+                LiveControllerConfig(
+                    channel="Sky One",
+                    output_root=Path(tmp),
+                    max_blocks=2,
+                    duration_limit=ServiceConfig().duration_limit,
+                    clock=lambda: current[0],
+                )
+            )
+
+        self.assertEqual(runner.calls[0].duration_limit, 5400.0)
+        self.assertEqual(filler.calls, [])
+        self.assertNotIn("block_filler", [event["event"] for event in result["events"]])
+
     def test_runs_two_blocks_in_order_cleans_stale_hls_files_and_emits_json_events(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -184,6 +539,31 @@ class LiveControllerTests(unittest.TestCase):
         self.assertEqual(updates[-1]["status"], "complete")
         self.assertEqual(result["status"], "complete")
 
+    def test_jellyfin_profile_writes_isolated_hls_directory_and_passes_profile_to_runner(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runner = FakeBlockRunner()
+            updates = []
+            controller = LiveController(schedule_client=FakeScheduleClient(), block_runner=runner)
+
+            result = controller.run(
+                LiveControllerConfig(
+                    channel="Sky One",
+                    output_root=Path(tmp),
+                    max_blocks=1,
+                    duration_limit=10,
+                    now=datetime(2026, 6, 17, 10, 5, 0),
+                    status_callback=updates.append,
+                    stream_profile="jellyfin",
+                )
+            )
+
+        jellyfin_dir = Path(tmp) / "Sky_One" / "jellyfin"
+        self.assertEqual(runner.calls[0].output_dir, jellyfin_dir)
+        self.assertEqual(runner.calls[0].output_name, "Sky_One")
+        self.assertEqual(runner.calls[0].stream_profile, "jellyfin")
+        self.assertEqual(result["stream_profile"], "jellyfin")
+        self.assertEqual(result["channel_output_dir"], str(jellyfin_dir))
+        self.assertEqual(updates[0]["hls"]["playlist"], str(jellyfin_dir / "Sky_One.m3u8"))
 
     def test_does_not_start_future_block_when_current_block_finishes_before_wallclock_boundary(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -258,6 +638,61 @@ class LiveControllerTests(unittest.TestCase):
         self.assertEqual(filler_event["hls_start_number"], 1)
         self.assertEqual(filler_event["hls_next_start_number"], 4)
         self.assertEqual([call.hls_start_number for call in runner.calls], [0, 4])
+
+    def test_jellyfin_controller_carries_elapsed_timestamp_offset_across_boundary_filler(self):
+        class OffsetBlockRunner:
+            def __init__(self):
+                self.calls = []
+
+            def run(self, config):
+                self.calls.append(config)
+                index = len(self.calls) - 1
+                return {
+                    "status": "ok",
+                    "playlist": str(config.output_dir / "Sky_One.m3u8"),
+                    "hls_next_start_number": 1 if index == 0 else 5,
+                    "hls_next_start_time_offset": 1.6 if index == 0 else 9.1,
+                    "hls": {"segment_count": 1, "segments": []},
+                    "ffmpeg": {"returncode": 0, "stdout": "", "stderr": ""},
+                    "plan": [],
+                }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            current = [datetime(2026, 6, 17, 10, 5, 0)]
+            runner = OffsetBlockRunner()
+            filler = FakeFillerRunner(on_run=lambda kwargs: current.__setitem__(0, datetime(2026, 6, 17, 10, 30, 0)))
+
+            def filler_run(**kwargs):
+                filler.calls.append(kwargs)
+                filler.on_run(kwargs)
+                return {
+                    "status": "ok",
+                    "playlist": str(kwargs["output_dir"] / f"{kwargs['output_name']}.m3u8"),
+                    "hls_next_start_number": 4,
+                    "hls_next_start_time_offset": 7.1,
+                    "hls": {"segment_count": 3, "segments": []},
+                    "ffmpeg": {"returncode": 0, "stdout": "", "stderr": ""},
+                }
+
+            filler.run = filler_run
+            controller = LiveController(schedule_client=FakeScheduleClient(), block_runner=runner, filler_runner=filler)
+
+            result = controller.run(
+                LiveControllerConfig(
+                    channel="Sky One",
+                    output_root=Path(tmp),
+                    max_blocks=2,
+                    duration_limit=1800,
+                    clock=lambda: current[0],
+                    stream_profile="jellyfin",
+                )
+            )
+
+        self.assertEqual([call.hls_start_time_offset for call in runner.calls], [0.0, 7.1])
+        self.assertEqual(filler.calls[0]["hls_start_time_offset"], 1.6)
+        filler_event = [event for event in result["events"] if event["event"] == "block_filler"][0]
+        self.assertEqual(filler_event["hls_start_time_offset"], 1.6)
+        self.assertEqual(filler_event["hls_next_start_time_offset"], 7.1)
 
     def test_recovers_failed_ffmpeg_run_at_current_wallclock_without_advancing_block(self):
         with tempfile.TemporaryDirectory() as tmp:

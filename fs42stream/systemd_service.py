@@ -16,7 +16,7 @@ class ServiceConfig:
     port: int = 8088
     output_root: Path = Path("/var/lib/fs42stream/hls")
     max_blocks: int = 1000000
-    duration_limit: float = 1800.0
+    duration_limit: float = 7200.0
     video_encoder: str = "h264_vaapi"
     vaapi_device: str = "/dev/dri/renderD128"
     schedule_timezone: str = "Europe/London"

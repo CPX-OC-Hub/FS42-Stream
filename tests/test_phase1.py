@@ -363,6 +363,45 @@ class CatchUpBlockRunnerTests(unittest.TestCase):
         self.assertNotIn("concat=n=3", " ".join(" ".join(cmd) for cmd in diagnostics["commands"]))
         self.assertEqual(diagnostics["render_mode"], "sequential-plan-items")
 
+    def test_jellyfin_profile_builds_single_block_concat_command_for_remaining_block(self):
+        schedule = {
+            "network_name": "Sky One",
+            "schedule_blocks": [
+                {
+                    "title": "Show With Ad Break",
+                    "start_time": "2026-06-25T22:00:00",
+                    "end_time": "2026-06-25T22:30:00",
+                    "plan": [
+                        {"path": "catalog/SkyOne/show.mp4", "duration": 60, "skip": 0, "is_stream": False, "content_type": "feature"},
+                        {"path": "catalog/SkyOne/../commercial/ad.mp4", "duration": 30, "skip": 0, "is_stream": False, "content_type": "commercial"},
+                        {"path": "catalog/SkyOne/show.mp4", "duration": 60, "skip": 60, "is_stream": False, "content_type": "feature"},
+                    ],
+                }
+            ],
+        }
+        runner, builder = self._runner_for(schedule)
+
+        diagnostics = runner.run(
+            BlockRunConfig(
+                now=datetime(2026, 6, 25, 22, 0, 0),
+                dry_run=True,
+                hls_start_number=42,
+                hls_start_time_offset=100.0,
+                output_name="Sky_One",
+                stream_profile="jellyfin",
+            )
+        )
+
+        self.assertEqual(len(builder.blocks), 1)
+        self.assertEqual([item.source["content_type"] for item in builder.blocks[0].items], ["feature", "commercial", "feature"])
+        self.assertEqual([kwargs["stream_profile"] for kwargs in builder.kwargs_by_call], ["jellyfin"])
+        self.assertEqual([kwargs["hls_start_number"] for kwargs in builder.kwargs_by_call], [42])
+        self.assertEqual([kwargs["hls_append"] for kwargs in builder.kwargs_by_call], [False])
+        self.assertEqual([kwargs["hls_start_time_offset"] for kwargs in builder.kwargs_by_call], [100.0])
+        self.assertEqual(len(diagnostics["commands"]), 1)
+        self.assertEqual(diagnostics["render_mode"], "jellyfin-block-concat")
+        self.assertEqual(diagnostics["stream_profile"], "jellyfin")
+
 
 class FFMpegCommandBuilderTests(unittest.TestCase):
     def test_builds_block_level_concat_filter_hls_command_with_normalisation(self):
@@ -501,10 +540,34 @@ class FFMpegCommandBuilderTests(unittest.TestCase):
         )
 
         joined = " ".join(cmd)
-        self.assertIn("-start_number 42", joined)
         self.assertIn("-hls_flags omit_endlist+append_list+discont_start", joined)
+        self.assertNotIn("-start_number", joined)
         self.assertIn("/tmp/hls/Sky_One_%05d.ts", joined)
         self.assertEqual(cmd[-1], "/tmp/hls/Sky_One.m3u8")
+
+    def test_jellyfin_profile_uses_explicit_elapsed_timestamp_offset_and_marks_append_boundaries(self):
+        resolver = PathResolver()
+        probe = mock.Mock(validate_video=mock.Mock(return_value=ProbeResult(1, 320, 240, 25, 44100, 1)))
+        block = BlockPlanner(resolver, probe).plan(SCHEDULE)[0]
+
+        cmd = FFMpegHLSCommandBuilder(ffmpeg="/usr/bin/ffmpeg").build(
+            block,
+            output_dir=Path("/tmp/hls"),
+            output_name="Sky_One",
+            hls_start_number=42,
+            hls_start_time_offset=83.25,
+            hls_append=True,
+            stream_profile="jellyfin",
+        )
+
+        joined = " ".join(cmd)
+        self.assertIn("-fflags +genpts", joined)
+        self.assertIn("-avoid_negative_ts make_zero", joined)
+        self.assertIn("-output_ts_offset 83.25", joined)
+        self.assertNotIn("-output_ts_offset 84", joined)
+        self.assertIn("-hls_flags omit_endlist+append_list+discont_start", joined)
+        self.assertNotIn("-start_number", joined)
+        self.assertIn("discont_start", joined)
 
     def test_builds_silent_audio_chain_for_video_only_inputs(self):
         resolver = PathResolver()

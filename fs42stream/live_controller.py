@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol, Sequence
 
 from .client import FS42ScheduleClient
-from .ffmpeg import FFMpegHLSCommandBuilder
+from .ffmpeg import FFMpegHLSCommandBuilder, StreamProfile
 from .ffprobe import FFProbe
 from .paths import PathResolver
 from .planner import BlockPlanner
@@ -26,7 +26,11 @@ from .run_block import (
     BlockRunConfig,
     BlockRunner,
     SelectedBlock,
+    _hls_segment_duration_since,
+    _next_hls_start_number,
+    _normalize_jellyfin_live_playlist,
     _parse_datetime,
+    _rewrite_live_playlist_boundaries,
     _schedule_now,
     select_current_or_next_block,
 )
@@ -49,6 +53,7 @@ class LiveControllerConfig:
     max_recovery_attempts_per_block: int = 1
     clock: Callable[[], datetime] = _utc_now
     sleep: Callable[[float], None] = time.sleep
+    stream_profile: StreamProfile = "direct"
 
 
 class ScheduleClient(Protocol):
@@ -60,16 +65,18 @@ class SingleBlockRunner(Protocol):
 
 
 class BoundaryFillerRunner(Protocol):
-    def run(self, *, output_dir: Path, output_name: str, duration: float, hls_start_number: int, hls_append: bool = True) -> Mapping[str, Any]: ...
+    def run(self, *, output_dir: Path, output_name: str, duration: float, hls_start_number: int, hls_start_time_offset: float | None = None, hls_append: bool = True, stream_profile: StreamProfile = "direct") -> Mapping[str, Any]: ...
 
 
 class HLSBlackSlateFillerRunner:
     def __init__(self, ffmpeg: str = DEFAULT_FFMPEG) -> None:
         self.ffmpeg = ffmpeg
 
-    def run(self, *, output_dir: Path, output_name: str, duration: float, hls_start_number: int, hls_append: bool = True) -> Mapping[str, Any]:
+    def run(self, *, output_dir: Path, output_name: str, duration: float, hls_start_number: int, hls_start_time_offset: float | None = None, hls_append: bool = True, stream_profile: StreamProfile = "direct") -> Mapping[str, Any]:
         if duration <= 0:
             raise ValueError("duration must be positive")
+        if hls_start_time_offset is not None and hls_start_time_offset < 0:
+            raise ValueError("hls_start_time_offset must be non-negative")
         output_dir.mkdir(parents=True, exist_ok=True)
         playlist = output_dir / f"{output_name}.m3u8"
         segment_pattern = output_dir / f"{output_name}_%05d.ts"
@@ -95,6 +102,12 @@ class HLSBlackSlateFillerRunner:
             "veryfast",
             "-crf",
             "23",
+            "-g",
+            "50",
+            "-keyint_min",
+            "50",
+            "-sc_threshold",
+            "0",
             "-c:a",
             "aac",
             "-ar",
@@ -104,22 +117,40 @@ class HLSBlackSlateFillerRunner:
             "-f",
             "hls",
             "-hls_time",
-            "6",
-            "-start_number",
-            str(hls_start_number),
+            "2",
+            "-hls_list_size",
+            "12",
         ]
+        if stream_profile != "jellyfin" or not hls_append:
+            command.extend([
+                "-start_number",
+                str(hls_start_number),
+            ])
+        if stream_profile == "jellyfin":
+            command.extend(["-avoid_negative_ts", "make_zero"])
+            if hls_start_time_offset is not None:
+                command.extend(["-output_ts_offset", _num(hls_start_time_offset)])
         if hls_append:
-            command.extend(["-hls_flags", "append_list+discont_start"])
+            hls_flags = "omit_endlist+append_list" if stream_profile == "jellyfin" else "omit_endlist+append_list+discont_start"
+            command.extend(["-hls_flags", hls_flags])
+        else:
+            command.extend(["-hls_flags", "omit_endlist"])
         command.extend(["-hls_segment_filename", str(segment_pattern), str(playlist)])
         completed = subprocess.run(command, check=False, shell=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        segment_count = _count_hls_segments_from(playlist, start_number=hls_start_number)
+        if stream_profile == "jellyfin" and playlist.exists():
+            _normalize_jellyfin_live_playlist(playlist)
+        hls_next_start_number = _next_hls_start_number(playlist, fallback=hls_start_number)
+        segment_duration = _hls_segment_duration_since(playlist, start_number=hls_start_number)
         return {
             "status": "ok" if completed.returncode == 0 else "ffmpeg-error",
             "playlist": str(playlist),
             "command": command,
             "hls_start_number": hls_start_number,
-            "hls_next_start_number": hls_start_number + segment_count,
-            "hls": {"playlist": str(playlist), "segment_count": segment_count},
+            "hls_start_time_offset": hls_start_time_offset,
+            "hls_next_start_number": hls_next_start_number,
+            "hls_segment_duration": segment_duration,
+            "hls_next_start_time_offset": (hls_start_time_offset + segment_duration) if hls_start_time_offset is not None else None,
+            "hls": {"playlist": str(playlist), "segment_count": max(0, hls_next_start_number - hls_start_number)},
             "ffmpeg": {"returncode": completed.returncode, "stdout": completed.stdout, "stderr": completed.stderr},
         }
 
@@ -137,8 +168,12 @@ class LiveController:
             raise ValueError("max_blocks must be positive")
         if config.duration_limit <= 0:
             raise ValueError("duration_limit must be positive")
+        if config.stream_profile not in {"direct", "jellyfin"}:
+            raise ValueError("stream_profile must be 'direct' or 'jellyfin'")
 
         channel_output_dir = config.output_root / FFMpegHLSCommandBuilder._slug(config.channel)
+        if config.stream_profile == "jellyfin":
+            channel_output_dir = channel_output_dir / "jellyfin"
         channel_output_dir.mkdir(parents=True, exist_ok=True)
 
         events: list[dict[str, Any]] = []
@@ -147,6 +182,8 @@ class LiveController:
         last_index = -1
 
         hls_start_number = 0
+        hls_start_time_offset = 0.0
+        hls_boundary_starts: list[int] = []
         for ordinal in range(config.max_blocks):
             schedule = self.schedule_client.fetch_schedule(config.channel, expected_blocks=None)
             selection_now = cursor if simulated_cursor else config.clock()
@@ -191,12 +228,18 @@ class LiveController:
                     dry_run=config.dry_run,
                     output_name=FFMpegHLSCommandBuilder._slug(config.channel),
                     hls_start_number=block_hls_start_number,
+                    hls_start_time_offset=hls_start_time_offset if config.stream_profile == "jellyfin" else None,
                     hls_append=block_hls_append,
+                    hls_boundary_starts=tuple(hls_boundary_starts),
                     schedule_timezone=config.schedule_timezone,
+                    stream_profile=config.stream_profile,
                 )
             )
             diagnostics_dict = dict(diagnostics)
+            if isinstance(diagnostics_dict.get("hls_boundary_starts"), list):
+                hls_boundary_starts = [int(number) for number in diagnostics_dict["hls_boundary_starts"]]
             hls_start_number = int(diagnostics_dict.get("hls_next_start_number") or hls_start_number)
+            hls_start_time_offset = _next_hls_start_time_offset(diagnostics_dict, fallback=hls_start_time_offset)
             events.append(_complete_event(ordinal=ordinal, block=block_info, diagnostics=diagnostics_dict))
             _emit_live_status(
                 config,
@@ -252,12 +295,18 @@ class LiveController:
                                 dry_run=config.dry_run,
                                 output_name=FFMpegHLSCommandBuilder._slug(config.channel),
                                 hls_start_number=hls_start_number,
+                                hls_start_time_offset=hls_start_time_offset if config.stream_profile == "jellyfin" else None,
                                 hls_append=True,
+                                hls_boundary_starts=tuple(hls_boundary_starts),
                                 schedule_timezone=config.schedule_timezone,
+                                stream_profile=config.stream_profile,
                             )
                         )
                     )
+                    if isinstance(diagnostics_dict.get("hls_boundary_starts"), list):
+                        hls_boundary_starts = [int(number) for number in diagnostics_dict["hls_boundary_starts"]]
                     hls_start_number = int(diagnostics_dict.get("hls_next_start_number") or hls_start_number)
+                    hls_start_time_offset = _next_hls_start_time_offset(diagnostics_dict, fallback=hls_start_time_offset)
                     events.append(_complete_event(ordinal=ordinal, block=recovery_block_info, diagnostics=diagnostics_dict))
                     _emit_live_status(
                         config,
@@ -302,9 +351,19 @@ class LiveController:
                             output_name=FFMpegHLSCommandBuilder._slug(config.channel),
                             duration=wait_seconds,
                             hls_start_number=hls_start_number,
+                            hls_start_time_offset=hls_start_time_offset if config.stream_profile == "jellyfin" else None,
                             hls_append=True,
+                            stream_profile=config.stream_profile,
                         )
                     )
+                    filler_playlist = Path(str(filler_diagnostics.get("playlist") or ""))
+                    if filler_playlist.exists():
+                        if hls_start_number not in hls_boundary_starts:
+                            hls_boundary_starts.append(hls_start_number)
+                            hls_boundary_starts.sort()
+                        filler_state = _rewrite_live_playlist_boundaries(filler_playlist, boundary_starts=hls_boundary_starts)
+                        filler_diagnostics["hls_boundary_starts"] = list(hls_boundary_starts)
+                        filler_diagnostics["hls_discontinuity_sequence"] = filler_state.get("discontinuity_sequence")
                     events.append(
                         {
                             "event": "block_filler",
@@ -315,11 +374,14 @@ class LiveController:
                             "status": filler_diagnostics.get("status"),
                             "playlist": filler_diagnostics.get("playlist"),
                             "hls_start_number": hls_start_number,
+                            "hls_start_time_offset": hls_start_time_offset if config.stream_profile == "jellyfin" else None,
                             "hls_next_start_number": filler_diagnostics.get("hls_next_start_number"),
+                            "hls_next_start_time_offset": filler_diagnostics.get("hls_next_start_time_offset"),
                             "ffmpeg_returncode": _ffmpeg_returncode(filler_diagnostics),
                         }
                     )
                     hls_start_number = int(filler_diagnostics.get("hls_next_start_number") or hls_start_number)
+                    hls_start_time_offset = _next_hls_start_time_offset(filler_diagnostics, fallback=hls_start_time_offset)
                     _emit_live_status(
                         config,
                         status="running",
@@ -340,6 +402,7 @@ class LiveController:
             "max_blocks": config.max_blocks,
             "blocks_completed": config.max_blocks,
             "duration_limit": config.duration_limit,
+            "stream_profile": config.stream_profile,
             **summary,
             "events": events,
         }
@@ -382,6 +445,13 @@ def _ffmpeg_returncode(diagnostics: Mapping[str, Any]) -> Any:
     return None
 
 
+def _next_hls_start_time_offset(diagnostics: Mapping[str, Any], *, fallback: float) -> float:
+    raw_offset = diagnostics.get("hls_next_start_time_offset")
+    if isinstance(raw_offset, (int, float)):
+        return float(raw_offset)
+    return fallback
+
+
 def _emit_live_status(
     config: LiveControllerConfig,
     *,
@@ -408,6 +478,7 @@ def _emit_live_status(
         "max_blocks": config.max_blocks,
         "duration_limit": config.duration_limit,
         "schedule_timezone": config.schedule_timezone,
+        "stream_profile": config.stream_profile,
         "schedule_now": local_schedule_now.isoformat() if local_schedule_now is not None else None,
         "active_block": active_block,
         "upcoming_blocks": upcoming_blocks,
@@ -481,6 +552,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--timeout", type=float, default=10.0)
     parser.add_argument("--now", help="override current time for deterministic tests, e.g. 2026-06-17T10:05:00")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--stream-profile", choices=("direct", "jellyfin"), default="direct", help="HLS packaging profile; jellyfin writes under <channel>/jellyfin")
     args = parser.parse_args(argv)
 
     schedule_client = FS42ScheduleClient(args.api_base_url, timeout=args.timeout)
@@ -499,6 +571,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         dry_run=args.dry_run,
         schedule_timezone=args.schedule_timezone,
         max_recovery_attempts_per_block=args.max_recovery_attempts_per_block,
+        stream_profile=args.stream_profile,
     )
     try:
         result = controller.run(config)

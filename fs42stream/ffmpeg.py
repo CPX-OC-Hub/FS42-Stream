@@ -2,8 +2,12 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+from typing import Literal
 
 from .planner import PlannedBlock
+
+
+StreamProfile = Literal["direct", "jellyfin"]
 
 
 class FFMpegHLSCommandBuilder:
@@ -24,7 +28,9 @@ class FFMpegHLSCommandBuilder:
         duration_limit: float | None = None,
         output_name: str | None = None,
         hls_start_number: int = 0,
+        hls_start_time_offset: float | None = None,
         hls_append: bool = False,
+        stream_profile: StreamProfile = "direct",
     ) -> list[str]:
         if not block.items:
             raise ValueError("cannot build ffmpeg command for an empty block")
@@ -32,8 +38,14 @@ class FFMpegHLSCommandBuilder:
             raise ValueError("duration_limit must be positive")
         if hls_start_number < 0:
             raise ValueError("hls_start_number must be non-negative")
+        if hls_start_time_offset is not None and hls_start_time_offset < 0:
+            raise ValueError("hls_start_time_offset must be non-negative")
+        if stream_profile not in {"direct", "jellyfin"}:
+            raise ValueError("stream_profile must be 'direct' or 'jellyfin'")
 
         cmd: list[str] = [self.ffmpeg, "-hide_banner", "-y"]
+        if stream_profile == "jellyfin":
+            cmd.extend(["-fflags", "+genpts"])
         if self.vaapi_device:
             cmd.extend(["-vaapi_device", self.vaapi_device])
         for item in block.items:
@@ -76,12 +88,17 @@ class FFMpegHLSCommandBuilder:
         )
         if duration_limit is not None:
             cmd.extend(["-t", self._num(duration_limit)])
+        if stream_profile == "jellyfin":
+            cmd.extend(["-avoid_negative_ts", "make_zero"])
+            if hls_start_time_offset is not None:
+                cmd.extend(["-output_ts_offset", self._num(hls_start_time_offset)])
         hls_args = ["-f", "hls", "-hls_time", "2", "-hls_list_size", "12"]
-        if not hls_append or hls_start_number:
+        if not hls_append:
             hls_args.extend(["-start_number", str(hls_start_number)])
         hls_flags = ["omit_endlist"]
         if hls_append:
-            hls_flags.extend(["append_list", "discont_start"])
+            hls_flags.append("append_list")
+            hls_flags.append("discont_start")
         hls_args.extend(["-hls_flags", "+".join(hls_flags)])
         hls_args.extend(
             [
