@@ -11,7 +11,7 @@ from fs42stream.ffprobe import ProbeResult
 from fs42stream.hls_harness import create_fixture_clips
 from fs42stream.paths import PathResolver
 from fs42stream.planner import BlockPlanner
-from fs42stream.run_block import BlockRunConfig, BlockRunner, _hls_segment_duration_since, _normalize_jellyfin_live_playlist, select_current_or_next_block
+from fs42stream.run_block import BlockRunConfig, BlockRunner, _hls_segment_duration_since, _normalize_jellyfin_live_playlist, _rewrite_live_playlist_boundaries, select_current_or_next_block
 
 
 SCHEDULE = {
@@ -389,6 +389,99 @@ class BlockRunnerTests(unittest.TestCase):
                     "#EXT-X-DISCONTINUITY",
                     "#EXTINF:2.000000,",
                     "Sky_One_00001.ts",
+                ])
+                + "\n",
+            )
+
+    def test_playlist_boundary_rewriter_emits_discontinuity_sequence_after_rollover(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            playlist = Path(tmp) / "Sky_One.m3u8"
+            playlist.write_text(
+                "\n".join([
+                    "#EXTM3U",
+                    "#EXT-X-VERSION:3",
+                    "#EXT-X-TARGETDURATION:2",
+                    "#EXT-X-MEDIA-SEQUENCE:4",
+                    "#EXTINF:2.000000,",
+                    "Sky_One_00004.ts",
+                    "#EXTINF:2.000000,",
+                    "Sky_One_00005.ts",
+                    "#EXTINF:2.000000,",
+                    "Sky_One_00006.ts",
+                    "#EXTINF:0.600000,",
+                    "Sky_One_00007.ts",
+                    "#EXTINF:2.000000,",
+                    "Sky_One_00008.ts",
+                    "#EXTINF:2.000000,",
+                    "Sky_One_00009.ts",
+                ])
+                + "\n"
+            )
+
+            state = _rewrite_live_playlist_boundaries(playlist, boundary_starts=[4, 8])
+
+            self.assertEqual(state["discontinuity_sequence"], 0)
+            self.assertEqual(
+                playlist.read_text(),
+                "\n".join([
+                    "#EXTM3U",
+                    "#EXT-X-VERSION:3",
+                    "#EXT-X-TARGETDURATION:2",
+                    "#EXT-X-MEDIA-SEQUENCE:4",
+                    "#EXTINF:2.000000,",
+                    "Sky_One_00004.ts",
+                    "#EXTINF:2.000000,",
+                    "Sky_One_00005.ts",
+                    "#EXTINF:2.000000,",
+                    "Sky_One_00006.ts",
+                    "#EXTINF:0.600000,",
+                    "Sky_One_00007.ts",
+                    "#EXT-X-DISCONTINUITY",
+                    "#EXTINF:2.000000,",
+                    "Sky_One_00008.ts",
+                    "#EXTINF:2.000000,",
+                    "Sky_One_00009.ts",
+                ])
+                + "\n",
+            )
+
+            playlist.write_text(
+                "\n".join([
+                    "#EXTM3U",
+                    "#EXT-X-VERSION:3",
+                    "#EXT-X-TARGETDURATION:2",
+                    "#EXT-X-MEDIA-SEQUENCE:8",
+                    "#EXTINF:2.000000,",
+                    "Sky_One_00008.ts",
+                    "#EXTINF:2.000000,",
+                    "Sky_One_00009.ts",
+                    "#EXTINF:2.000000,",
+                    "Sky_One_00010.ts",
+                    "#EXTINF:0.600000,",
+                    "Sky_One_00011.ts",
+                ])
+                + "\n"
+            )
+
+            state = _rewrite_live_playlist_boundaries(playlist, boundary_starts=[4, 8])
+
+            self.assertEqual(state["discontinuity_sequence"], 1)
+            self.assertEqual(
+                playlist.read_text(),
+                "\n".join([
+                    "#EXTM3U",
+                    "#EXT-X-VERSION:3",
+                    "#EXT-X-TARGETDURATION:2",
+                    "#EXT-X-MEDIA-SEQUENCE:8",
+                    "#EXT-X-DISCONTINUITY-SEQUENCE:1",
+                    "#EXTINF:2.000000,",
+                    "Sky_One_00008.ts",
+                    "#EXTINF:2.000000,",
+                    "Sky_One_00009.ts",
+                    "#EXTINF:2.000000,",
+                    "Sky_One_00010.ts",
+                    "#EXTINF:0.600000,",
+                    "Sky_One_00011.ts",
                 ])
                 + "\n",
             )
