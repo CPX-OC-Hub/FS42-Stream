@@ -45,6 +45,7 @@ class BlockRunConfig:
     hls_start_number: int = 0
     hls_start_time_offset: float | None = None
     hls_append: bool = False
+    hls_boundary_starts: tuple[int, ...] = ()
     schedule_timezone: str | None = DEFAULT_SCHEDULE_TIMEZONE
     stream_profile: StreamProfile = "direct"
 
@@ -115,6 +116,7 @@ class BlockRunner:
         render_blocks: list[PlannedBlock] = []
         render_duration_limits: list[float] = []
         hls_start_number = config.hls_start_number
+        boundary_starts = sorted({int(number) for number in config.hls_boundary_starts if int(number) >= 0})
         if config.stream_profile == "jellyfin":
             render_blocks.append(planned)
             render_duration_limits.append(config.duration_limit)
@@ -182,7 +184,9 @@ class BlockRunner:
         final_returncode = 0
         command_hls_start_number = config.hls_start_number
         command_hls_start_time_offset = config.hls_start_time_offset
+        final_playlist_state: dict[str, Any] | None = None
         for run_index, render_block in enumerate(render_blocks):
+            appended_run = config.hls_append or run_index > 0
             command = self.builder.build(
                 render_block,
                 output_dir=config.output_dir,
@@ -190,9 +194,10 @@ class BlockRunner:
                 output_name=config.output_name,
                 hls_start_number=command_hls_start_number,
                 hls_start_time_offset=command_hls_start_time_offset if config.stream_profile == "jellyfin" else None,
-                hls_append=config.hls_append or run_index > 0,
+                hls_append=appended_run,
                 stream_profile=config.stream_profile,
             )
+            run_boundary_start = command_hls_start_number if appended_run else None
             executed_commands.append(command)
             completed = subprocess.run(command, check=False, shell=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
             run_info = {
@@ -207,8 +212,10 @@ class BlockRunner:
             final_returncode = completed.returncode
             playlist = Path(diagnostics["playlist"])
             if playlist.exists():
-                if config.stream_profile == "jellyfin":
-                    _normalize_jellyfin_live_playlist(playlist)
+                if run_boundary_start is not None and run_boundary_start not in boundary_starts:
+                    boundary_starts.append(run_boundary_start)
+                    boundary_starts.sort()
+                final_playlist_state = _rewrite_live_playlist_boundaries(playlist, boundary_starts=boundary_starts)
                 previous_hls_start_number = command_hls_start_number
                 hls_start_number = _next_hls_start_number(playlist, fallback=hls_start_number)
                 command_hls_start_number = hls_start_number
@@ -228,8 +235,7 @@ class BlockRunner:
         }
         playlist = Path(diagnostics["playlist"])
         if playlist.exists():
-            if config.stream_profile == "jellyfin":
-                _normalize_jellyfin_live_playlist(playlist)
+            final_playlist_state = _rewrite_live_playlist_boundaries(playlist, boundary_starts=boundary_starts)
             inspection = inspect_hls_output(playlist)
             diagnostics["hls"] = {
                 "playlist": str(inspection.playlist),
@@ -242,6 +248,9 @@ class BlockRunner:
                 new_duration = _hls_segment_duration_since(playlist, start_number=config.hls_start_number)
                 diagnostics["hls_segment_duration"] = new_duration
                 diagnostics["hls_next_start_time_offset"] = config.hls_start_time_offset + new_duration
+        diagnostics["hls_boundary_starts"] = boundary_starts
+        if isinstance(final_playlist_state, Mapping):
+            diagnostics["hls_discontinuity_sequence"] = final_playlist_state.get("discontinuity_sequence")
         return diagnostics
 
 
@@ -367,14 +376,14 @@ def _hls_segment_number(segment_uri: str) -> int | None:
 
 
 def _normalize_jellyfin_live_playlist(playlist: Path) -> None:
-    """Preserve true append-boundary discontinuities while removing ffmpeg's leading duplicates."""
+    """Preserve post-segment discontinuities while removing leading duplicates."""
     text = playlist.read_text(errors="replace")
     normalized_lines: list[str] = []
     seen_segment = False
     previous_was_discontinuity = False
     for line in text.splitlines():
         stripped = line.strip()
-        if stripped == "#EXT-X-DISCONTINUITY" or line.startswith("#EXT-X-DISCONTINUITY-SEQUENCE"):
+        if stripped == "#EXT-X-DISCONTINUITY" or stripped.startswith("#EXT-X-DISCONTINUITY-SEQUENCE"):
             if not seen_segment or previous_was_discontinuity:
                 continue
             normalized_lines.append("#EXT-X-DISCONTINUITY")
@@ -389,6 +398,75 @@ def _normalize_jellyfin_live_playlist(playlist: Path) -> None:
         normalized += "\n"
     if normalized != text:
         playlist.write_text(normalized)
+
+
+def _rewrite_live_playlist_boundaries(playlist: Path, *, boundary_starts: Sequence[int]) -> dict[str, Any]:
+    """Rewrite live HLS discontinuity tags deterministically and track rollover state."""
+    text = playlist.read_text(errors="replace")
+    header_lines: list[str] = []
+    footer_lines: list[str] = []
+    entries: list[tuple[list[str], str]] = []
+    pending_tags: list[str] = []
+    seen_segment = False
+    normalized_boundary_starts = sorted({int(number) for number in boundary_starts if int(number) >= 0})
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped == "#EXT-X-DISCONTINUITY" or stripped.startswith("#EXT-X-DISCONTINUITY-SEQUENCE"):
+            continue
+        if stripped and not stripped.startswith("#"):
+            entries.append((pending_tags.copy(), line))
+            pending_tags.clear()
+            seen_segment = True
+            continue
+        if not seen_segment and not pending_tags and not stripped.startswith("#EXTINF:"):
+            header_lines.append(line)
+            continue
+        pending_tags.append(line)
+
+    if pending_tags:
+        footer_lines = pending_tags.copy()
+
+    segment_numbers = [_hls_segment_number(uri) for _tags, uri in entries]
+    visible_segment_numbers = [number for number in segment_numbers if number is not None]
+    first_visible_segment_number = visible_segment_numbers[0] if visible_segment_numbers else None
+    discontinuity_sequence = (
+        sum(1 for number in normalized_boundary_starts if first_visible_segment_number is not None and number < first_visible_segment_number)
+        if first_visible_segment_number is not None
+        else 0
+    )
+
+    normalized_lines: list[str] = []
+    inserted_sequence = False
+    for line in header_lines:
+        normalized_lines.append(line)
+        if line.startswith("#EXT-X-MEDIA-SEQUENCE:") and discontinuity_sequence > 0:
+            normalized_lines.append(f"#EXT-X-DISCONTINUITY-SEQUENCE:{discontinuity_sequence}")
+            inserted_sequence = True
+    if discontinuity_sequence > 0 and not inserted_sequence:
+        normalized_lines.append(f"#EXT-X-DISCONTINUITY-SEQUENCE:{discontinuity_sequence}")
+
+    for (tags, uri), segment_number in zip(entries, segment_numbers):
+        if (
+            segment_number is not None
+            and first_visible_segment_number is not None
+            and segment_number != first_visible_segment_number
+            and segment_number in normalized_boundary_starts
+        ):
+            normalized_lines.append("#EXT-X-DISCONTINUITY")
+        normalized_lines.extend(tags)
+        normalized_lines.append(uri)
+    normalized_lines.extend(footer_lines)
+
+    normalized = "\n".join(normalized_lines)
+    if text.endswith("\n"):
+        normalized += "\n"
+    if normalized != text:
+        playlist.write_text(normalized)
+    return {
+        "discontinuity_sequence": discontinuity_sequence,
+        "boundary_starts": normalized_boundary_starts,
+        "first_visible_segment_number": first_visible_segment_number,
+    }
 
 
 def _diagnostics(

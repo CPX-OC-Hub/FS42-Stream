@@ -30,6 +30,7 @@ from .run_block import (
     _next_hls_start_number,
     _normalize_jellyfin_live_playlist,
     _parse_datetime,
+    _rewrite_live_playlist_boundaries,
     _schedule_now,
     select_current_or_next_block,
 )
@@ -182,6 +183,7 @@ class LiveController:
 
         hls_start_number = 0
         hls_start_time_offset = 0.0
+        hls_boundary_starts: list[int] = []
         for ordinal in range(config.max_blocks):
             schedule = self.schedule_client.fetch_schedule(config.channel, expected_blocks=None)
             selection_now = cursor if simulated_cursor else config.clock()
@@ -228,11 +230,14 @@ class LiveController:
                     hls_start_number=block_hls_start_number,
                     hls_start_time_offset=hls_start_time_offset if config.stream_profile == "jellyfin" else None,
                     hls_append=block_hls_append,
+                    hls_boundary_starts=tuple(hls_boundary_starts),
                     schedule_timezone=config.schedule_timezone,
                     stream_profile=config.stream_profile,
                 )
             )
             diagnostics_dict = dict(diagnostics)
+            if isinstance(diagnostics_dict.get("hls_boundary_starts"), list):
+                hls_boundary_starts = [int(number) for number in diagnostics_dict["hls_boundary_starts"]]
             hls_start_number = int(diagnostics_dict.get("hls_next_start_number") or hls_start_number)
             hls_start_time_offset = _next_hls_start_time_offset(diagnostics_dict, fallback=hls_start_time_offset)
             events.append(_complete_event(ordinal=ordinal, block=block_info, diagnostics=diagnostics_dict))
@@ -292,11 +297,14 @@ class LiveController:
                                 hls_start_number=hls_start_number,
                                 hls_start_time_offset=hls_start_time_offset if config.stream_profile == "jellyfin" else None,
                                 hls_append=True,
+                                hls_boundary_starts=tuple(hls_boundary_starts),
                                 schedule_timezone=config.schedule_timezone,
                                 stream_profile=config.stream_profile,
                             )
                         )
                     )
+                    if isinstance(diagnostics_dict.get("hls_boundary_starts"), list):
+                        hls_boundary_starts = [int(number) for number in diagnostics_dict["hls_boundary_starts"]]
                     hls_start_number = int(diagnostics_dict.get("hls_next_start_number") or hls_start_number)
                     hls_start_time_offset = _next_hls_start_time_offset(diagnostics_dict, fallback=hls_start_time_offset)
                     events.append(_complete_event(ordinal=ordinal, block=recovery_block_info, diagnostics=diagnostics_dict))
@@ -348,6 +356,14 @@ class LiveController:
                             stream_profile=config.stream_profile,
                         )
                     )
+                    filler_playlist = Path(str(filler_diagnostics.get("playlist") or ""))
+                    if filler_playlist.exists():
+                        if hls_start_number not in hls_boundary_starts:
+                            hls_boundary_starts.append(hls_start_number)
+                            hls_boundary_starts.sort()
+                        filler_state = _rewrite_live_playlist_boundaries(filler_playlist, boundary_starts=hls_boundary_starts)
+                        filler_diagnostics["hls_boundary_starts"] = list(hls_boundary_starts)
+                        filler_diagnostics["hls_discontinuity_sequence"] = filler_state.get("discontinuity_sequence")
                     events.append(
                         {
                             "event": "block_filler",
