@@ -26,9 +26,10 @@ from .run_block import (
     BlockRunConfig,
     BlockRunner,
     SelectedBlock,
-    _parse_datetime,
     _hls_segment_duration_since,
     _next_hls_start_number,
+    _normalize_jellyfin_live_playlist,
+    _parse_datetime,
     _schedule_now,
     select_current_or_next_block,
 )
@@ -135,6 +136,8 @@ class HLSBlackSlateFillerRunner:
             command.extend(["-hls_flags", "omit_endlist"])
         command.extend(["-hls_segment_filename", str(segment_pattern), str(playlist)])
         completed = subprocess.run(command, check=False, shell=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        if stream_profile == "jellyfin" and playlist.exists():
+            _normalize_jellyfin_live_playlist(playlist)
         hls_next_start_number = _next_hls_start_number(playlist, fallback=hls_start_number)
         segment_duration = _hls_segment_duration_since(playlist, start_number=hls_start_number)
         return {

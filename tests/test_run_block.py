@@ -11,7 +11,7 @@ from fs42stream.ffprobe import ProbeResult
 from fs42stream.hls_harness import create_fixture_clips
 from fs42stream.paths import PathResolver
 from fs42stream.planner import BlockPlanner
-from fs42stream.run_block import BlockRunConfig, BlockRunner, _hls_segment_duration_since, select_current_or_next_block
+from fs42stream.run_block import BlockRunConfig, BlockRunner, _hls_segment_duration_since, _normalize_jellyfin_live_playlist, select_current_or_next_block
 
 
 SCHEDULE = {
@@ -236,7 +236,7 @@ class BlockRunnerTests(unittest.TestCase):
         self.assertEqual(diagnostics["hls_segment_duration"], 40.0)
         self.assertEqual(diagnostics["hls_next_start_time_offset"], 140.0)
 
-    def test_jellyfin_runner_rebuilds_later_item_commands_from_actual_emitted_state(self):
+    def test_jellyfin_runner_renders_remaining_block_in_single_concat_command(self):
         schedule = {
             "network_name": "Sky One",
             "schedule_blocks": [
@@ -261,24 +261,18 @@ class BlockRunnerTests(unittest.TestCase):
 
         calls: list[list[str]] = []
 
-        def write_progressive_playlists(command, check, shell, stdout, stderr, text):
+        def write_single_playlist(command, check, shell, stdout, stderr, text):
             calls.append(command)
             playlist = Path(command[-1])
             playlist.parent.mkdir(parents=True, exist_ok=True)
-            if len(calls) == 1:
-                lines = ["#EXTM3U", "#EXT-X-VERSION:3", "#EXT-X-TARGETDURATION:2", "#EXT-X-MEDIA-SEQUENCE:12"]
-                for number in range(12, 19):
-                    lines.extend(["#EXTINF:2.000000,", f"Sky_One_{number:05d}.ts"])
-                    (playlist.parent / f"Sky_One_{number:05d}.ts").write_bytes(b"")
-            else:
-                lines = ["#EXTM3U", "#EXT-X-VERSION:3", "#EXT-X-TARGETDURATION:2", "#EXT-X-MEDIA-SEQUENCE:12"]
-                for number in range(12, 27):
-                    lines.extend(["#EXTINF:2.000000,", f"Sky_One_{number:05d}.ts"])
-                    (playlist.parent / f"Sky_One_{number:05d}.ts").write_bytes(b"")
+            lines = ["#EXTM3U", "#EXT-X-VERSION:3", "#EXT-X-TARGETDURATION:2", "#EXT-X-MEDIA-SEQUENCE:12"]
+            for number in range(12, 27):
+                lines.extend(["#EXTINF:2.000000,", f"Sky_One_{number:05d}.ts"])
+                (playlist.parent / f"Sky_One_{number:05d}.ts").write_bytes(b"")
             playlist.write_text("\n".join(lines) + "\n")
             return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
 
-        with tempfile.TemporaryDirectory() as tmp, mock.patch("subprocess.run", side_effect=write_progressive_playlists):
+        with tempfile.TemporaryDirectory() as tmp, mock.patch("subprocess.run", side_effect=write_single_playlist):
             diagnostics = runner.run(
                 BlockRunConfig(
                     channel="Sky One",
@@ -292,18 +286,17 @@ class BlockRunnerTests(unittest.TestCase):
                 )
             )
 
-        self.assertEqual(len(calls), 2)
-        first_joined = " ".join(calls[0])
-        second_joined = " ".join(calls[1])
-        self.assertIn("-start_number 0", first_joined)
-        self.assertIn("-output_ts_offset 100", first_joined)
-        self.assertNotIn("-start_number", second_joined)
-        self.assertIn("-output_ts_offset 138", second_joined)
+        self.assertEqual(len(calls), 1)
+        joined = " ".join(calls[0])
+        self.assertIn("concat=n=2:v=1:a=1", joined)
+        self.assertIn("-start_number 0", joined)
+        self.assertIn("-output_ts_offset 100", joined)
         self.assertEqual(diagnostics["hls_next_start_number"], 27)
         self.assertEqual(diagnostics["hls_next_start_time_offset"], 154.0)
+        self.assertEqual(diagnostics["render_mode"], "jellyfin-block-concat")
 
     @unittest.skipUnless(Path("/usr/bin/ffmpeg").exists() and Path("/usr/bin/ffprobe").exists(), "requires system ffmpeg/ffprobe")
-    def test_jellyfin_runner_keeps_dense_segment_numbering_across_item_boundaries(self):
+    def test_jellyfin_runner_keeps_item_boundaries_inside_single_command_and_dense_numbering(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             clips = create_fixture_clips(root / "clips", count=3, duration=2.2)
@@ -343,9 +336,11 @@ class BlockRunnerTests(unittest.TestCase):
             playlist = Path(diagnostics["playlist"]).read_text()
 
         joined_commands = [" ".join(command) for command in diagnostics["commands"]]
+        self.assertEqual(len(joined_commands), 1)
+        self.assertIn("concat=n=3:v=1:a=1", joined_commands[0])
         self.assertIn("-start_number 0", joined_commands[0])
-        self.assertTrue(all("-start_number" not in joined for joined in joined_commands[1:]))
         self.assertIn("#EXT-X-MEDIA-SEQUENCE:0", playlist)
+        self.assertNotIn("#EXT-X-DISCONTINUITY\n#EXTINF:2.000000,\nSky_One_00001.ts", playlist)
         self.assertNotIn("Sky_One_00010.ts", playlist)
         self.assertEqual(
             [Path(path).name for path in diagnostics["hls"]["segments"]],
@@ -354,11 +349,49 @@ class BlockRunnerTests(unittest.TestCase):
                 "Sky_One_00001.ts",
                 "Sky_One_00002.ts",
                 "Sky_One_00003.ts",
-                "Sky_One_00004.ts",
-                "Sky_One_00005.ts",
             ],
         )
-        self.assertEqual(diagnostics["hls_next_start_number"], 6)
+        self.assertEqual(diagnostics["hls_next_start_number"], 4)
+
+    @unittest.skipUnless(Path("/usr/bin/ffmpeg").exists() and Path("/usr/bin/ffprobe").exists(), "requires system ffmpeg/ffprobe")
+    def test_jellyfin_playlist_normalizer_removes_leading_discontinuity_duplicates_but_keeps_boundaries(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            playlist = Path(tmp) / "Sky_One.m3u8"
+            playlist.write_text(
+                "\n".join([
+                    "#EXTM3U",
+                    "#EXT-X-VERSION:3",
+                    "#EXT-X-TARGETDURATION:2",
+                    "#EXT-X-MEDIA-SEQUENCE:0",
+                    "#EXT-X-DISCONTINUITY",
+                    "#EXT-X-DISCONTINUITY",
+                    "#EXTINF:2.000000,",
+                    "Sky_One_00000.ts",
+                    "#EXT-X-DISCONTINUITY",
+                    "#EXT-X-DISCONTINUITY",
+                    "#EXTINF:2.000000,",
+                    "Sky_One_00001.ts",
+                ])
+                + "\n"
+            )
+
+            _normalize_jellyfin_live_playlist(playlist)
+
+            self.assertEqual(
+                playlist.read_text(),
+                "\n".join([
+                    "#EXTM3U",
+                    "#EXT-X-VERSION:3",
+                    "#EXT-X-TARGETDURATION:2",
+                    "#EXT-X-MEDIA-SEQUENCE:0",
+                    "#EXTINF:2.000000,",
+                    "Sky_One_00000.ts",
+                    "#EXT-X-DISCONTINUITY",
+                    "#EXTINF:2.000000,",
+                    "Sky_One_00001.ts",
+                ])
+                + "\n",
+            )
 
 
 class HLSTimestampOffsetTests(unittest.TestCase):

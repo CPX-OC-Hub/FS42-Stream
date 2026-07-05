@@ -112,32 +112,47 @@ class BlockRunner:
         catch_up_block, catch_up = _catch_up_block_to_wallclock(selected.block, now=config.now, schedule_timezone=config.schedule_timezone)
         planned = self.planner.plan_block(catch_up_block)
         commands: list[list[str]] = []
-        item_blocks: list[PlannedBlock] = []
-        item_duration_limits: list[float] = []
+        render_blocks: list[PlannedBlock] = []
+        render_duration_limits: list[float] = []
         hls_start_number = config.hls_start_number
-        hls_start_time_offset = config.hls_start_time_offset
-        remaining_budget = config.duration_limit
-        for item_index, item in enumerate(planned.items):
-            if remaining_budget <= 0:
-                break
-            item_duration_limit = min(item.duration, remaining_budget) if item.duration > 0 else remaining_budget
-            item_block = _single_item_block(planned, item, item_index=item_index)
-            item_blocks.append(item_block)
-            item_duration_limits.append(item_duration_limit)
-            command = self.builder.build(
-                item_block,
-                output_dir=config.output_dir,
-                duration_limit=item_duration_limit,
-                output_name=config.output_name,
-                hls_start_number=hls_start_number,
-                hls_start_time_offset=hls_start_time_offset if config.stream_profile == "jellyfin" else None,
-                hls_append=config.hls_append or item_index > 0,
-                stream_profile=config.stream_profile,
+        if config.stream_profile == "jellyfin":
+            render_blocks.append(planned)
+            render_duration_limits.append(config.duration_limit)
+            commands.append(
+                self.builder.build(
+                    planned,
+                    output_dir=config.output_dir,
+                    duration_limit=config.duration_limit,
+                    output_name=config.output_name,
+                    hls_start_number=config.hls_start_number,
+                    hls_start_time_offset=config.hls_start_time_offset,
+                    hls_append=config.hls_append,
+                    stream_profile=config.stream_profile,
+                )
             )
-            commands.append(command)
-            remaining_budget -= item_duration_limit
-            if config.stream_profile == "jellyfin" and hls_start_time_offset is not None:
-                hls_start_time_offset += item_duration_limit
+        else:
+            hls_start_number = config.hls_start_number
+            remaining_budget = config.duration_limit
+            for item_index, item in enumerate(planned.items):
+                if remaining_budget <= 0:
+                    break
+                item_duration_limit = min(item.duration, remaining_budget) if item.duration > 0 else remaining_budget
+                item_block = _single_item_block(planned, item, item_index=item_index)
+                render_blocks.append(item_block)
+                render_duration_limits.append(item_duration_limit)
+                commands.append(
+                    self.builder.build(
+                        item_block,
+                        output_dir=config.output_dir,
+                        duration_limit=item_duration_limit,
+                        output_name=config.output_name,
+                        hls_start_number=hls_start_number,
+                        hls_start_time_offset=None,
+                        hls_append=config.hls_append or item_index > 0,
+                        stream_profile=config.stream_profile,
+                    )
+                )
+                remaining_budget -= item_duration_limit
 
         diagnostics = _diagnostics(
             status="dry-run" if config.dry_run else "ok",
@@ -155,7 +170,7 @@ class BlockRunner:
             stream_profile=config.stream_profile,
             catch_up=catch_up,
         )
-        diagnostics["render_mode"] = "jellyfin-sequential-monotonic-items" if config.stream_profile == "jellyfin" else "sequential-plan-items"
+        diagnostics["render_mode"] = "jellyfin-block-concat" if config.stream_profile == "jellyfin" else "sequential-plan-items"
         diagnostics["stream_profile"] = config.stream_profile
         diagnostics["commands"] = commands
         diagnostics["item_command_count"] = len(commands)
@@ -167,11 +182,11 @@ class BlockRunner:
         final_returncode = 0
         command_hls_start_number = config.hls_start_number
         command_hls_start_time_offset = config.hls_start_time_offset
-        for run_index, item_block in enumerate(item_blocks):
+        for run_index, render_block in enumerate(render_blocks):
             command = self.builder.build(
-                item_block,
+                render_block,
                 output_dir=config.output_dir,
-                duration_limit=item_duration_limits[run_index],
+                duration_limit=render_duration_limits[run_index],
                 output_name=config.output_name,
                 hls_start_number=command_hls_start_number,
                 hls_start_time_offset=command_hls_start_time_offset if config.stream_profile == "jellyfin" else None,
@@ -192,6 +207,8 @@ class BlockRunner:
             final_returncode = completed.returncode
             playlist = Path(diagnostics["playlist"])
             if playlist.exists():
+                if config.stream_profile == "jellyfin":
+                    _normalize_jellyfin_live_playlist(playlist)
                 previous_hls_start_number = command_hls_start_number
                 hls_start_number = _next_hls_start_number(playlist, fallback=hls_start_number)
                 command_hls_start_number = hls_start_number
@@ -211,6 +228,8 @@ class BlockRunner:
         }
         playlist = Path(diagnostics["playlist"])
         if playlist.exists():
+            if config.stream_profile == "jellyfin":
+                _normalize_jellyfin_live_playlist(playlist)
             inspection = inspect_hls_output(playlist)
             diagnostics["hls"] = {
                 "playlist": str(inspection.playlist),
@@ -345,6 +364,31 @@ def _hls_segment_number(segment_uri: str) -> int | None:
     if suffix.isdigit():
         return int(suffix)
     return None
+
+
+def _normalize_jellyfin_live_playlist(playlist: Path) -> None:
+    """Preserve true append-boundary discontinuities while removing ffmpeg's leading duplicates."""
+    text = playlist.read_text(errors="replace")
+    normalized_lines: list[str] = []
+    seen_segment = False
+    previous_was_discontinuity = False
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped == "#EXT-X-DISCONTINUITY" or line.startswith("#EXT-X-DISCONTINUITY-SEQUENCE"):
+            if not seen_segment or previous_was_discontinuity:
+                continue
+            normalized_lines.append("#EXT-X-DISCONTINUITY")
+            previous_was_discontinuity = True
+            continue
+        normalized_lines.append(line)
+        if stripped and not stripped.startswith("#"):
+            seen_segment = True
+        previous_was_discontinuity = False
+    normalized = "\n".join(normalized_lines)
+    if text.endswith("\n"):
+        normalized += "\n"
+    if normalized != text:
+        playlist.write_text(normalized)
 
 
 def _diagnostics(
