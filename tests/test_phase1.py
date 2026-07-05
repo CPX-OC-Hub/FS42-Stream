@@ -363,7 +363,7 @@ class CatchUpBlockRunnerTests(unittest.TestCase):
         self.assertNotIn("concat=n=3", " ".join(" ".join(cmd) for cmd in diagnostics["commands"]))
         self.assertEqual(diagnostics["render_mode"], "sequential-plan-items")
 
-    def test_jellyfin_profile_builds_sequential_timestamp_offset_commands_for_remaining_block(self):
+    def test_jellyfin_profile_builds_single_block_concat_command_for_remaining_block(self):
         schedule = {
             "network_name": "Sky One",
             "schedule_blocks": [
@@ -392,13 +392,14 @@ class CatchUpBlockRunnerTests(unittest.TestCase):
             )
         )
 
-        self.assertEqual(len(builder.blocks), 3)
-        self.assertEqual([block.items[0].source["content_type"] for block in builder.blocks], ["feature", "commercial", "feature"])
-        self.assertEqual([kwargs["stream_profile"] for kwargs in builder.kwargs_by_call], ["jellyfin", "jellyfin", "jellyfin"])
-        self.assertEqual([kwargs["hls_start_number"] for kwargs in builder.kwargs_by_call], [42, 42, 42])
-        self.assertEqual([kwargs["hls_append"] for kwargs in builder.kwargs_by_call], [False, True, True])
-        self.assertEqual([kwargs["hls_start_time_offset"] for kwargs in builder.kwargs_by_call], [100.0, 160.0, 190.0])
-        self.assertEqual(diagnostics["render_mode"], "jellyfin-sequential-monotonic-items")
+        self.assertEqual(len(builder.blocks), 1)
+        self.assertEqual([item.source["content_type"] for item in builder.blocks[0].items], ["feature", "commercial", "feature"])
+        self.assertEqual([kwargs["stream_profile"] for kwargs in builder.kwargs_by_call], ["jellyfin"])
+        self.assertEqual([kwargs["hls_start_number"] for kwargs in builder.kwargs_by_call], [42])
+        self.assertEqual([kwargs["hls_append"] for kwargs in builder.kwargs_by_call], [False])
+        self.assertEqual([kwargs["hls_start_time_offset"] for kwargs in builder.kwargs_by_call], [100.0])
+        self.assertEqual(len(diagnostics["commands"]), 1)
+        self.assertEqual(diagnostics["render_mode"], "jellyfin-block-concat")
         self.assertEqual(diagnostics["stream_profile"], "jellyfin")
 
 
@@ -539,12 +540,12 @@ class FFMpegCommandBuilderTests(unittest.TestCase):
         )
 
         joined = " ".join(cmd)
-        self.assertIn("-start_number 42", joined)
         self.assertIn("-hls_flags omit_endlist+append_list+discont_start", joined)
+        self.assertNotIn("-start_number", joined)
         self.assertIn("/tmp/hls/Sky_One_%05d.ts", joined)
         self.assertEqual(cmd[-1], "/tmp/hls/Sky_One.m3u8")
 
-    def test_jellyfin_profile_uses_explicit_elapsed_timestamp_offset_and_avoids_discontinuity_tags(self):
+    def test_jellyfin_profile_uses_explicit_elapsed_timestamp_offset_and_marks_append_boundaries(self):
         resolver = PathResolver()
         probe = mock.Mock(validate_video=mock.Mock(return_value=ProbeResult(1, 320, 240, 25, 44100, 1)))
         block = BlockPlanner(resolver, probe).plan(SCHEDULE)[0]
@@ -564,9 +565,9 @@ class FFMpegCommandBuilderTests(unittest.TestCase):
         self.assertIn("-avoid_negative_ts make_zero", joined)
         self.assertIn("-output_ts_offset 83.25", joined)
         self.assertNotIn("-output_ts_offset 84", joined)
-        self.assertIn("-hls_flags omit_endlist+append_list", joined)
+        self.assertIn("-hls_flags omit_endlist+append_list+discont_start", joined)
         self.assertNotIn("-start_number", joined)
-        self.assertNotIn("discont_start", joined)
+        self.assertIn("discont_start", joined)
 
     def test_builds_silent_audio_chain_for_video_only_inputs(self):
         resolver = PathResolver()
