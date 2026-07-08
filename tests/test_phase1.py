@@ -101,6 +101,24 @@ class PathResolverTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     resolver.resolve(bad)
 
+    def test_recovers_unique_nested_commercial_when_schedule_points_at_root(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            fs42_root = root / "fs42"
+            sdtv_root = root / "SDTV"
+            commercial_root = fs42_root / "catalog" / "commercial"
+            late_dir = commercial_root / "Late"
+            late_dir.mkdir(parents=True)
+            sdtv_root.mkdir()
+            recovered = late_dir / "Miller - 1995 - fixed.mp4"
+            recovered.write_text("stub")
+
+            resolver = PathResolver(fs42_root=fs42_root, sdtv_root=sdtv_root)
+            self.assertEqual(
+                resolver.resolve("catalog/commercial/Miller - 1995 - fixed.mp4"),
+                recovered,
+            )
+
 
 class FFProbeTests(unittest.TestCase):
     def test_validate_video_invokes_ffprobe_and_parses_json(self):
