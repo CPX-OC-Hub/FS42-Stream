@@ -88,10 +88,8 @@ class FFMpegHLSCommandBuilder:
         )
         if duration_limit is not None:
             cmd.extend(["-t", self._num(duration_limit)])
-        if stream_profile == "jellyfin":
-            cmd.extend(["-avoid_negative_ts", "make_zero"])
-            if hls_start_time_offset is not None:
-                cmd.extend(["-output_ts_offset", self._num(hls_start_time_offset)])
+        if stream_profile == "jellyfin" and hls_start_time_offset is not None:
+            cmd.extend(["-output_ts_offset", self._num(hls_start_time_offset)])
         hls_args = ["-f", "hls", "-hls_time", "2", "-hls_list_size", "12"]
         if not hls_append:
             hls_args.extend(["-start_number", str(hls_start_number)])

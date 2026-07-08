@@ -335,12 +335,12 @@ class LiveControllerTests(unittest.TestCase):
 
         command = run.call_args.args[0]
         joined = " ".join(command)
-        self.assertIn("-avoid_negative_ts make_zero", joined)
         self.assertIn("-output_ts_offset 31.5", joined)
         self.assertNotIn("-output_ts_offset 24", joined)
         self.assertIn("-hls_flags omit_endlist+append_list", joined)
         self.assertNotIn("-start_number", joined)
         self.assertNotIn("discont_start", joined)
+        self.assertNotIn("-avoid_negative_ts", joined)
 
     def test_jellyfin_boundary_filler_reports_elapsed_offset_after_live_window_rollover(self):
         def write_rolled_playlist(command, check, shell, stdout, stderr, text):
@@ -369,7 +369,7 @@ class LiveControllerTests(unittest.TestCase):
         self.assertNotIn("#EXT-X-DISCONTINUITY\n#EXT-X-DISCONTINUITY", playlist_text)
 
     @unittest.skipUnless(Path("/usr/bin/ffmpeg").exists() and Path("/usr/bin/ffprobe").exists(), "requires system ffmpeg/ffprobe")
-    def test_jellyfin_live_repro_shows_timestamp_reset_at_process_boundaries_and_keeps_boundary_markers(self):
+    def test_jellyfin_live_repro_keeps_boundary_markers_and_monotonic_segment_starts(self):
         class FixtureScheduleClient:
             def __init__(self, schedule):
                 self.schedule = schedule
@@ -442,8 +442,8 @@ class LiveControllerTests(unittest.TestCase):
             next_block = json.loads(subprocess.check_output(["/usr/bin/ffprobe", "-v", "error", "-show_entries", "format=start_time", "-of", "json", str(playlist.parent / "Sky_One_00005.ts")], text=True))
 
         self.assertEqual(playlist_text.count("#EXT-X-DISCONTINUITY"), 2)
-        self.assertAlmostEqual(float(first["format"]["start_time"]), float(filler["format"]["start_time"]), places=3)
-        self.assertAlmostEqual(float(first["format"]["start_time"]), float(next_block["format"]["start_time"]), places=3)
+        self.assertLess(float(first["format"]["start_time"]), float(filler["format"]["start_time"]))
+        self.assertLess(float(filler["format"]["start_time"]), float(next_block["format"]["start_time"]))
 
     def test_service_duration_default_spans_ninety_minute_block_without_boundary_filler(self):
         with tempfile.TemporaryDirectory() as tmp:
