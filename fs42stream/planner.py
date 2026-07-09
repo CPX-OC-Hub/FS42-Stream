@@ -83,7 +83,7 @@ class BlockPlanner:
             raise ValueError("plan item missing path/realpath")
         resolved = self.resolver.resolve(raw_path)
         duration = float(item.get("duration") or 0.0)
-        if not _is_commercial_type(fs42_item_type(item)) and self._is_known_runtime_off_air_slate(item, resolved):
+        if self._is_known_runtime_off_air_slate(item, resolved):
             if self.fallback_slate_video is not None:
                 return PlannedItem(
                     source=item,

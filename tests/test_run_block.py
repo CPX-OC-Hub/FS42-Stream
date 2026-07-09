@@ -151,6 +151,35 @@ class BlockRunnerTests(unittest.TestCase):
         self.assertEqual(diagnostics["plan"][0]["diagnostic"], "known runtime/off-air image slate replaced with generated fallback video")
         self.assertIn("lavfi", diagnostics["command"])
 
+    def test_runner_replaces_runtime_png_even_when_schedule_labels_it_as_commercial_video(self):
+        schedule = {
+            "network_name": "Sky One",
+            "schedule_blocks": [
+                {
+                    "title": "Bad Runtime Metadata",
+                    "start_time": "2026-06-17T10:00:00",
+                    "end_time": "2026-06-17T10:30:00",
+                    "plan": [
+                        {"path": "runtime/brb.png", "duration": 8, "skip": 0, "is_stream": False, "content_type": "commercial", "media_type": "video"},
+                    ],
+                }
+            ],
+        }
+        client = mock.Mock(fetch_schedule=mock.Mock(return_value=schedule))
+        probe = mock.Mock()
+        runner = BlockRunner(
+            client=client,
+            planner=BlockPlanner(PathResolver(fs42_root="/mnt/fs42", sdtv_root="/mnt/media/SDTV"), probe),
+            builder=FFMpegHLSCommandBuilder("/usr/bin/ffmpeg"),
+        )
+
+        diagnostics = runner.run(BlockRunConfig(channel="Sky One", duration_limit=15, output_dir=Path("/tmp/out"), now=datetime(2026, 6, 17, 10, 5, 0), dry_run=True))
+
+        probe.validate_video.assert_not_called()
+        self.assertEqual(diagnostics["plan"][0]["resolved_path"], "/mnt/fs42/runtime/brb.png")
+        self.assertEqual(diagnostics["plan"][0]["input_kind"], "lavfi")
+        self.assertEqual(diagnostics["plan"][0]["runtime_action"], "generated_fallback_slate")
+
     def test_runner_dry_run_reports_commercial_counts_paths_and_preserves_inputs(self):
         schedule = {
             "network_name": "Sky One",

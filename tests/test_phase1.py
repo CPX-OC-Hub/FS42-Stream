@@ -270,7 +270,7 @@ class BlockPlannerTests(unittest.TestCase):
             ["/mnt/fs42/catalog/commercial/ad-a.mp4", "/mnt/fs42/catalog/commercial/ad-b.mp4"],
         )
 
-    def test_commercial_runtime_path_is_not_replaced_with_off_air_fallback(self):
+    def test_runtime_png_with_commercial_type_is_replaced_with_off_air_fallback(self):
         schedule = {
             "schedule_blocks": [
                 {
@@ -282,11 +282,38 @@ class BlockPlannerTests(unittest.TestCase):
             ]
         }
         probe = mock.Mock()
-        probe.validate_video.side_effect = FileNotFoundError("missing commercial")
+        block = BlockPlanner(PathResolver(fs42_root="/mnt/fs42", sdtv_root="/mnt/media/SDTV"), probe).plan(schedule)[0]
 
-        with self.assertRaisesRegex(FileNotFoundError, "missing commercial"):
-            BlockPlanner(PathResolver(fs42_root="/mnt/fs42", sdtv_root="/mnt/media/SDTV"), probe).plan(schedule)
-        probe.validate_video.assert_called_once_with(Path("/mnt/fs42/runtime/brb.png"))
+        probe.validate_video.assert_not_called()
+        self.assertEqual(block.items[0].resolved_path, Path("/mnt/fs42/runtime/brb.png"))
+        self.assertEqual(block.items[0].input_kind, "lavfi")
+        self.assertEqual(block.items[0].runtime_action, "generated_fallback_slate")
+
+    def test_runtime_png_with_bad_commercial_metadata_is_still_replaced_with_fallback(self):
+        schedule = {
+            "schedule_blocks": [
+                {
+                    "title": "Bad Runtime Metadata",
+                    "plan": [
+                        {
+                            "path": "runtime/brb.png",
+                            "duration": 8,
+                            "skip": 0,
+                            "is_stream": False,
+                            "content_type": "commercial",
+                            "media_type": "video",
+                        }
+                    ],
+                }
+            ]
+        }
+        probe = mock.Mock()
+        block = BlockPlanner(PathResolver(fs42_root="/mnt/fs42", sdtv_root="/mnt/media/SDTV"), probe).plan(schedule)[0]
+
+        probe.validate_video.assert_not_called()
+        self.assertEqual(block.items[0].resolved_path, Path("/mnt/fs42/runtime/brb.png"))
+        self.assertEqual(block.items[0].input_kind, "lavfi")
+        self.assertEqual(block.items[0].runtime_action, "generated_fallback_slate")
 
 
 class CatchUpBlockRunnerTests(unittest.TestCase):
