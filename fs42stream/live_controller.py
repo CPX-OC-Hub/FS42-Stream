@@ -50,7 +50,7 @@ class LiveControllerConfig:
     dry_run: bool = False
     status_callback: Callable[[Mapping[str, Any]], None] | None = None
     schedule_timezone: str | None = DEFAULT_SCHEDULE_TIMEZONE
-    max_recovery_attempts_per_block: int = 1
+    max_recovery_attempts_per_block: int = 3
     clock: Callable[[], datetime] = _utc_now
     sleep: Callable[[float], None] = time.sleep
     stream_profile: StreamProfile = "direct"
@@ -233,20 +233,18 @@ class LiveController:
                     stream_profile=config.stream_profile,
                 )
             )
-            diagnostics_dict = dict(diagnostics)
+            diagnostics_dict = _finalize_block_run_diagnostics(
+                diagnostics,
+                simulated_cursor=simulated_cursor,
+                run_started_at=selection_now,
+                clock=config.clock,
+                duration_limit=effective_duration_limit,
+                schedule_timezone=config.schedule_timezone,
+            )
             if isinstance(diagnostics_dict.get("hls_boundary_starts"), list):
                 hls_boundary_starts = [int(number) for number in diagnostics_dict["hls_boundary_starts"]]
             hls_start_number = int(diagnostics_dict.get("hls_next_start_number") or hls_start_number)
             hls_start_time_offset = _next_hls_start_time_offset(diagnostics_dict, fallback=hls_start_time_offset)
-            if not simulated_cursor and not _block_run_failed(diagnostics_dict) and _block_run_completed_prematurely(
-                diagnostics_dict,
-                run_started_at=selection_now,
-                run_finished_at=config.clock(),
-                duration_limit=effective_duration_limit,
-                schedule_timezone=config.schedule_timezone,
-            ):
-                diagnostics_dict = dict(diagnostics_dict)
-                diagnostics_dict["status"] = "premature-complete"
             events.append(_complete_event(ordinal=ordinal, block=block_info, diagnostics=diagnostics_dict))
             _emit_live_status(
                 config,
@@ -292,7 +290,7 @@ class LiveController:
                         schedule_now=recovery_now,
                     )
                     recovery_duration_limit = min(config.duration_limit, max(0.0, (block_end - schedule_now).total_seconds()))
-                    diagnostics_dict = dict(
+                    diagnostics_dict = _finalize_block_run_diagnostics(
                         self.block_runner.run(
                             BlockRunConfig(
                                 channel=config.channel,
@@ -308,7 +306,12 @@ class LiveController:
                                 schedule_timezone=config.schedule_timezone,
                                 stream_profile=config.stream_profile,
                             )
-                        )
+                        ),
+                        simulated_cursor=simulated_cursor,
+                        run_started_at=recovery_now,
+                        clock=config.clock,
+                        duration_limit=recovery_duration_limit,
+                        schedule_timezone=config.schedule_timezone,
                     )
                     if isinstance(diagnostics_dict.get("hls_boundary_starts"), list):
                         hls_boundary_starts = [int(number) for number in diagnostics_dict["hls_boundary_starts"]]
@@ -457,6 +460,29 @@ def _ffmpeg_returncode(diagnostics: Mapping[str, Any]) -> Any:
     return None
 
 
+def _finalize_block_run_diagnostics(
+    diagnostics: Mapping[str, Any],
+    *,
+    simulated_cursor: bool,
+    run_started_at: datetime,
+    clock: Callable[[], datetime],
+    duration_limit: float,
+    schedule_timezone: str | None,
+) -> dict[str, Any]:
+    diagnostics_dict = dict(diagnostics)
+    if simulated_cursor or _block_run_failed(diagnostics_dict):
+        return diagnostics_dict
+    if _block_run_completed_prematurely(
+        diagnostics_dict,
+        run_started_at=run_started_at,
+        run_finished_at=clock(),
+        duration_limit=duration_limit,
+        schedule_timezone=schedule_timezone,
+    ):
+        diagnostics_dict["status"] = "premature-complete"
+    return diagnostics_dict
+
+
 def _block_run_completed_prematurely(
     diagnostics: Mapping[str, Any],
     *,
@@ -577,7 +603,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--video-encoder", default="libx264", help="video encoder, e.g. libx264 or h264_vaapi")
     parser.add_argument("--vaapi-device", help="VAAPI device path, e.g. /dev/dri/renderD128")
     parser.add_argument("--schedule-timezone", default=DEFAULT_SCHEDULE_TIMEZONE, help="timezone for naive FS42 schedule timestamps, e.g. Europe/London")
-    parser.add_argument("--max-recovery-attempts-per-block", type=int, default=1, help="bounded ffmpeg failure recovery attempts within a schedule block")
+    parser.add_argument("--max-recovery-attempts-per-block", type=int, default=3, help="bounded ffmpeg failure recovery attempts within a schedule block")
     parser.add_argument("--fallback-slate-video", type=Path)
     parser.add_argument("--timeout", type=float, default=10.0)
     parser.add_argument("--now", help="override current time for deterministic tests, e.g. 2026-06-17T10:05:00")

@@ -164,6 +164,30 @@ class PrematureSuccessBlockRunner:
         }
 
 
+class SequencedPrematureSuccessBlockRunner:
+    def __init__(self, current, advances):
+        self.calls = []
+        self.current = current
+        self.advances = list(advances)
+
+    def run(self, config):
+        self.calls.append(config)
+        advance = self.advances[min(len(self.calls) - 1, len(self.advances) - 1)]
+        self.current[0] = self.current[0] + timedelta(seconds=advance)
+        playlist = config.output_dir / f"sequenced-premature-{len(self.calls)-1}.m3u8"
+        segment = config.output_dir / f"sequenced-premature-{len(self.calls)-1}_00000.ts"
+        playlist.write_text(f"#EXTM3U\n{segment.name}\n")
+        segment.write_text("segment")
+        return {
+            "status": "ok",
+            "playlist": str(playlist),
+            "hls": {"playlist": str(playlist), "segments": [str(segment)], "segment_count": 1, "has_endlist": False},
+            "hls_next_start_number": len(self.calls),
+            "ffmpeg": {"returncode": 0, "stdout": "", "stderr": ""},
+            "plan": [],
+        }
+
+
 class LongBlockScheduleClient:
     def fetch_schedule(self, channel, expected_blocks=None):
         return {
@@ -782,6 +806,46 @@ class LiveControllerTests(unittest.TestCase):
         self.assertEqual([event["event"] for event in result["events"]], ["block_start", "block_complete", "block_recovery", "block_complete"])
         recovery = [event for event in result["events"] if event["event"] == "block_recovery"][0]
         self.assertEqual(recovery["reason"], "premature-complete")
+        self.assertEqual(filler.calls, [])
+        self.assertEqual(result["status"], "complete")
+
+    def test_recovers_repeated_premature_clean_completions_before_falling_back_to_filler(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            current = [datetime(2026, 6, 17, 10, 5, 0)]
+
+            def clock():
+                return current[0]
+
+            runner = SequencedPrematureSuccessBlockRunner(current, advances=[120, 180, 1500])
+            filler = FakeFillerRunner()
+            controller = LiveController(schedule_client=FakeScheduleClient(), block_runner=runner, filler_runner=filler)
+
+            result = controller.run(
+                LiveControllerConfig(
+                    channel="Sky One",
+                    output_root=root,
+                    max_blocks=1,
+                    duration_limit=1800,
+                    clock=clock,
+                    sleep=lambda seconds: None,
+                    status_callback=lambda update: None,
+                )
+            )
+
+        self.assertEqual(len(runner.calls), 3)
+        self.assertEqual([call.hls_append for call in runner.calls], [False, True, True])
+        self.assertEqual([event["event"] for event in result["events"]], [
+            "block_start",
+            "block_complete",
+            "block_recovery",
+            "block_complete",
+            "block_recovery",
+            "block_complete",
+        ])
+        recoveries = [event for event in result["events"] if event["event"] == "block_recovery"]
+        self.assertEqual([event["attempt"] for event in recoveries], [1, 2])
+        self.assertEqual([event["reason"] for event in recoveries], ["premature-complete", "premature-complete"])
         self.assertEqual(filler.calls, [])
         self.assertEqual(result["status"], "complete")
 
