@@ -8,10 +8,19 @@ from pathlib import Path
 from unittest import mock
 
 from fs42stream.api_server import create_server
-from fs42stream.integrated_runner import IntegratedRunnerConfig, main, run_integrated
+from fs42stream.integrated_runner import DEFAULT_DURATION_LIMIT, DEFAULT_MAX_BLOCKS, IntegratedRunnerConfig, main, run_integrated
+from fs42stream.systemd_service import ServiceConfig
 
 
 class IntegratedRunnerTests(unittest.TestCase):
+    def test_default_integrated_config_matches_service_safe_runtime_limits(self):
+        config = IntegratedRunnerConfig()
+
+        self.assertEqual(DEFAULT_MAX_BLOCKS, ServiceConfig.max_blocks)
+        self.assertEqual(DEFAULT_DURATION_LIMIT, ServiceConfig.duration_limit)
+        self.assertEqual(config.max_blocks, ServiceConfig.max_blocks)
+        self.assertEqual(config.duration_limit, ServiceConfig.duration_limit)
+
     def test_fake_server_and_controller_lifecycle_writes_status_and_closes_server(self):
         events = []
         served = threading.Event()
@@ -153,6 +162,37 @@ class IntegratedRunnerTests(unittest.TestCase):
         self.assertEqual(result["stream_profiles"], ["direct", "jellyfin"])
         self.assertEqual(events[0], "served")
         self.assertEqual(events[-2:], ["shutdown", "closed"])
+
+    def test_cli_defaults_use_service_safe_runtime_limits(self):
+        seen = []
+
+        class FakeServer:
+            server_address = ("127.0.0.1", 8088)
+            def serve_forever(self):
+                pass
+            def shutdown(self):
+                seen.append("shutdown")
+            def server_close(self):
+                seen.append("closed")
+
+        class FakeController:
+            def run(self, config):
+                seen.append((config.channel, config.output_root, config.max_blocks, config.duration_limit))
+                return {"status": "complete", "channel": config.channel, "blocks_completed": config.max_blocks, "events": []}
+
+        with tempfile.TemporaryDirectory() as tmp, mock.patch("sys.stdout"):
+            rc = main(
+                ["--channel", "Sky One", "--host", "127.0.0.1", "--port", "8088", "--output-root", tmp],
+                server_factory=lambda **kwargs: FakeServer(),
+                controller_factory=lambda: FakeController(),
+            )
+            status = json.loads((Path(tmp) / "status.json").read_text())
+
+        controller_events = [entry for entry in seen if isinstance(entry, tuple)]
+        self.assertEqual(rc, 0)
+        self.assertEqual(status["status"], "complete")
+        self.assertEqual(controller_events, [("Sky One", Path(tmp), DEFAULT_MAX_BLOCKS, DEFAULT_DURATION_LIMIT), ("Sky One", Path(tmp), DEFAULT_MAX_BLOCKS, DEFAULT_DURATION_LIMIT)])
+        self.assertEqual(seen[-2:], ["shutdown", "closed"])
 
     def test_cli_parses_arguments_and_prints_final_json(self):
         seen = []

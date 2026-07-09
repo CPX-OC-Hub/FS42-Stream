@@ -354,7 +354,7 @@ class BlockRunnerTests(unittest.TestCase):
         self.assertEqual(diagnostics["hls_next_start_number"], 4)
 
     @unittest.skipUnless(Path("/usr/bin/ffmpeg").exists() and Path("/usr/bin/ffprobe").exists(), "requires system ffmpeg/ffprobe")
-    def test_jellyfin_playlist_normalizer_removes_leading_discontinuity_duplicates_but_keeps_boundaries(self):
+    def test_jellyfin_playlist_normalizer_strips_discontinuity_markers(self):
         with tempfile.TemporaryDirectory() as tmp:
             playlist = Path(tmp) / "Sky_One.m3u8"
             playlist.write_text(
@@ -368,7 +368,7 @@ class BlockRunnerTests(unittest.TestCase):
                     "#EXTINF:2.000000,",
                     "Sky_One_00000.ts",
                     "#EXT-X-DISCONTINUITY",
-                    "#EXT-X-DISCONTINUITY",
+                    "#EXT-X-DISCONTINUITY-SEQUENCE:4",
                     "#EXTINF:2.000000,",
                     "Sky_One_00001.ts",
                 ])
@@ -386,7 +386,6 @@ class BlockRunnerTests(unittest.TestCase):
                     "#EXT-X-MEDIA-SEQUENCE:0",
                     "#EXTINF:2.000000,",
                     "Sky_One_00000.ts",
-                    "#EXT-X-DISCONTINUITY",
                     "#EXTINF:2.000000,",
                     "Sky_One_00001.ts",
                 ])

@@ -295,7 +295,7 @@ class LiveControllerTests(unittest.TestCase):
             "Sky_One_00005.ts",
         ])
         self.assertIn("#EXT-X-MEDIA-SEQUENCE:0", playlist_text)
-        self.assertEqual(playlist_text.count("#EXT-X-DISCONTINUITY"), 1)
+        self.assertEqual(playlist_text.count("#EXT-X-DISCONTINUITY"), 0)
 
     def test_boundary_filler_uses_transition_safe_hls_cadence(self):
         with tempfile.TemporaryDirectory() as tmp, mock.patch(
@@ -315,6 +315,7 @@ class LiveControllerTests(unittest.TestCase):
         self.assertIn(["-g", "50"], [command[index:index + 2] for index in range(len(command) - 1)])
         self.assertIn(["-keyint_min", "50"], [command[index:index + 2] for index in range(len(command) - 1)])
         self.assertIn(["-sc_threshold", "0"], [command[index:index + 2] for index in range(len(command) - 1)])
+        self.assertIn(["-hls_list_size", "12"], [command[index:index + 2] for index in range(len(command) - 1)])
         self.assertIn("-hls_flags", command)
         self.assertIn("omit_endlist+append_list+discont_start", command)
 
@@ -337,6 +338,7 @@ class LiveControllerTests(unittest.TestCase):
         joined = " ".join(command)
         self.assertIn("-output_ts_offset 31.5", joined)
         self.assertNotIn("-output_ts_offset 24", joined)
+        self.assertIn("-hls_list_size 60", joined)
         self.assertIn("-hls_flags omit_endlist+append_list", joined)
         self.assertNotIn("-start_number", joined)
         self.assertNotIn("discont_start", joined)
@@ -369,7 +371,7 @@ class LiveControllerTests(unittest.TestCase):
         self.assertNotIn("#EXT-X-DISCONTINUITY\n#EXT-X-DISCONTINUITY", playlist_text)
 
     @unittest.skipUnless(Path("/usr/bin/ffmpeg").exists() and Path("/usr/bin/ffprobe").exists(), "requires system ffmpeg/ffprobe")
-    def test_jellyfin_live_repro_keeps_boundary_markers_and_monotonic_segment_starts(self):
+    def test_jellyfin_live_repro_keeps_monotonic_segment_starts_without_discontinuities(self):
         class FixtureScheduleClient:
             def __init__(self, schedule):
                 self.schedule = schedule
@@ -441,7 +443,7 @@ class LiveControllerTests(unittest.TestCase):
             filler = json.loads(subprocess.check_output(["/usr/bin/ffprobe", "-v", "error", "-show_entries", "format=start_time", "-of", "json", str(playlist.parent / "Sky_One_00003.ts")], text=True))
             next_block = json.loads(subprocess.check_output(["/usr/bin/ffprobe", "-v", "error", "-show_entries", "format=start_time", "-of", "json", str(playlist.parent / "Sky_One_00005.ts")], text=True))
 
-        self.assertEqual(playlist_text.count("#EXT-X-DISCONTINUITY"), 2)
+        self.assertEqual(playlist_text.count("#EXT-X-DISCONTINUITY"), 0)
         self.assertLess(float(first["format"]["start_time"]), float(filler["format"]["start_time"]))
         self.assertLess(float(filler["format"]["start_time"]), float(next_block["format"]["start_time"]))
 

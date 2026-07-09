@@ -17,6 +17,11 @@ from .live_controller import LiveController, LiveControllerConfig
 from .paths import PathResolver
 from .planner import BlockPlanner
 from .run_block import DEFAULT_API_BASE_URL, DEFAULT_CHANNEL, DEFAULT_FFMPEG, DEFAULT_FFPROBE, DEFAULT_FS42_ROOT, DEFAULT_SCHEDULE_TIMEZONE, DEFAULT_SDTV_ROOT, BlockRunner
+from .systemd_service import ServiceConfig
+
+
+DEFAULT_MAX_BLOCKS = ServiceConfig.max_blocks
+DEFAULT_DURATION_LIMIT = ServiceConfig.duration_limit
 
 
 @dataclass(frozen=True)
@@ -25,8 +30,8 @@ class IntegratedRunnerConfig:
     host: str = DEFAULT_HOST
     port: int = DEFAULT_PORT
     output_root: Path = DEFAULT_OUTPUT_ROOT
-    max_blocks: int = 2
-    duration_limit: float = 10.0
+    max_blocks: int = DEFAULT_MAX_BLOCKS
+    duration_limit: float = DEFAULT_DURATION_LIMIT
     dry_run: bool = False
     api_base_url: str = DEFAULT_API_BASE_URL
     fs42_root: Path = Path(DEFAULT_FS42_ROOT)
@@ -198,8 +203,8 @@ def main(
     parser.add_argument("--host", default=DEFAULT_HOST)
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
     parser.add_argument("--output-root", type=Path, default=DEFAULT_OUTPUT_ROOT)
-    parser.add_argument("--max-blocks", type=int, default=2)
-    parser.add_argument("--duration-limit", type=float, default=10.0)
+    parser.add_argument("--max-blocks", type=int, default=DEFAULT_MAX_BLOCKS)
+    parser.add_argument("--duration-limit", type=float, default=DEFAULT_DURATION_LIMIT)
     parser.add_argument("--api-base-url", default=DEFAULT_API_BASE_URL)
     parser.add_argument("--fs42-root", type=Path, default=Path(DEFAULT_FS42_ROOT))
     parser.add_argument("--sdtv-root", type=Path, default=Path(DEFAULT_SDTV_ROOT))

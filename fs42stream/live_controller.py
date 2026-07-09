@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol, Sequence
 
 from .client import FS42ScheduleClient
-from .ffmpeg import FFMpegHLSCommandBuilder, StreamProfile
+from .ffmpeg import FFMpegHLSCommandBuilder, StreamProfile, hls_list_size_for_profile
 from .ffprobe import FFProbe
 from .paths import PathResolver
 from .planner import BlockPlanner
@@ -119,7 +119,7 @@ class HLSBlackSlateFillerRunner:
             "-hls_time",
             "2",
             "-hls_list_size",
-            "12",
+            str(hls_list_size_for_profile(stream_profile)),
         ]
         if stream_profile != "jellyfin" or not hls_append:
             command.extend([
@@ -356,12 +356,17 @@ class LiveController:
                     )
                     filler_playlist = Path(str(filler_diagnostics.get("playlist") or ""))
                     if filler_playlist.exists():
-                        if hls_start_number not in hls_boundary_starts:
-                            hls_boundary_starts.append(hls_start_number)
-                            hls_boundary_starts.sort()
-                        filler_state = _rewrite_live_playlist_boundaries(filler_playlist, boundary_starts=hls_boundary_starts)
-                        filler_diagnostics["hls_boundary_starts"] = list(hls_boundary_starts)
-                        filler_diagnostics["hls_discontinuity_sequence"] = filler_state.get("discontinuity_sequence")
+                        if config.stream_profile == "jellyfin":
+                            _normalize_jellyfin_live_playlist(filler_playlist)
+                            filler_diagnostics["hls_boundary_starts"] = []
+                            filler_diagnostics["hls_discontinuity_sequence"] = 0
+                        else:
+                            if hls_start_number not in hls_boundary_starts:
+                                hls_boundary_starts.append(hls_start_number)
+                                hls_boundary_starts.sort()
+                            filler_state = _rewrite_live_playlist_boundaries(filler_playlist, boundary_starts=hls_boundary_starts)
+                            filler_diagnostics["hls_boundary_starts"] = list(hls_boundary_starts)
+                            filler_diagnostics["hls_discontinuity_sequence"] = filler_state.get("discontinuity_sequence")
                     events.append(
                         {
                             "event": "block_filler",

@@ -9,6 +9,13 @@ from .planner import PlannedBlock
 
 StreamProfile = Literal["direct", "jellyfin"]
 
+DIRECT_HLS_LIST_SIZE = 12
+JELLYFIN_HLS_LIST_SIZE = 60
+
+
+def hls_list_size_for_profile(stream_profile: StreamProfile) -> int:
+    return JELLYFIN_HLS_LIST_SIZE if stream_profile == "jellyfin" else DIRECT_HLS_LIST_SIZE
+
 
 class FFMpegHLSCommandBuilder:
     """Build a one-shot block-level normalized concat-filter HLS command."""
@@ -90,7 +97,7 @@ class FFMpegHLSCommandBuilder:
             cmd.extend(["-t", self._num(duration_limit)])
         if stream_profile == "jellyfin" and hls_start_time_offset is not None:
             cmd.extend(["-output_ts_offset", self._num(hls_start_time_offset)])
-        hls_args = ["-f", "hls", "-hls_time", "2", "-hls_list_size", "12"]
+        hls_args = ["-f", "hls", "-hls_time", "2", "-hls_list_size", str(hls_list_size_for_profile(stream_profile))]
         if not hls_append:
             hls_args.extend(["-start_number", str(hls_start_number)])
         hls_flags = ["omit_endlist"]

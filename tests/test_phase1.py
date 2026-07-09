@@ -485,6 +485,22 @@ class FFMpegCommandBuilderTests(unittest.TestCase):
         self.assertIn("-keyint_min 50", joined)
         self.assertIn("-sc_threshold 0", joined)
 
+    def test_jellyfin_profile_uses_longer_live_playlist_window(self):
+        resolver = PathResolver()
+        probe = mock.Mock(validate_video=mock.Mock(return_value=ProbeResult(1, 320, 240, 25, 44100, 1)))
+        block = BlockPlanner(resolver, probe).plan(SCHEDULE)[0]
+
+        cmd = FFMpegHLSCommandBuilder(ffmpeg="/usr/bin/ffmpeg").build(
+            block,
+            output_dir=Path("/tmp/hls"),
+            output_name="Sky_One",
+            stream_profile="jellyfin",
+        )
+
+        joined = " ".join(cmd)
+        self.assertIn("-hls_list_size 60", joined)
+        self.assertNotIn("-hls_list_size 12", joined)
+
     def test_builds_vaapi_transition_safe_gop_without_unsupported_x264_scene_cut_flags(self):
         resolver = PathResolver()
         probe = mock.Mock(validate_video=mock.Mock(return_value=ProbeResult(1, 320, 240, 25, 44100, 1)))

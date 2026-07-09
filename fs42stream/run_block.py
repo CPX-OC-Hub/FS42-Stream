@@ -197,7 +197,7 @@ class BlockRunner:
                 hls_append=appended_run,
                 stream_profile=config.stream_profile,
             )
-            run_boundary_start = command_hls_start_number if appended_run else None
+            run_boundary_start = command_hls_start_number if appended_run and config.stream_profile != "jellyfin" else None
             executed_commands.append(command)
             completed = subprocess.run(command, check=False, shell=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
             run_info = {
@@ -215,7 +215,15 @@ class BlockRunner:
                 if run_boundary_start is not None and run_boundary_start not in boundary_starts:
                     boundary_starts.append(run_boundary_start)
                     boundary_starts.sort()
-                final_playlist_state = _rewrite_live_playlist_boundaries(playlist, boundary_starts=boundary_starts)
+                if config.stream_profile == "jellyfin":
+                    _normalize_jellyfin_live_playlist(playlist)
+                    final_playlist_state = {
+                        "discontinuity_sequence": 0,
+                        "boundary_starts": [],
+                        "first_visible_segment_number": None,
+                    }
+                else:
+                    final_playlist_state = _rewrite_live_playlist_boundaries(playlist, boundary_starts=boundary_starts)
                 previous_hls_start_number = command_hls_start_number
                 hls_start_number = _next_hls_start_number(playlist, fallback=hls_start_number)
                 command_hls_start_number = hls_start_number
@@ -235,7 +243,15 @@ class BlockRunner:
         }
         playlist = Path(diagnostics["playlist"])
         if playlist.exists():
-            final_playlist_state = _rewrite_live_playlist_boundaries(playlist, boundary_starts=boundary_starts)
+            if config.stream_profile == "jellyfin":
+                _normalize_jellyfin_live_playlist(playlist)
+                final_playlist_state = {
+                    "discontinuity_sequence": 0,
+                    "boundary_starts": [],
+                    "first_visible_segment_number": None,
+                }
+            else:
+                final_playlist_state = _rewrite_live_playlist_boundaries(playlist, boundary_starts=boundary_starts)
             inspection = inspect_hls_output(playlist)
             diagnostics["hls"] = {
                 "playlist": str(inspection.playlist),
@@ -248,7 +264,7 @@ class BlockRunner:
                 new_duration = _hls_segment_duration_since(playlist, start_number=config.hls_start_number)
                 diagnostics["hls_segment_duration"] = new_duration
                 diagnostics["hls_next_start_time_offset"] = config.hls_start_time_offset + new_duration
-        diagnostics["hls_boundary_starts"] = boundary_starts
+        diagnostics["hls_boundary_starts"] = [] if config.stream_profile == "jellyfin" else boundary_starts
         if isinstance(final_playlist_state, Mapping):
             diagnostics["hls_discontinuity_sequence"] = final_playlist_state.get("discontinuity_sequence")
         return diagnostics
@@ -376,23 +392,13 @@ def _hls_segment_number(segment_uri: str) -> int | None:
 
 
 def _normalize_jellyfin_live_playlist(playlist: Path) -> None:
-    """Preserve post-segment discontinuities while removing leading duplicates."""
+    """Strip discontinuity markers for Jellyfin's remux-friendly live profile."""
     text = playlist.read_text(errors="replace")
-    normalized_lines: list[str] = []
-    seen_segment = False
-    previous_was_discontinuity = False
-    for line in text.splitlines():
-        stripped = line.strip()
-        if stripped == "#EXT-X-DISCONTINUITY" or stripped.startswith("#EXT-X-DISCONTINUITY-SEQUENCE"):
-            if not seen_segment or previous_was_discontinuity:
-                continue
-            normalized_lines.append("#EXT-X-DISCONTINUITY")
-            previous_was_discontinuity = True
-            continue
-        normalized_lines.append(line)
-        if stripped and not stripped.startswith("#"):
-            seen_segment = True
-        previous_was_discontinuity = False
+    normalized_lines = [
+        line
+        for line in text.splitlines()
+        if line.strip() != "#EXT-X-DISCONTINUITY" and not line.strip().startswith("#EXT-X-DISCONTINUITY-SEQUENCE")
+    ]
     normalized = "\n".join(normalized_lines)
     if text.endswith("\n"):
         normalized += "\n"
