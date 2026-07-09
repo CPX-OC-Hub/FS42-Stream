@@ -85,7 +85,7 @@ class BlockRunnerTests(unittest.TestCase):
         command = run.call_args.args[0]
         self.assertEqual(command[0], "/usr/bin/ffmpeg")
         self.assertIn(["-t", "30"], [command[index:index + 2] for index in range(len(command) - 1)])
-        self.assertIn(["-t", "60"], [command[index:index + 2] for index in range(len(command) - 1)])
+        self.assertIn(["-t", "55"], [command[index:index + 2] for index in range(len(command) - 1)])
         self.assertIn("/mnt/fs42/catalog/SkyOne/current-first.mp4", command)
         self.assertIn("/mnt/media/SDTV/Current Second.mp4", command)
         self.assertIn("concat=n=2:v=1:a=1", " ".join(command))

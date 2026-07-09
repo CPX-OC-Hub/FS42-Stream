@@ -191,6 +191,30 @@ class BlockPlannerTests(unittest.TestCase):
         self.assertEqual(blocks[0].items[0].resolved_path, fs42_root / "catalog/SkyOne/late/South Park/episode.mp4")
         self.assertEqual(probe.validate_video.call_count, 2)
 
+    def test_clamps_file_backed_item_duration_to_actual_media_remaining_after_skip(self):
+        schedule = {
+            "schedule_blocks": [
+                {
+                    "title": "Duration Clamp",
+                    "plan": [
+                        {
+                            "path": "catalog/SkyOne/show.mp4",
+                            "duration": 120,
+                            "skip": 10,
+                            "is_stream": False,
+                            "content_type": "feature",
+                            "media_type": "video",
+                        }
+                    ],
+                }
+            ]
+        }
+        probe = mock.Mock(validate_video=mock.Mock(return_value=ProbeResult(40, 640, 480, 25, 48000, 2)))
+        block = BlockPlanner(PathResolver(fs42_root="/mnt/fs42", sdtv_root="/mnt/media/SDTV"), probe).plan(schedule)[0]
+
+        self.assertEqual(block.items[0].skip, 10.0)
+        self.assertEqual(block.items[0].duration, 30.0)
+
     def test_replaces_known_runtime_image_slate_with_generated_fallback_without_probing_missing_png(self):
         schedule = {
             "schedule_blocks": [
