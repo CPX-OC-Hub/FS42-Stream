@@ -139,6 +139,31 @@ class DurationConsumingBlockRunner:
         }
 
 
+class PrematureSuccessBlockRunner:
+    def __init__(self, current, *, first_advance_seconds=120, second_advance_seconds=1500):
+        self.calls = []
+        self.current = current
+        self.first_advance_seconds = first_advance_seconds
+        self.second_advance_seconds = second_advance_seconds
+
+    def run(self, config):
+        self.calls.append(config)
+        advance = self.first_advance_seconds if len(self.calls) == 1 else self.second_advance_seconds
+        self.current[0] = self.current[0] + timedelta(seconds=advance)
+        playlist = config.output_dir / f"premature-{len(self.calls)-1}.m3u8"
+        segment = config.output_dir / f"premature-{len(self.calls)-1}_00000.ts"
+        playlist.write_text(f"#EXTM3U\n{segment.name}\n")
+        segment.write_text("segment")
+        return {
+            "status": "ok",
+            "playlist": str(playlist),
+            "hls": {"playlist": str(playlist), "segments": [str(segment)], "segment_count": 1, "has_endlist": False},
+            "hls_next_start_number": len(self.calls),
+            "ffmpeg": {"returncode": 0, "stdout": "", "stderr": ""},
+            "plan": [],
+        }
+
+
 class LongBlockScheduleClient:
     def fetch_schedule(self, channel, expected_blocks=None):
         return {
@@ -725,6 +750,39 @@ class LiveControllerTests(unittest.TestCase):
         self.assertEqual(recovery["attempt"], 1)
         self.assertEqual(recovery["reason"], "ffmpeg-error")
         self.assertEqual(recovery["recover_at"], "2026-06-17T10:06:00")
+        self.assertEqual(result["status"], "complete")
+
+
+    def test_recovers_premature_clean_completion_at_current_wallclock_without_filler(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            current = [datetime(2026, 6, 17, 10, 5, 0)]
+
+            def clock():
+                return current[0]
+
+            runner = PrematureSuccessBlockRunner(current)
+            filler = FakeFillerRunner()
+            controller = LiveController(schedule_client=FakeScheduleClient(), block_runner=runner, filler_runner=filler)
+
+            result = controller.run(
+                LiveControllerConfig(
+                    channel="Sky One",
+                    output_root=root,
+                    max_blocks=1,
+                    duration_limit=1800,
+                    clock=clock,
+                    sleep=lambda seconds: None,
+                    status_callback=lambda update: None,
+                )
+            )
+
+        self.assertEqual(len(runner.calls), 2)
+        self.assertEqual([call.hls_append for call in runner.calls], [False, True])
+        self.assertEqual([event["event"] for event in result["events"]], ["block_start", "block_complete", "block_recovery", "block_complete"])
+        recovery = [event for event in result["events"] if event["event"] == "block_recovery"][0]
+        self.assertEqual(recovery["reason"], "premature-complete")
+        self.assertEqual(filler.calls, [])
         self.assertEqual(result["status"], "complete")
 
     def test_complete_event_exposes_plan_item_and_commercial_diagnostics(self):

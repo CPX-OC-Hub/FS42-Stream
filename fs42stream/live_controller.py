@@ -238,6 +238,15 @@ class LiveController:
                 hls_boundary_starts = [int(number) for number in diagnostics_dict["hls_boundary_starts"]]
             hls_start_number = int(diagnostics_dict.get("hls_next_start_number") or hls_start_number)
             hls_start_time_offset = _next_hls_start_time_offset(diagnostics_dict, fallback=hls_start_time_offset)
+            if not simulated_cursor and not _block_run_failed(diagnostics_dict) and _block_run_completed_prematurely(
+                diagnostics_dict,
+                run_started_at=selection_now,
+                run_finished_at=config.clock(),
+                duration_limit=effective_duration_limit,
+                schedule_timezone=config.schedule_timezone,
+            ):
+                diagnostics_dict = dict(diagnostics_dict)
+                diagnostics_dict["status"] = "premature-complete"
             events.append(_complete_event(ordinal=ordinal, block=block_info, diagnostics=diagnostics_dict))
             _emit_live_status(
                 config,
@@ -446,6 +455,24 @@ def _ffmpeg_returncode(diagnostics: Mapping[str, Any]) -> Any:
     if isinstance(raw_ffmpeg, Mapping):
         return raw_ffmpeg.get("returncode")
     return None
+
+
+def _block_run_completed_prematurely(
+    diagnostics: Mapping[str, Any],
+    *,
+    run_started_at: datetime,
+    run_finished_at: datetime,
+    duration_limit: float,
+    schedule_timezone: str | None,
+) -> bool:
+    if _block_run_failed(diagnostics):
+        return False
+    started = _schedule_now(run_started_at, schedule_timezone)
+    finished = _schedule_now(run_finished_at, schedule_timezone)
+    elapsed = max(0.0, (finished - started).total_seconds())
+    expected = max(0.0, duration_limit)
+    tolerance = min(30.0, max(10.0, expected * 0.1))
+    return expected > 0 and elapsed > 0 and elapsed + tolerance < expected
 
 
 def _next_hls_start_time_offset(diagnostics: Mapping[str, Any], *, fallback: float) -> float:
