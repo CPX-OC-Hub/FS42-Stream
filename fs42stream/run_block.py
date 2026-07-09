@@ -113,48 +113,22 @@ class BlockRunner:
         catch_up_block, catch_up = _catch_up_block_to_wallclock(selected.block, now=config.now, schedule_timezone=config.schedule_timezone)
         planned = self.planner.plan_block(catch_up_block)
         commands: list[list[str]] = []
-        render_blocks: list[PlannedBlock] = []
-        render_duration_limits: list[float] = []
+        render_blocks: list[PlannedBlock] = [planned]
+        render_duration_limits: list[float] = [config.duration_limit]
         hls_start_number = config.hls_start_number
         boundary_starts = sorted({int(number) for number in config.hls_boundary_starts if int(number) >= 0})
-        if config.stream_profile == "jellyfin":
-            render_blocks.append(planned)
-            render_duration_limits.append(config.duration_limit)
-            commands.append(
-                self.builder.build(
-                    planned,
-                    output_dir=config.output_dir,
-                    duration_limit=config.duration_limit,
-                    output_name=config.output_name,
-                    hls_start_number=config.hls_start_number,
-                    hls_start_time_offset=config.hls_start_time_offset,
-                    hls_append=config.hls_append,
-                    stream_profile=config.stream_profile,
-                )
+        commands.append(
+            self.builder.build(
+                planned,
+                output_dir=config.output_dir,
+                duration_limit=config.duration_limit,
+                output_name=config.output_name,
+                hls_start_number=config.hls_start_number,
+                hls_start_time_offset=config.hls_start_time_offset if config.stream_profile == "jellyfin" else None,
+                hls_append=config.hls_append,
+                stream_profile=config.stream_profile,
             )
-        else:
-            hls_start_number = config.hls_start_number
-            remaining_budget = config.duration_limit
-            for item_index, item in enumerate(planned.items):
-                if remaining_budget <= 0:
-                    break
-                item_duration_limit = min(item.duration, remaining_budget) if item.duration > 0 else remaining_budget
-                item_block = _single_item_block(planned, item, item_index=item_index)
-                render_blocks.append(item_block)
-                render_duration_limits.append(item_duration_limit)
-                commands.append(
-                    self.builder.build(
-                        item_block,
-                        output_dir=config.output_dir,
-                        duration_limit=item_duration_limit,
-                        output_name=config.output_name,
-                        hls_start_number=hls_start_number,
-                        hls_start_time_offset=None,
-                        hls_append=config.hls_append or item_index > 0,
-                        stream_profile=config.stream_profile,
-                    )
-                )
-                remaining_budget -= item_duration_limit
+        )
 
         diagnostics = _diagnostics(
             status="dry-run" if config.dry_run else "ok",
@@ -172,7 +146,7 @@ class BlockRunner:
             stream_profile=config.stream_profile,
             catch_up=catch_up,
         )
-        diagnostics["render_mode"] = "jellyfin-block-concat" if config.stream_profile == "jellyfin" else "sequential-plan-items"
+        diagnostics["render_mode"] = "block-concat"
         diagnostics["stream_profile"] = config.stream_profile
         diagnostics["commands"] = commands
         diagnostics["item_command_count"] = len(commands)

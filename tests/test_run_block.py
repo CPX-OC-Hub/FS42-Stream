@@ -81,14 +81,15 @@ class BlockRunnerTests(unittest.TestCase):
         client.fetch_schedule.assert_called_once_with("Sky One", expected_blocks=None)
         self.assertEqual(probe.validate_video.call_count, 2)
         self.assertEqual([call.args[0] for call in probe.validate_video.call_args_list], [Path("/mnt/fs42/catalog/SkyOne/current-first.mp4"), Path("/mnt/media/SDTV/Current Second.mp4")])
-        self.assertEqual(run.call_count, 2)
-        commands = [call.args[0] for call in run.call_args_list]
-        self.assertEqual(commands[0][0], "/usr/bin/ffmpeg")
-        self.assertIn(["-t", "30"], [commands[0][index:index + 2] for index in range(len(commands[0]) - 1)])
-        self.assertIn(["-t", "60"], [commands[1][index:index + 2] for index in range(len(commands[1]) - 1)])
-        self.assertIn("/mnt/fs42/catalog/SkyOne/current-first.mp4", commands[0])
-        self.assertIn("/mnt/media/SDTV/Current Second.mp4", commands[1])
-        self.assertIn("-hls_flags", commands[1])
+        self.assertEqual(run.call_count, 1)
+        command = run.call_args.args[0]
+        self.assertEqual(command[0], "/usr/bin/ffmpeg")
+        self.assertIn(["-t", "30"], [command[index:index + 2] for index in range(len(command) - 1)])
+        self.assertIn(["-t", "60"], [command[index:index + 2] for index in range(len(command) - 1)])
+        self.assertIn("/mnt/fs42/catalog/SkyOne/current-first.mp4", command)
+        self.assertIn("/mnt/media/SDTV/Current Second.mp4", command)
+        self.assertIn("concat=n=2:v=1:a=1", " ".join(command))
+        self.assertIn("-hls_flags", command)
         self.assertEqual(diagnostics["status"], "ok")
         self.assertEqual(diagnostics["channel"], "Sky One")
         self.assertEqual(diagnostics["selection"]["reason"], "current")
@@ -293,7 +294,7 @@ class BlockRunnerTests(unittest.TestCase):
         self.assertIn("-output_ts_offset 100", joined)
         self.assertEqual(diagnostics["hls_next_start_number"], 27)
         self.assertEqual(diagnostics["hls_next_start_time_offset"], 154.0)
-        self.assertEqual(diagnostics["render_mode"], "jellyfin-block-concat")
+        self.assertEqual(diagnostics["render_mode"], "block-concat")
 
     @unittest.skipUnless(Path("/usr/bin/ffmpeg").exists() and Path("/usr/bin/ffprobe").exists(), "requires system ffmpeg/ffprobe")
     def test_jellyfin_runner_keeps_item_boundaries_inside_single_command_and_dense_numbering(self):

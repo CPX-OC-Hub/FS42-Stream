@@ -217,16 +217,8 @@ class LiveControllerTests(unittest.TestCase):
             inspection = inspect_hls_output(playlist)
             playlist_text = playlist.read_text()
 
-        self.assertEqual([Path(path).name for path in inspection.segments], [
-            "Sky_One_00000.ts",
-            "Sky_One_00001.ts",
-            "Sky_One_00002.ts",
-            "Sky_One_00003.ts",
-            "Sky_One_00004.ts",
-            "Sky_One_00005.ts",
-            "Sky_One_00006.ts",
-            "Sky_One_00007.ts",
-        ])
+        segment_names = [Path(path).name for path in inspection.segments]
+        self.assertEqual(segment_names, [f"Sky_One_{index:05d}.ts" for index in range(len(segment_names))])
         self.assertIn("#EXT-X-MEDIA-SEQUENCE:0", playlist_text)
 
     @unittest.skipUnless(Path("/usr/bin/ffmpeg").exists() and Path("/usr/bin/ffprobe").exists(), "requires system ffmpeg/ffprobe")

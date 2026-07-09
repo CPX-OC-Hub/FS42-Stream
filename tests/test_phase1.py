@@ -367,10 +367,10 @@ class CatchUpBlockRunnerTests(unittest.TestCase):
         self.assertEqual(builder.block.items[0].source["content_type"], "commercial")
         self.assertEqual(builder.block.items[0].skip, 25.0)
         self.assertEqual(builder.block.items[0].duration, 5.0)
-        self.assertEqual(builder.blocks[1].items[0].source["content_type"], "feature")
-        self.assertEqual(builder.blocks[1].items[0].skip, 500.0)
+        self.assertEqual(builder.block.items[1].source["content_type"], "feature")
+        self.assertEqual(builder.block.items[1].skip, 500.0)
 
-    def test_sequential_renderer_builds_one_ffmpeg_command_per_remaining_plan_item(self):
+    def test_direct_profile_builds_single_block_concat_command_for_remaining_plan_items(self):
         schedule = {
             "network_name": "Sky One",
             "schedule_blocks": [
@@ -390,14 +390,13 @@ class CatchUpBlockRunnerTests(unittest.TestCase):
 
         diagnostics = runner.run(BlockRunConfig(now=datetime(2026, 6, 25, 22, 0, 0), dry_run=True, hls_start_number=7, output_name="Sky_One"))
 
-        self.assertEqual(len(builder.blocks), 3)
-        self.assertEqual([block.items[0].source["content_type"] for block in builder.blocks], ["feature", "commercial", "feature"])
-        self.assertEqual([len(block.items) for block in builder.blocks], [1, 1, 1])
-        self.assertEqual([kwargs["hls_start_number"] for kwargs in builder.kwargs_by_call], [7, 7, 7])
-        self.assertEqual([kwargs["hls_append"] for kwargs in builder.kwargs_by_call], [False, True, True])
-        self.assertEqual(len(diagnostics["commands"]), 3)
-        self.assertNotIn("concat=n=3", " ".join(" ".join(cmd) for cmd in diagnostics["commands"]))
-        self.assertEqual(diagnostics["render_mode"], "sequential-plan-items")
+        self.assertEqual(len(builder.blocks), 1)
+        self.assertEqual([item.source["content_type"] for item in builder.blocks[0].items], ["feature", "commercial", "feature"])
+        self.assertEqual([kwargs["hls_start_number"] for kwargs in builder.kwargs_by_call], [7])
+        self.assertEqual([kwargs["hls_append"] for kwargs in builder.kwargs_by_call], [False])
+        self.assertEqual(len(diagnostics["commands"]), 1)
+        self.assertEqual(len(builder.block.items), 3)
+        self.assertEqual(diagnostics["render_mode"], "block-concat")
 
     def test_jellyfin_profile_builds_single_block_concat_command_for_remaining_block(self):
         schedule = {
@@ -435,7 +434,7 @@ class CatchUpBlockRunnerTests(unittest.TestCase):
         self.assertEqual([kwargs["hls_append"] for kwargs in builder.kwargs_by_call], [False])
         self.assertEqual([kwargs["hls_start_time_offset"] for kwargs in builder.kwargs_by_call], [100.0])
         self.assertEqual(len(diagnostics["commands"]), 1)
-        self.assertEqual(diagnostics["render_mode"], "jellyfin-block-concat")
+        self.assertEqual(diagnostics["render_mode"], "block-concat")
         self.assertEqual(diagnostics["stream_profile"], "jellyfin")
 
 
