@@ -50,7 +50,7 @@ class LiveControllerConfig:
     dry_run: bool = False
     status_callback: Callable[[Mapping[str, Any]], None] | None = None
     schedule_timezone: str | None = DEFAULT_SCHEDULE_TIMEZONE
-    max_recovery_attempts_per_block: int = 3
+    max_recovery_attempts_per_block: int = 50
     clock: Callable[[], datetime] = _utc_now
     sleep: Callable[[float], None] = time.sleep
     stream_profile: StreamProfile = "direct"
