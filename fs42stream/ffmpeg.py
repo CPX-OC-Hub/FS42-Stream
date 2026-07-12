@@ -61,6 +61,12 @@ class FFMpegHLSCommandBuilder:
                     cmd.extend(["-t", self._num(item.duration)])
                 cmd.extend(["-re", "-f", "lavfi", "-i", item.ffmpeg_input or "color=black"])
                 continue
+            if item.input_kind == "image_loop":
+                if item.duration > 0:
+                    cmd.extend(["-loop", "1", "-re", "-t", self._num(item.duration), "-i", item.ffmpeg_input or str(item.resolved_path)])
+                else:
+                    cmd.extend(["-loop", "1", "-re", "-i", item.ffmpeg_input or str(item.resolved_path)])
+                continue
             if item.skip > 0:
                 cmd.extend(["-ss", self._num(item.skip)])
             if item.duration > 0:

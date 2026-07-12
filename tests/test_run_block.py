@@ -146,10 +146,10 @@ class BlockRunnerTests(unittest.TestCase):
 
         probe.validate_video.assert_not_called()
         self.assertEqual(diagnostics["plan"][0]["resolved_path"], "/mnt/fs42/runtime/brb.png")
-        self.assertEqual(diagnostics["plan"][0]["input_kind"], "lavfi")
+        self.assertEqual(diagnostics["plan"][0]["input_kind"], "image_loop")
         self.assertEqual(diagnostics["plan"][0]["runtime_action"], "generated_fallback_slate")
         self.assertEqual(diagnostics["plan"][0]["diagnostic"], "known runtime/off-air image slate replaced with generated fallback video")
-        self.assertIn("lavfi", diagnostics["command"])
+        self.assertIn("/mnt/fs42/runtime/brb.png", diagnostics["command"])
 
     def test_runner_replaces_runtime_png_even_when_schedule_labels_it_as_commercial_video(self):
         schedule = {
@@ -177,7 +177,7 @@ class BlockRunnerTests(unittest.TestCase):
 
         probe.validate_video.assert_not_called()
         self.assertEqual(diagnostics["plan"][0]["resolved_path"], "/mnt/fs42/runtime/brb.png")
-        self.assertEqual(diagnostics["plan"][0]["input_kind"], "lavfi")
+        self.assertEqual(diagnostics["plan"][0]["input_kind"], "image_loop")
         self.assertEqual(diagnostics["plan"][0]["runtime_action"], "generated_fallback_slate")
 
     def test_runner_dry_run_reports_commercial_counts_paths_and_preserves_inputs(self):

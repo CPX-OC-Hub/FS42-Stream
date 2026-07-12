@@ -238,8 +238,8 @@ class BlockPlannerTests(unittest.TestCase):
 
         self.assertEqual(probe.validate_video.call_count, 0)
         self.assertEqual(block.items[0].resolved_path, Path("/mnt/fs42/runtime/brb.png"))
-        self.assertEqual(block.items[0].input_kind, "lavfi")
-        self.assertIn("color=black", block.items[0].ffmpeg_input)
+        self.assertEqual(block.items[0].input_kind, "image_loop")
+        self.assertEqual(block.items[0].ffmpeg_input, str(Path("/mnt/fs42/runtime/brb.png")))
         self.assertEqual(block.items[0].runtime_action, "generated_fallback_slate")
 
     def test_can_use_configured_fallback_video_for_known_runtime_slate(self):
@@ -310,7 +310,7 @@ class BlockPlannerTests(unittest.TestCase):
 
         probe.validate_video.assert_not_called()
         self.assertEqual(block.items[0].resolved_path, Path("/mnt/fs42/runtime/brb.png"))
-        self.assertEqual(block.items[0].input_kind, "lavfi")
+        self.assertEqual(block.items[0].input_kind, "image_loop")
         self.assertEqual(block.items[0].runtime_action, "generated_fallback_slate")
 
     def test_runtime_png_with_bad_commercial_metadata_is_still_replaced_with_fallback(self):
@@ -336,7 +336,7 @@ class BlockPlannerTests(unittest.TestCase):
 
         probe.validate_video.assert_not_called()
         self.assertEqual(block.items[0].resolved_path, Path("/mnt/fs42/runtime/brb.png"))
-        self.assertEqual(block.items[0].input_kind, "lavfi")
+        self.assertEqual(block.items[0].input_kind, "image_loop")
         self.assertEqual(block.items[0].runtime_action, "generated_fallback_slate")
 
 
@@ -697,9 +697,8 @@ class FFMpegCommandBuilderTests(unittest.TestCase):
 
         self.assertIsInstance(cmd, list)
         self.assertIn("-f", cmd)
-        self.assertIn("lavfi", cmd)
-        self.assertIn("color=black", cmd)
-        self.assertNotIn("/mnt/fs42/runtime/brb.png", cmd)
+        self.assertIn("-loop", cmd)
+        self.assertIn("/mnt/fs42/runtime/brb.png", cmd)
         self.assertNotIn("shell=True", " ".join(cmd))
 
     def test_includes_commercial_plan_entries_as_ffmpeg_inputs_in_order(self):

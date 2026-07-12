@@ -102,8 +102,8 @@ class BlockPlanner:
                 skip=0.0,
                 duration=duration,
                 probe=ProbeResult(duration=duration, width=640, height=480, fps=25.0, audio_sample_rate=0, audio_channels=0),
-                input_kind="lavfi",
-                ffmpeg_input="color=black",
+                input_kind="image_loop",
+                ffmpeg_input=str(resolved),
                 runtime_action="generated_fallback_slate",
                 diagnostic="known runtime/off-air image slate replaced with generated fallback video",
             )
