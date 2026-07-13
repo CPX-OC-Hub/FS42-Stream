@@ -42,7 +42,7 @@ class IntegratedRunnerConfig:
     vaapi_device: str | None = None
     schedule_timezone: str | None = DEFAULT_SCHEDULE_TIMEZONE
     stream_profiles: tuple[StreamProfile, ...] = ("direct", "jellyfin")
-    playout_mode: PlayoutMode = "ts-primary"
+    playout_mode: PlayoutMode = "hls-primary"
 
 
 class IntegratedServer(Protocol):
@@ -215,7 +215,7 @@ def main(
     parser.add_argument("--video-encoder", default="libx264", help="video encoder, e.g. libx264 or h264_vaapi")
     parser.add_argument("--vaapi-device", help="VAAPI device path, e.g. /dev/dri/renderD128")
     parser.add_argument("--schedule-timezone", default=DEFAULT_SCHEDULE_TIMEZONE, help="timezone for naive FS42 schedule timestamps, e.g. Europe/London")
-    parser.add_argument("--playout-mode", choices=("hls-primary", "ts-primary"), default="ts-primary", help="render directly to HLS or render TS first then package HLS")
+    parser.add_argument("--playout-mode", choices=("hls-primary", "ts-primary"), default="hls-primary", help="render directly to HLS or render TS first then package HLS")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv)
 
