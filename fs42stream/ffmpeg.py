@@ -67,7 +67,8 @@ class FFMpegHLSCommandBuilder:
         hls_flags = ["omit_endlist"]
         if hls_append:
             hls_flags.append("append_list")
-            hls_flags.append("discont_start")
+            if stream_profile != "jellyfin":
+                hls_flags.append("discont_start")
         hls_args.extend(["-hls_flags", "+".join(hls_flags)])
         hls_args.extend(
             [

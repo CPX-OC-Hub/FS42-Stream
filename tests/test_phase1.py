@@ -668,9 +668,9 @@ class FFMpegCommandBuilderTests(unittest.TestCase):
         self.assertIn("-fflags +genpts", joined)
         self.assertIn("-output_ts_offset 83.25", joined)
         self.assertNotIn("-output_ts_offset 84", joined)
-        self.assertIn("-hls_flags omit_endlist+append_list+discont_start", joined)
+        self.assertIn("-hls_flags omit_endlist+append_list", joined)
         self.assertNotIn("-start_number", joined)
-        self.assertIn("discont_start", joined)
+        self.assertNotIn("discont_start", joined)
         self.assertNotIn("-avoid_negative_ts", joined)
 
     def test_builds_silent_audio_chain_for_video_only_inputs(self):
