@@ -192,6 +192,30 @@ class SequencedPrematureSuccessBlockRunner:
         }
 
 
+class FastButCompleteBlockRunner:
+    def __init__(self, current, *, advance_seconds=120, emitted_seconds=1799.98):
+        self.calls = []
+        self.current = current
+        self.advance_seconds = advance_seconds
+        self.emitted_seconds = emitted_seconds
+
+    def run(self, config):
+        self.calls.append(config)
+        self.current[0] = self.current[0] + timedelta(seconds=self.advance_seconds)
+        playlist = config.output_dir / f"fast-complete-{len(self.calls)-1}.m3u8"
+        segment = config.output_dir / f"fast-complete-{len(self.calls)-1}_00000.ts"
+        playlist.write_text(f"#EXTM3U\n{segment.name}\n")
+        segment.write_text("segment")
+        return {
+            "status": "ok",
+            "playlist": str(playlist),
+            "hls": {"playlist": str(playlist), "segments": [str(segment)], "segment_count": 1, "has_endlist": False},
+            "hls_next_start_number": len(self.calls),
+            "ffmpeg": {"returncode": 0, "stdout": "", "stderr": f"frame=15000 fps=35 q=-0.0 Lsize=N/A time=00:29:59.98 bitrate=N/A speed=1.42x"},
+            "plan": [],
+        }
+
+
 class LongBlockScheduleClient:
     def fetch_schedule(self, channel, expected_blocks=None):
         return {
@@ -1011,6 +1035,37 @@ class LiveControllerTests(unittest.TestCase):
         recoveries = [event for event in result["events"] if event["event"] == "block_recovery"]
         self.assertEqual([event["attempt"] for event in recoveries], [1, 2])
         self.assertEqual([event["reason"] for event in recoveries], ["premature-complete", "premature-complete"])
+        self.assertEqual(filler.calls, [])
+        self.assertEqual(result["status"], "complete")
+
+    def test_does_not_flag_premature_when_ffmpeg_reports_near_full_emitted_duration(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            current = [datetime(2026, 6, 17, 10, 5, 0)]
+
+            def clock():
+                return current[0]
+
+            runner = FastButCompleteBlockRunner(current)
+            filler = FakeFillerRunner()
+            controller = LiveController(schedule_client=FakeScheduleClient(), block_runner=runner, filler_runner=filler)
+
+            result = controller.run(
+                LiveControllerConfig(
+                    channel="Sky One",
+                    output_root=root,
+                    max_blocks=1,
+                    duration_limit=1800,
+                    clock=clock,
+                    sleep=lambda seconds: None,
+                    status_callback=lambda update: None,
+                )
+            )
+
+        self.assertEqual(len(runner.calls), 1)
+        self.assertEqual([event["event"] for event in result["events"]], ["block_start", "block_complete"])
+        complete = [event for event in result["events"] if event["event"] == "block_complete"][0]
+        self.assertEqual(complete["status"], "ok")
         self.assertEqual(filler.calls, [])
         self.assertEqual(result["status"], "complete")
 

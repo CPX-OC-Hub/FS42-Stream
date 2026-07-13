@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import subprocess
 import sys
 import time
@@ -552,12 +553,27 @@ def _block_run_completed_prematurely(
 ) -> bool:
     if _block_run_failed(diagnostics):
         return False
+    emitted_seconds = _ffmpeg_emitted_output_seconds(diagnostics)
+    expected = max(0.0, duration_limit)
+    tolerance = min(30.0, max(10.0, expected * 0.1))
+    if emitted_seconds is not None:
+        return expected > 0 and emitted_seconds > 0 and emitted_seconds + tolerance < expected
     started = _schedule_now(run_started_at, schedule_timezone)
     finished = _schedule_now(run_finished_at, schedule_timezone)
     elapsed = max(0.0, (finished - started).total_seconds())
-    expected = max(0.0, duration_limit)
-    tolerance = min(30.0, max(10.0, expected * 0.1))
     return expected > 0 and elapsed > 0 and elapsed + tolerance < expected
+
+
+def _ffmpeg_emitted_output_seconds(diagnostics: Mapping[str, Any]) -> float | None:
+    raw_ffmpeg = diagnostics.get("ffmpeg")
+    if not isinstance(raw_ffmpeg, Mapping):
+        return None
+    stderr = str(raw_ffmpeg.get("stderr") or "")
+    matches = re.findall(r"time=(\d+):(\d+):(\d+(?:\.\d+)?)", stderr)
+    if not matches:
+        return None
+    hours, minutes, seconds = matches[-1]
+    return int(hours) * 3600.0 + int(minutes) * 60.0 + float(seconds)
 
 
 def _next_hls_start_time_offset(diagnostics: Mapping[str, Any], *, fallback: float) -> float:
