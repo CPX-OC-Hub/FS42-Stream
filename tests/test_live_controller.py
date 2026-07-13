@@ -36,12 +36,16 @@ SCHEDULE = {
 
 
 class FakeScheduleClient:
-    def __init__(self):
+    def __init__(self, summary=None):
         self.calls = []
+        self.summary = summary
 
     def fetch_schedule(self, channel, expected_blocks=None):
         self.calls.append((channel, expected_blocks))
         return SCHEDULE
+
+    def fetch_schedule_summary(self, channel):
+        return self.summary or {"schedule_summary": {"network_id": channel, "start": "2026-06-17T10:00:00", "end": "2026-06-17T11:00:00"}}
 
 
 class FakeBlockRunner:
@@ -656,6 +660,29 @@ class LiveControllerTests(unittest.TestCase):
         self.assertEqual(start_event["block"]["plan"][0]["duration"], 1500.0)
         self.assertEqual(complete_event["block"]["plan"][0]["skip"], 300.0)
         self.assertEqual(complete_event["block"]["plan"][0]["duration"], 1500.0)
+
+    def test_status_callback_reports_stale_schedule_and_placeholder_block(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            updates = []
+            summary = {"schedule_summary": {"network_id": "Sky One", "start": "2026-06-17T08:00:00", "end": "2026-06-17T09:00:00"}}
+            controller = LiveController(schedule_client=FakeScheduleClient(summary=summary), block_runner=FakeBlockRunner())
+
+            controller.run(
+                LiveControllerConfig(
+                    channel="Sky One",
+                    output_root=Path(tmp),
+                    max_blocks=1,
+                    duration_limit=600,
+                    now=datetime(2026, 6, 17, 10, 5, 0),
+                    status_callback=updates.append,
+                    dry_run=True,
+                )
+            )
+
+        first = updates[0]
+        self.assertTrue(first["stale_schedule"]["active"])
+        self.assertEqual(first["active_block"]["title"], "Schedule stale - BRB")
+        self.assertEqual(first["active_block"]["plan"][0]["path"], "runtime/brb.png")
 
     def test_status_callback_exposes_engine_owned_current_and_next_plan_items(self):
         with tempfile.TemporaryDirectory() as tmp:

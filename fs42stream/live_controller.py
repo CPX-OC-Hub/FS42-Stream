@@ -17,6 +17,8 @@ from .paths import PathResolver
 from .planner import BlockPlanner
 from .playout_supervisor import SupervisedPlayout, supervise_schedule_playout
 from .run_block import (
+    _build_stale_placeholder_schedule,
+    _stale_schedule_state,
     DEFAULT_API_BASE_URL,
     DEFAULT_CHANNEL,
     DEFAULT_FFMPEG,
@@ -182,6 +184,8 @@ class LiveController:
         last_index = -1
         last_playout_state: SupervisedPlayout | None = None
         last_schedule_now: datetime | None = None
+        last_stale_schedule: dict[str, Any] | None = None
+        last_stale_schedule: dict[str, Any] | None = None
 
         hls_start_number = 0
         hls_start_time_offset = 0.0
@@ -189,6 +193,15 @@ class LiveController:
         for ordinal in range(config.max_blocks):
             schedule = self.schedule_client.fetch_schedule(config.channel, expected_blocks=None)
             selection_now = cursor if simulated_cursor else config.clock()
+            summary = None
+            if hasattr(self.schedule_client, "fetch_schedule_summary"):
+                try:
+                    summary = self.schedule_client.fetch_schedule_summary(config.channel)
+                except Exception:
+                    summary = None
+            stale_schedule = _stale_schedule_state(summary, channel=config.channel, now=selection_now, schedule_timezone=config.schedule_timezone)
+            if stale_schedule and stale_schedule.get("active"):
+                schedule = _build_stale_placeholder_schedule(config.channel, now=selection_now, duration_limit=config.duration_limit, schedule_timezone=config.schedule_timezone)
             playout_state = supervise_schedule_playout(
                 schedule,
                 now=selection_now,
@@ -199,6 +212,8 @@ class LiveController:
             playout = playout_state.decision
             last_playout_state = playout_state
             last_schedule_now = selection_now
+            last_stale_schedule = dict(stale_schedule) if isinstance(stale_schedule, Mapping) else {}
+            last_stale_schedule = dict(stale_schedule) if isinstance(stale_schedule, Mapping) else None
             block_info = dict(playout_state.active_block or {})
             cleanup = clean_hls_outputs(channel_output_dir) if ordinal == 0 else []
             events.append(
@@ -220,6 +235,7 @@ class LiveController:
                 events=events,
                 playout_state=playout_state,
                 schedule_now=selection_now,
+                stale_schedule=last_stale_schedule,
             )
             block_start = _parse_datetime(playout.render_state.start_time)
             block_end = _parse_datetime(playout.render_state.end_time)
@@ -269,6 +285,7 @@ class LiveController:
                 events=events,
                 playout_state=playout_state,
                 schedule_now=selection_now,
+                stale_schedule=last_stale_schedule,
             )
 
             if not simulated_cursor and _block_run_failed(diagnostics_dict):
@@ -312,6 +329,7 @@ class LiveController:
                         events=events,
                         playout_state=recovery_playout_state,
                         schedule_now=recovery_now,
+                        stale_schedule=last_stale_schedule,
                     )
                     recovery_duration_limit = min(config.duration_limit, max(0.0, (block_end - schedule_now).total_seconds()))
                     diagnostics_dict = _finalize_block_run_diagnostics(
@@ -350,6 +368,7 @@ class LiveController:
                         events=events,
                         playout_state=recovery_playout_state,
                         schedule_now=recovery_now,
+                        stale_schedule=last_stale_schedule,
                     )
                     if not _block_run_failed(diagnostics_dict):
                         selected = recovery_selected
@@ -381,6 +400,7 @@ class LiveController:
                         events=events,
                         playout_state=playout_state,
                         schedule_now=config.clock(),
+                        stale_schedule=last_stale_schedule,
                     )
                     filler_diagnostics = dict(
                         self.filler_runner.run(
@@ -431,6 +451,7 @@ class LiveController:
                         events=events,
                         playout_state=playout_state,
                         schedule_now=config.clock(),
+                        stale_schedule=last_stale_schedule,
                     )
             cursor = block_end or run_now or cursor
 
@@ -450,6 +471,7 @@ class LiveController:
             "schedule_now": result_schedule_now.isoformat() if result_schedule_now is not None else None,
             **summary,
             "events": events,
+            "stale_schedule": dict(last_stale_schedule or {}),
         }
         if last_playout_state is not None:
             result.update(last_playout_state.status_fields(schedule_now=result_schedule_now))
@@ -553,6 +575,7 @@ def _emit_live_status(
     events: Sequence[Mapping[str, Any]],
     playout_state: SupervisedPlayout,
     schedule_now: datetime | None,
+    stale_schedule: Mapping[str, Any] | None = None,
 ) -> None:
     if config.status_callback is None:
         return
@@ -569,6 +592,8 @@ def _emit_live_status(
         "playout_mode": config.playout_mode,
         "schedule_now": local_schedule_now.isoformat() if local_schedule_now is not None else None,
         **playout_state.status_fields(schedule_now=local_schedule_now),
+        "stale_schedule": dict(stale_schedule or {}),
+        "stale_schedule": dict(stale_schedule or {}),
         "hls": {
             "playlist": str(channel_output_dir / f"{FFMpegHLSCommandBuilder._slug(config.channel)}.m3u8"),
             "channel_output_dir": str(channel_output_dir),

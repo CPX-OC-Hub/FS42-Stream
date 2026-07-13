@@ -61,6 +61,18 @@ class BlockSelectionTests(unittest.TestCase):
 
 
 class BlockRunnerTests(unittest.TestCase):
+    def test_runner_uses_placeholder_schedule_when_summary_is_stale(self):
+        client = mock.Mock()
+        client.fetch_schedule.return_value = SCHEDULE
+        client.fetch_schedule_summary.return_value = {"schedule_summary": {"network_id": "Sky One", "start": "2026-06-17T08:00:00", "end": "2026-06-17T09:00:00"}}
+        probe = mock.Mock(validate_video=mock.Mock(return_value=ProbeResult(1, 320, 240, 25, 44100, 1)))
+        runner = BlockRunner(client=client, planner=BlockPlanner(PathResolver(), probe), builder=FFMpegHLSCommandBuilder())
+        diagnostics = runner.run(BlockRunConfig(channel="Sky One", duration_limit=600, output_dir=Path("/tmp/out"), now=datetime(2026, 6, 17, 10, 5, 0), dry_run=True))
+        self.assertEqual(diagnostics["selection"]["reason"], "stale")
+        self.assertEqual(diagnostics["selection"]["block_title"], "Schedule stale - BRB")
+        self.assertTrue(diagnostics["stale_schedule"]["active"])
+        self.assertEqual(diagnostics["plan"][0]["resolved_path"], "/mnt/fs42/runtime/brb.png")
+
     def test_runner_uses_engine_render_state_metadata_instead_of_reconstructing_from_raw_block(self):
         client = mock.Mock(fetch_schedule=mock.Mock(return_value=SCHEDULE))
         planner = mock.Mock()

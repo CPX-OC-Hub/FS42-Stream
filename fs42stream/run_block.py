@@ -5,7 +5,7 @@ import json
 import subprocess
 import sys
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -89,6 +89,70 @@ def select_current_or_next_block(schedule: Mapping[str, Any], *, now: datetime |
     return SelectedBlock(index=index, reason="last", block=block)
 
 
+
+
+
+def _schedule_summary_end(summary: Mapping[str, Any], channel: str) -> datetime | None:
+    raw_single = summary.get("schedule_summary")
+    if isinstance(raw_single, Mapping):
+        end_value = raw_single.get("end")
+        return _parse_datetime(end_value) if end_value else None
+    raw_many = summary.get("schedule_summaries")
+    if isinstance(raw_many, list):
+        for item in raw_many:
+            if not isinstance(item, Mapping):
+                continue
+            if str(item.get("network_id") or item.get("network_name") or "") != channel:
+                continue
+            end_value = item.get("end")
+            return _parse_datetime(end_value) if end_value else None
+    return None
+
+
+def _stale_schedule_state(summary: Mapping[str, Any] | None, *, channel: str, now: datetime | None, schedule_timezone: str | None) -> dict[str, Any] | None:
+    if not isinstance(summary, Mapping):
+        return None
+    end = _schedule_summary_end(summary, channel)
+    if end is None:
+        return None
+    schedule_now = _schedule_now(now, schedule_timezone)
+    comparable_now = schedule_now if end.tzinfo is None else _coerce_now_for([(0, {}, None, end)], schedule_now)
+    if comparable_now <= end:
+        return None
+    return {
+        "active": True,
+        "channel": channel,
+        "schedule_now": comparable_now.isoformat(),
+        "summary_end": end.isoformat(),
+        "reason": "summary-expired",
+    }
+
+
+def _build_stale_placeholder_schedule(channel: str, *, now: datetime | None, duration_limit: float, schedule_timezone: str | None) -> dict[str, Any]:
+    start = _schedule_now(now, schedule_timezone)
+    fallback_duration = max(duration_limit, 60.0)
+    end = start + timedelta(seconds=fallback_duration)
+    return {
+        "network_name": channel,
+        "schedule_blocks": [
+            {
+                "title": "Schedule stale - BRB",
+                "start_time": start.isoformat(),
+                "end_time": end.isoformat(),
+                "plan": [
+                    {
+                        "path": "runtime/brb.png",
+                        "duration": fallback_duration,
+                        "skip": 0,
+                        "is_stream": False,
+                        "content_type": "slate",
+                        "media_type": "image",
+                    }
+                ],
+            }
+        ],
+    }
+
 class BlockRunner:
     """Fetch, select, validate, and run one bounded FS42 block as HLS."""
 
@@ -113,7 +177,18 @@ class BlockRunner:
         config.output_dir.mkdir(parents=True, exist_ok=True)
 
         schedule = self.client.fetch_schedule(config.channel, expected_blocks=None)
-        selected = select_current_or_next_block(schedule, now=config.now, schedule_timezone=config.schedule_timezone)
+        summary = None
+        if hasattr(self.client, "fetch_schedule_summary"):
+            try:
+                summary = self.client.fetch_schedule_summary(config.channel)
+            except Exception:
+                summary = None
+        stale_schedule = _stale_schedule_state(summary, channel=config.channel, now=config.now, schedule_timezone=config.schedule_timezone)
+        if stale_schedule and stale_schedule.get("active"):
+            schedule = _build_stale_placeholder_schedule(config.channel, now=config.now, duration_limit=config.duration_limit, schedule_timezone=config.schedule_timezone)
+            selected = SelectedBlock(index=0, reason="stale", block=schedule["schedule_blocks"][0])
+        else:
+            selected = select_current_or_next_block(schedule, now=config.now, schedule_timezone=config.schedule_timezone)
         playout = resolve_block_playout(
             selected.block,
             now=config.now,
@@ -183,6 +258,7 @@ class BlockRunner:
             stream_profile=config.stream_profile,
             catch_up=playout.catch_up,
             playout=playout.snapshot,
+            stale_schedule=stale_schedule,
         )
         diagnostics["render_mode"] = "ts-primary" if config.playout_mode == "ts-primary" else "block-concat"
         diagnostics["stream_profile"] = config.stream_profile
@@ -545,6 +621,7 @@ def _diagnostics(
     stream_profile: StreamProfile = "direct",
     catch_up: Mapping[str, Any] | None = None,
     playout: Mapping[str, Any] | None = None,
+    stale_schedule: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     output_slug = FFMpegHLSCommandBuilder._slug(output_name or planned.title)
     playlist = output_dir / f"{output_slug}.m3u8"
@@ -562,6 +639,8 @@ def _diagnostics(
         "stream_profile": stream_profile,
         "catch_up": dict(catch_up or {"applied": False}),
         "playout": dict(playout or {}),
+        "stale_schedule": dict(stale_schedule or {}),
+        "stale_schedule": dict(stale_schedule or {}),
         **type_summary,
         "selection": {
             "index": render_state.selection.index,

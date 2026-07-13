@@ -366,6 +366,7 @@ def _runtime_payload(status_payload: Mapping[str, Any], *, channel_slug: str, ou
         output_root=output_root,
         channel_slug=channel_slug,
     )
+    stale_schedule = status_payload.get("stale_schedule") if isinstance(status_payload.get("stale_schedule"), Mapping) else {}
     return {
         "channel": _channel_metadata(channel_slug=channel_slug, name=channel_name),
         "service": {
@@ -376,6 +377,7 @@ def _runtime_payload(status_payload: Mapping[str, Any], *, channel_slug: str, ou
         "block": {"current": current_block, "next": next_block},
         "item": {"current": current_item, "next": next_item},
         "playout": playout,
+        "schedule": {"stale": bool(stale_schedule.get("active")), **dict(stale_schedule)},
         "transition": {
             "last_reason": last_event.get("reason") or last_event.get("event"),
             "last_event_at": last_event.get("at") or last_event.get("recover_at") or last_event.get("until"),
@@ -514,6 +516,8 @@ def _health_payload(runtime: Mapping[str, Any]) -> dict[str, Any]:
     ffmpeg = runtime.get("ffmpeg") if isinstance(runtime.get("ffmpeg"), Mapping) else {}
     hls = runtime.get("hls") if isinstance(runtime.get("hls"), Mapping) else {}
     freshness = hls.get("freshness")
+    stale_schedule = runtime.get("schedule") if isinstance(runtime.get("schedule"), Mapping) else {}
+    stale_active = bool(stale_schedule.get("stale") or stale_schedule.get("active"))
     checks = {
         "service_state": "ok" if service.get("status") in {"running", "recovering", "complete"} else "error",
         "active_block_present": "ok" if block.get("current") else "error",
@@ -521,6 +525,7 @@ def _health_payload(runtime: Mapping[str, Any]) -> dict[str, Any]:
         "playlist_present": "ok" if freshness not in {"missing", "unreadable"} else "error",
         "playlist_updating": "ok" if freshness == "fresh" else ("degraded" if freshness == "degraded" else "error"),
         "hls_freshness": "ok" if freshness == "fresh" else ("degraded" if freshness == "degraded" else "error"),
+        "schedule_freshness": "degraded" if stale_active else "ok",
     }
     if any(value == "error" for value in checks.values()):
         status = "error"
@@ -532,7 +537,7 @@ def _health_payload(runtime: Mapping[str, Any]) -> dict[str, Any]:
         "channel_id": runtime.get("channel", {}).get("id") if isinstance(runtime.get("channel"), Mapping) else _channel_id(DEFAULT_CHANNEL_SLUG),
         "status": status,
         "checks": checks,
-        "details": {"seconds_since_last_segment": hls.get("seconds_since_last_segment"), "media_sequence": hls.get("media_sequence")},
+        "details": {"seconds_since_last_segment": hls.get("seconds_since_last_segment"), "media_sequence": hls.get("media_sequence"), "stale_schedule": stale_schedule},
         "updated_at": service.get("updated_at"),
     }
 
@@ -689,6 +694,7 @@ def _derived_schedule_payload(status_payload: Mapping[str, Any], *, channel_slug
     catch_up = dict(state.get("catch_up")) if isinstance(state.get("catch_up"), Mapping) else None
     current_plan_item = dict(state.get("current_plan_item")) if isinstance(state.get("current_plan_item"), Mapping) else None
     next_plan_item = dict(state.get("next_plan_item")) if isinstance(state.get("next_plan_item"), Mapping) else None
+    stale_schedule = dict(status_payload.get("stale_schedule")) if isinstance(status_payload.get("stale_schedule"), Mapping) else {}
     return {
         "source": "fs42stream-status",
         "channel": status_payload.get("channel") or DEFAULT_CHANNEL_NAME,
@@ -703,6 +709,7 @@ def _derived_schedule_payload(status_payload: Mapping[str, Any], *, channel_slug
         "current_plan_item": current_plan_item,
         "next_plan_item": next_plan_item,
         "recent_events": block_events[-10:],
+        "stale_schedule": dict(stale_schedule),
         "hls": {
             "playlist": playlist,
             "channel_output_dir": status_payload.get("channel_output_dir"),
@@ -729,6 +736,7 @@ def _state_contract_view(status_payload: Mapping[str, Any], *, active_event: Map
             "source_plan_item_count": _int_or_none(supervisor.get("source_plan_item_count")),
             "current_plan_item": dict(supervisor.get("current_item")) if isinstance(supervisor.get("current_item"), Mapping) else None,
             "next_plan_item": dict(supervisor.get("next_item")) if isinstance(supervisor.get("next_item"), Mapping) else None,
+            "stale_schedule": dict(status_payload.get("stale_schedule")) if isinstance(status_payload.get("stale_schedule"), Mapping) else {},
         }
 
     raw_playout = status_payload.get("playout")
@@ -744,6 +752,7 @@ def _state_contract_view(status_payload: Mapping[str, Any], *, active_event: Map
             "source_plan_item_count": _int_or_none(status_payload.get("source_plan_item_count")),
             "current_plan_item": dict(raw_playout.get("current_item")) if isinstance(raw_playout.get("current_item"), Mapping) else None,
             "next_plan_item": dict(raw_playout.get("next_item")) if isinstance(raw_playout.get("next_item"), Mapping) else None,
+            "stale_schedule": dict(status_payload.get("stale_schedule")) if isinstance(status_payload.get("stale_schedule"), Mapping) else {},
         }
 
     raw_active_block = status_payload.get("active_block")
@@ -781,6 +790,7 @@ def _state_contract_view(status_payload: Mapping[str, Any], *, active_event: Map
         "source_plan_item_count": source_plan_item_count,
         "current_plan_item": current_plan_item,
         "next_plan_item": next_plan_item,
+        "stale_schedule": dict(status_payload.get("stale_schedule")) if isinstance(status_payload.get("stale_schedule"), Mapping) else {},
     }
 
 def _parse_iso_datetime(value: Any) -> datetime | None:

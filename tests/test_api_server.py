@@ -545,6 +545,33 @@ class APIServerTests(unittest.TestCase):
             xmltv = ET.fromstring(body)
             self.assertEqual([programme.findtext("title") for programme in xmltv.findall("programme")], ["Supervisor Block", "Supervisor Next"])
 
+    def test_health_reports_stale_schedule_as_degraded(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            channel_dir = root / "Sky_One"
+            channel_dir.mkdir(parents=True)
+            playlist = channel_dir / "Sky_One.m3u8"
+            segment = channel_dir / "Sky_One_00000.ts"
+            playlist.write_text("#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXTINF:2.0,\nSky_One_00000.ts\n")
+            segment.write_text("segment")
+            status_path = root / "status.json"
+            status_path.write_text(json.dumps({
+                "status": "running",
+                "channel": "Sky One",
+                "updated_at": "2026-06-25T22:10:00+01:00",
+                "schedule_now": "2026-06-25T22:10:00+01:00",
+                "stale_schedule": {"active": True, "reason": "summary-expired", "summary_end": "2026-06-25T06:00:00"},
+                "active_block": {"index": 1, "title": "Schedule stale - BRB", "start_time": "2026-06-25T22:10:00+01:00", "end_time": "2026-06-25T22:20:00+01:00"},
+                "playlist": str(playlist)
+            }))
+            server = self._start_server(root, status_json=status_path)
+            status, headers, body = self._request(server, "/api/channels/Sky_One/health")
+            self.assertEqual(status, 200)
+            payload = json.loads(body)
+            self.assertEqual(payload["status"], "degraded")
+            self.assertEqual(payload["checks"]["schedule_freshness"], "degraded")
+            self.assertTrue(payload["details"]["stale_schedule"]["active"])
+
     def test_channel_health_reports_ok_degraded_or_error_from_runtime_checks(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
