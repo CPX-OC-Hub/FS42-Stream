@@ -5,13 +5,15 @@ import json
 import mimetypes
 import posixpath
 import xml.etree.ElementTree as ET
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 from dataclasses import dataclass
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Mapping, Sequence, cast
 from urllib.parse import quote, unquote, urlsplit
+
+from .playout_engine import build_block_timeline, playout_snapshot
 
 
 DEFAULT_HOST = "127.0.0.1"
@@ -341,17 +343,21 @@ def _channel_id(channel_slug: str) -> str:
 
 
 def _runtime_payload(status_payload: Mapping[str, Any], *, channel_slug: str, output_root: Path) -> dict[str, Any]:
-    schedule = _derived_schedule_payload(status_payload, channel_slug=channel_slug)
+    state = _state_contract_view(status_payload)
     channel_name = str(status_payload.get("channel") or DEFAULT_CHANNEL_NAME)
-    schedule_now = schedule.get("schedule_now") or status_payload.get("updated_at")
+    schedule_now = state.get("schedule_now") or status_payload.get("updated_at")
     now_dt = _parse_iso_datetime(schedule_now)
-    active_block = schedule.get("active_block") if isinstance(schedule.get("active_block"), Mapping) else None
+    active_block = state.get("active_block") if isinstance(state.get("active_block"), Mapping) else None
     current_block = _runtime_block(active_block, now_dt=now_dt) if active_block is not None else None
-    upcoming = schedule.get("upcoming_blocks")
+    upcoming = state.get("upcoming_blocks")
     next_block = dict(upcoming[0]) if isinstance(upcoming, list) and upcoming and isinstance(upcoming[0], Mapping) else None
-    current_item = schedule.get("current_plan_item") if isinstance(schedule.get("current_plan_item"), Mapping) else None
+    current_item = state.get("current_plan_item") if isinstance(state.get("current_plan_item"), Mapping) else None
     if current_item is not None:
         current_item = _runtime_item(current_item, now_dt=now_dt)
+    next_item = state.get("next_plan_item") if isinstance(state.get("next_plan_item"), Mapping) else None
+    if next_item is not None:
+        next_item = _runtime_item(next_item, now_dt=now_dt)
+    playout = _playout_diagnostics(state)
     events = _event_list(status_payload)
     last_event = events[-1] if events else {}
     ffmpeg = _ffmpeg_payload(status_payload, events)
@@ -368,7 +374,8 @@ def _runtime_payload(status_payload: Mapping[str, Any], *, channel_slug: str, ou
             "schedule_now": schedule_now,
         },
         "block": {"current": current_block, "next": next_block},
-        "item": {"current": current_item},
+        "item": {"current": current_item, "next": next_item},
+        "playout": playout,
         "transition": {
             "last_reason": last_event.get("reason") or last_event.get("event"),
             "last_event_at": last_event.get("at") or last_event.get("recover_at") or last_event.get("until"),
@@ -536,21 +543,14 @@ def _epg_payload(status_payload: Mapping[str, Any], *, channel_slug: str = DEFAU
 
 
 def _programme_rows(status_payload: Mapping[str, Any], *, channel_id: str) -> list[dict[str, Any]]:
+    state = _state_contract_view(status_payload)
     blocks: list[Mapping[str, Any]] = []
-    active = status_payload.get("active_block")
+    active = state.get("active_block")
     if isinstance(active, Mapping):
         blocks.append(active)
-    upcoming = status_payload.get("upcoming_blocks")
+    upcoming = state.get("upcoming_blocks")
     if isinstance(upcoming, list):
         blocks.extend(block for block in upcoming if isinstance(block, Mapping))
-    if not blocks:
-        schedule = _derived_schedule_payload(status_payload, channel_slug=DEFAULT_CHANNEL_SLUG)
-        active = schedule.get("active_block")
-        if isinstance(active, Mapping):
-            blocks.append(active)
-        raw_upcoming = schedule.get("upcoming_blocks")
-        if isinstance(raw_upcoming, list):
-            blocks.extend(block for block in raw_upcoming if isinstance(block, Mapping))
     rows: list[dict[str, Any]] = []
     seen: set[tuple[Any, Any, Any]] = set()
     for block in blocks:
@@ -615,6 +615,24 @@ def _int_or_none(value: Any) -> int | None:
         return None
 
 
+def _playout_diagnostics(state: Mapping[str, Any]) -> dict[str, Any]:
+    catch_up = dict(state.get("catch_up")) if isinstance(state.get("catch_up"), Mapping) else None
+    render_plan_item_count = _int_or_none(state.get("render_plan_item_count"))
+    source_plan_item_count = _int_or_none(state.get("source_plan_item_count"))
+    trimmed = False
+    if isinstance(catch_up, Mapping):
+        trimmed = bool(catch_up.get("applied"))
+    if render_plan_item_count is not None and source_plan_item_count is not None and render_plan_item_count < source_plan_item_count:
+        trimmed = True
+    return {
+        "catch_up": catch_up,
+        "render_plan_item_count": render_plan_item_count,
+        "source_plan_item_count": source_plan_item_count,
+        "trimmed": trimmed,
+        "timeline": [dict(item) for item in state.get("timeline", []) if isinstance(item, Mapping)],
+    }
+
+
 def _derived_schedule_payload(status_payload: Mapping[str, Any], *, channel_slug: str) -> dict[str, Any]:
     events = status_payload.get("events")
     event_list = [event for event in events if isinstance(event, Mapping)] if isinstance(events, list) else []
@@ -661,17 +679,16 @@ def _derived_schedule_payload(status_payload: Mapping[str, Any], *, channel_slug
         if isinstance(raw_hls, Mapping):
             playlist = raw_hls.get("playlist")
 
-    raw_active_block = status_payload.get("active_block")
-    if isinstance(raw_active_block, Mapping):
-        active_block = dict(raw_active_block)
-    else:
-        active_block = dict(active_event.get("block")) if active_event and isinstance(active_event.get("block"), Mapping) else None
-    raw_upcoming_blocks = status_payload.get("upcoming_blocks")
+    state = _state_contract_view(status_payload, active_event=active_event)
+    schedule_now = state.get("schedule_now")
+    active_block = state.get("active_block") if isinstance(state.get("active_block"), Mapping) else None
+    raw_upcoming_blocks = state.get("upcoming_blocks")
     if isinstance(raw_upcoming_blocks, list):
         upcoming_blocks = [dict(block) for block in raw_upcoming_blocks if isinstance(block, Mapping)]
-    timeline = _derive_plan_timeline(active_block) if isinstance(active_block, Mapping) else []
-    schedule_now = status_payload.get("schedule_now") or status_payload.get("updated_at")
-    current_plan_item = _current_plan_item(timeline, schedule_now)
+    timeline = [dict(item) for item in state.get("timeline", []) if isinstance(item, Mapping)]
+    catch_up = dict(state.get("catch_up")) if isinstance(state.get("catch_up"), Mapping) else None
+    current_plan_item = dict(state.get("current_plan_item")) if isinstance(state.get("current_plan_item"), Mapping) else None
+    next_plan_item = dict(state.get("next_plan_item")) if isinstance(state.get("next_plan_item"), Mapping) else None
     return {
         "source": "fs42stream-status",
         "channel": status_payload.get("channel") or DEFAULT_CHANNEL_NAME,
@@ -682,7 +699,9 @@ def _derived_schedule_payload(status_payload: Mapping[str, Any], *, channel_slug
         "previous_blocks": previous_blocks,
         "upcoming_blocks": upcoming_blocks,
         "timeline": timeline,
+        "catch_up": catch_up,
         "current_plan_item": current_plan_item,
+        "next_plan_item": next_plan_item,
         "recent_events": block_events[-10:],
         "hls": {
             "playlist": playlist,
@@ -692,56 +711,77 @@ def _derived_schedule_payload(status_payload: Mapping[str, Any], *, channel_slug
     }
 
 
-def _derive_plan_timeline(active_block: Mapping[str, Any]) -> list[dict[str, Any]]:
-    raw_start = _parse_iso_datetime(active_block.get("start_time"))
-    plan = active_block.get("plan")
-    if raw_start is None or not isinstance(plan, list):
-        return []
-    cursor = raw_start
-    timeline: list[dict[str, Any]] = []
-    for index, item in enumerate(plan):
-        if not isinstance(item, Mapping):
-            continue
-        duration = _float_or_zero(item.get("duration"))
-        wallclock_start = cursor
-        wallclock_end = wallclock_start + timedelta(seconds=duration)
-        skip = _float_or_zero(item.get("skip"))
-        timeline.append(
-            {
-                "index": index,
-                "content_type": item.get("content_type"),
-                "media_type": item.get("media_type"),
-                "path": item.get("path"),
-                "duration": duration,
-                "skip": skip,
-                "is_stream": item.get("is_stream"),
-                "wallclock_start": _format_datetime(wallclock_start),
-                "wallclock_end": _format_datetime(wallclock_end),
-                "media_seek_start": skip,
-                "media_seek_end": skip + duration,
-            }
-        )
-        cursor = wallclock_end
-    return timeline
+def _state_contract_view(status_payload: Mapping[str, Any], *, active_event: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    schedule_now = status_payload.get("schedule_now") or status_payload.get("updated_at")
+    raw_supervisor = status_payload.get("supervisor")
+    if isinstance(raw_supervisor, Mapping):
+        supervisor = dict(raw_supervisor)
+        next_block = dict(supervisor.get("next_block")) if isinstance(supervisor.get("next_block"), Mapping) else None
+        raw_upcoming_blocks = supervisor.get("upcoming_blocks")
+        upcoming_blocks = [dict(block) for block in raw_upcoming_blocks if isinstance(block, Mapping)] if isinstance(raw_upcoming_blocks, list) else ([next_block] if next_block is not None else [])
+        return {
+            "schedule_now": supervisor.get("schedule_now") or schedule_now,
+            "active_block": dict(supervisor.get("current_block")) if isinstance(supervisor.get("current_block"), Mapping) else None,
+            "upcoming_blocks": upcoming_blocks,
+            "timeline": [dict(item) for item in supervisor.get("timeline", []) if isinstance(item, Mapping)],
+            "catch_up": dict(supervisor.get("catch_up")) if isinstance(supervisor.get("catch_up"), Mapping) else None,
+            "render_plan_item_count": _int_or_none(supervisor.get("render_plan_item_count")),
+            "source_plan_item_count": _int_or_none(supervisor.get("source_plan_item_count")),
+            "current_plan_item": dict(supervisor.get("current_item")) if isinstance(supervisor.get("current_item"), Mapping) else None,
+            "next_plan_item": dict(supervisor.get("next_item")) if isinstance(supervisor.get("next_item"), Mapping) else None,
+        }
 
+    raw_playout = status_payload.get("playout")
+    if isinstance(raw_playout, Mapping):
+        next_block = dict(raw_playout.get("next_block")) if isinstance(raw_playout.get("next_block"), Mapping) else None
+        return {
+            "schedule_now": schedule_now,
+            "active_block": dict(raw_playout.get("current_block")) if isinstance(raw_playout.get("current_block"), Mapping) else None,
+            "upcoming_blocks": [next_block] if next_block is not None else [],
+            "timeline": [dict(item) for item in raw_playout.get("timeline", []) if isinstance(item, Mapping)],
+            "catch_up": dict(status_payload.get("catch_up")) if isinstance(status_payload.get("catch_up"), Mapping) else None,
+            "render_plan_item_count": _int_or_none(status_payload.get("render_plan_item_count")),
+            "source_plan_item_count": _int_or_none(status_payload.get("source_plan_item_count")),
+            "current_plan_item": dict(raw_playout.get("current_item")) if isinstance(raw_playout.get("current_item"), Mapping) else None,
+            "next_plan_item": dict(raw_playout.get("next_item")) if isinstance(raw_playout.get("next_item"), Mapping) else None,
+        }
 
-def _current_plan_item(timeline: Sequence[Mapping[str, Any]], schedule_now: Any) -> dict[str, Any] | None:
-    now = _parse_iso_datetime(schedule_now)
-    if now is None:
-        return None
-    for item in timeline:
-        start = _parse_iso_datetime(item.get("wallclock_start"))
-        end = _parse_iso_datetime(item.get("wallclock_end"))
-        if start is None or end is None:
-            continue
-        if start <= now < end:
-            current = dict(item)
-            offset = (now - start).total_seconds()
-            current["current_offset_in_item"] = offset
-            current["media_seek"] = _float_or_zero(item.get("media_seek_start")) + offset
-            return current
-    return None
-
+    raw_active_block = status_payload.get("active_block")
+    if isinstance(raw_active_block, Mapping):
+        active_block = dict(raw_active_block)
+    else:
+        active_block = dict(active_event.get("block")) if active_event and isinstance(active_event.get("block"), Mapping) else None
+    raw_upcoming_blocks = status_payload.get("upcoming_blocks")
+    upcoming_blocks = [dict(block) for block in raw_upcoming_blocks if isinstance(block, Mapping)] if isinstance(raw_upcoming_blocks, list) else []
+    current_plan_item = dict(status_payload.get("current_plan_item")) if isinstance(status_payload.get("current_plan_item"), Mapping) else None
+    next_plan_item = dict(status_payload.get("next_plan_item")) if isinstance(status_payload.get("next_plan_item"), Mapping) else None
+    timeline = build_block_timeline(active_block) if isinstance(active_block, Mapping) else []
+    catch_up = dict(status_payload.get("catch_up")) if isinstance(status_payload.get("catch_up"), Mapping) else None
+    if current_plan_item is None and isinstance(active_block, Mapping):
+        derived_playout = playout_snapshot(active_block, now=_parse_iso_datetime(schedule_now))
+        current_plan_item = derived_playout.get("current_item")
+        next_plan_item = derived_playout.get("next_item")
+    source_plan_item_count = None
+    if isinstance(active_block, Mapping):
+        source_plan = active_block.get("plan")
+        if isinstance(source_plan, list):
+            source_plan_item_count = len(source_plan)
+    render_plan_item_count = source_plan_item_count
+    if current_plan_item is not None and source_plan_item_count is not None:
+        current_index = current_plan_item.get("index")
+        if isinstance(current_index, int):
+            render_plan_item_count = max(0, source_plan_item_count - current_index)
+    return {
+        "schedule_now": schedule_now,
+        "active_block": active_block,
+        "upcoming_blocks": upcoming_blocks,
+        "timeline": timeline,
+        "catch_up": catch_up,
+        "render_plan_item_count": render_plan_item_count,
+        "source_plan_item_count": source_plan_item_count,
+        "current_plan_item": current_plan_item,
+        "next_plan_item": next_plan_item,
+    }
 
 def _parse_iso_datetime(value: Any) -> datetime | None:
     if value is None or value == "":
@@ -753,19 +793,6 @@ def _parse_iso_datetime(value: Any) -> datetime | None:
         return datetime.fromisoformat(text)
     except ValueError:
         return None
-
-
-def _format_datetime(value: datetime) -> str:
-    return value.isoformat()
-
-
-def _float_or_zero(value: Any) -> float:
-    try:
-        return float(value or 0)
-    except (TypeError, ValueError):
-        return 0.0
-
-
 def _last_block_start_event(block_events: list[dict[str, Any]]) -> dict[str, Any] | None:
     for event in reversed(block_events):
         if event.get("event") == "block_start":

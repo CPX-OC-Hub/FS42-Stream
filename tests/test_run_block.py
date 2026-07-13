@@ -8,7 +8,7 @@ from unittest import mock
 
 from fs42stream.ffmpeg import FFMpegHLSCommandBuilder
 from fs42stream.ffprobe import ProbeResult
-from fs42stream.hls_harness import create_fixture_clips
+from fs42stream.hls_harness import create_fixture_clips, inspect_hls_output
 from fs42stream.paths import PathResolver
 from fs42stream.planner import BlockPlanner
 from fs42stream.run_block import BlockRunConfig, BlockRunner, _hls_segment_duration_since, _normalize_jellyfin_live_playlist, _rewrite_live_playlist_boundaries, select_current_or_next_block
@@ -61,6 +61,57 @@ class BlockSelectionTests(unittest.TestCase):
 
 
 class BlockRunnerTests(unittest.TestCase):
+    def test_runner_uses_engine_render_state_metadata_instead_of_reconstructing_from_raw_block(self):
+        client = mock.Mock(fetch_schedule=mock.Mock(return_value=SCHEDULE))
+        planner = mock.Mock()
+        planned = mock.Mock(title="Engine Title", items=[], start_time="2026-06-17T10:00:00", end_time="2026-06-17T10:30:00")
+        planner.plan_playout_items.return_value = planned
+        builder = mock.Mock(build=mock.Mock(return_value=["/usr/bin/ffmpeg", "-i", "fake.mp4", "out.m3u8"]))
+        runner = BlockRunner(client=client, planner=planner, builder=builder)
+
+        with mock.patch("fs42stream.run_block.resolve_block_playout") as resolve:
+            resolve.return_value = mock.Mock(
+                render_plan=[{"path": "engine-item.mp4", "duration": 10, "skip": 0}],
+                render_state=mock.Mock(
+                    title="Engine Title",
+                    start_time="2026-06-17T10:00:00",
+                    end_time="2026-06-17T10:30:00",
+                    source={"engine": True},
+                    plan=[{"path": "engine-item.mp4", "duration": 10, "skip": 0}],
+                    selection=mock.Mock(
+                        index=99,
+                        reason="engine-next",
+                        block_title="Engine Title",
+                        start_time="2026-06-17T10:00:00",
+                        end_time="2026-06-17T10:30:00",
+                    ),
+                ),
+                catch_up={"applied": False},
+                snapshot={"block_title": "Engine Title"},
+            )
+
+            diagnostics = runner.run(
+                BlockRunConfig(channel="Sky One", duration_limit=15, output_dir=Path("/tmp/out"), now=datetime(2026, 6, 17, 10, 5, 0), dry_run=True)
+            )
+
+        planner.plan_playout_items.assert_called_once_with(
+            [{"path": "engine-item.mp4", "duration": 10, "skip": 0}],
+            title="Engine Title",
+            start_time="2026-06-17T10:00:00",
+            end_time="2026-06-17T10:30:00",
+            source={"engine": True},
+        )
+        resolve.assert_called_once_with(
+            SCHEDULE["schedule_blocks"][1],
+            now=datetime(2026, 6, 17, 10, 5, 0),
+            schedule_timezone="Europe/London",
+            selection_index=1,
+            selection_reason="current",
+        )
+        self.assertEqual(diagnostics["selection"]["index"], 99)
+        self.assertEqual(diagnostics["selection"]["reason"], "engine-next")
+        self.assertEqual(diagnostics["selection"]["block_title"], "Engine Title")
+
     def test_runner_fetches_schedule_plans_only_selected_block_and_emits_json_diagnostics(self):
         client = mock.Mock()
         client.fetch_schedule.return_value = SCHEDULE
@@ -324,6 +375,106 @@ class BlockRunnerTests(unittest.TestCase):
         self.assertEqual(diagnostics["hls_next_start_number"], 27)
         self.assertEqual(diagnostics["hls_next_start_time_offset"], 154.0)
         self.assertEqual(diagnostics["render_mode"], "block-concat")
+
+    def test_ts_primary_runner_dry_run_splits_playout_render_and_hls_packaging(self):
+        schedule = {
+            "network_name": "Sky One",
+            "schedule_blocks": [
+                {
+                    "title": "TS Primary Block",
+                    "start_time": "2026-06-17T10:00:00",
+                    "end_time": "2026-06-17T10:30:00",
+                    "plan": [
+                        {"path": "catalog/SkyOne/part-a.mp4", "duration": 30, "skip": 0, "is_stream": False, "content_type": "feature"},
+                        {"path": "catalog/SkyOne/ad-break.mp4", "duration": 30, "skip": 0, "is_stream": False, "content_type": "commercial"},
+                    ],
+                }
+            ],
+        }
+        client = mock.Mock(fetch_schedule=mock.Mock(return_value=schedule))
+        probe = mock.Mock(validate_video=mock.Mock(return_value=ProbeResult(30, 640, 480, 25, 48000, 2)))
+        runner = BlockRunner(
+            client=client,
+            planner=BlockPlanner(PathResolver(fs42_root="/mnt/fs42", sdtv_root="/mnt/media/SDTV"), probe),
+            builder=FFMpegHLSCommandBuilder("/usr/bin/ffmpeg"),
+        )
+
+        diagnostics = runner.run(
+            BlockRunConfig(
+                channel="Sky One",
+                duration_limit=60,
+                output_dir=Path("/tmp/out"),
+                now=datetime(2026, 6, 17, 10, 0, 0),
+                dry_run=True,
+                output_name="Sky_One",
+                playout_mode="ts-primary",
+            )
+        )
+
+        self.assertEqual(diagnostics["playout_mode"], "ts-primary")
+        self.assertEqual(diagnostics["render_mode"], "ts-primary")
+        self.assertEqual(diagnostics["item_command_count"], 2)
+        self.assertEqual(len(diagnostics["commands"]), 2)
+        self.assertEqual(diagnostics["playout_artifacts"]["transport_stream"], "/tmp/out/Sky_One.playout.ts")
+        render_command, package_command = diagnostics["commands"]
+        self.assertIn("concat=n=2:v=1:a=1", " ".join(render_command))
+        self.assertIn("mpegts", render_command)
+        self.assertIn("/tmp/out/Sky_One.playout.ts", render_command)
+        self.assertIn("libx264", render_command)
+        self.assertIn("/tmp/out/Sky_One.playout.ts", package_command)
+        self.assertIn("-c:v", package_command)
+        self.assertIn("copy", package_command)
+        self.assertIn("hls", package_command)
+
+    @unittest.skipUnless(Path("/usr/bin/ffmpeg").exists() and Path("/usr/bin/ffprobe").exists(), "requires system ffmpeg/ffprobe")
+    def test_ts_primary_runner_generates_hls_from_transport_stream_playout_artifact(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            clips = create_fixture_clips(root / "clips", count=2, duration=2.2)
+            schedule = {
+                "network_name": "Sky One",
+                "schedule_blocks": [
+                    {
+                        "title": "TS Primary Block",
+                        "start_time": "2026-06-17T10:00:00",
+                        "end_time": "2026-06-17T10:00:05",
+                        "plan": [
+                            {"realpath": str(clips[0]), "duration": 2.2, "skip": 0, "is_stream": False, "content_type": "feature", "media_type": "video"},
+                            {"realpath": str(clips[1]), "duration": 2.2, "skip": 0, "is_stream": False, "content_type": "commercial", "media_type": "video"},
+                        ],
+                    }
+                ],
+            }
+            client = mock.Mock(fetch_schedule=mock.Mock(return_value=schedule))
+            probe = mock.Mock(validate_video=mock.Mock(return_value=ProbeResult(2.2, 640, 480, 25, 48000, 2)))
+            runner = BlockRunner(
+                client=client,
+                planner=BlockPlanner(PathResolver(fs42_root=root, sdtv_root=root), probe),
+                builder=FFMpegHLSCommandBuilder("/usr/bin/ffmpeg"),
+            )
+
+            diagnostics = runner.run(
+                BlockRunConfig(
+                    channel="Sky One",
+                    duration_limit=5,
+                    output_dir=root / "out",
+                    now=datetime(2026, 6, 17, 10, 0, 0),
+                    output_name="Sky_One",
+                    playout_mode="ts-primary",
+                )
+            )
+
+            transport_stream = root / "out" / "Sky_One.playout.ts"
+            inspection = inspect_hls_output(root / "out" / "Sky_One.m3u8")
+            self.assertTrue(transport_stream.exists())
+
+        self.assertEqual(diagnostics["status"], "ok")
+        self.assertEqual(diagnostics["playout_mode"], "ts-primary")
+        self.assertEqual(diagnostics["playout_artifacts"]["transport_stream"], str(transport_stream))
+        self.assertEqual(len(diagnostics["commands"]), 2)
+        self.assertEqual(diagnostics["commands"][0][-1], str(transport_stream))
+        self.assertEqual(diagnostics["commands"][1][-1], str(root / "out" / "Sky_One.m3u8"))
+        self.assertGreaterEqual(len(inspection.segments), 2)
 
     @unittest.skipUnless(Path("/usr/bin/ffmpeg").exists() and Path("/usr/bin/ffprobe").exists(), "requires system ffmpeg/ffprobe")
     def test_jellyfin_runner_keeps_item_boundaries_inside_single_command_and_dense_numbering(self):

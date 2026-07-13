@@ -210,6 +210,27 @@ class LongBlockScheduleClient:
 
 
 class LiveControllerTests(unittest.TestCase):
+    def test_default_live_config_uses_ts_primary_playout_mode_and_passes_it_to_block_runner(self):
+        updates = []
+        runner = FakeBlockRunner()
+        controller = LiveController(schedule_client=FakeScheduleClient(), block_runner=runner)
+
+        result = controller.run(
+            LiveControllerConfig(
+                channel="Sky One",
+                output_root=Path(datetime.now().strftime("/tmp/fs42-live-%Y%m%d%H%M%S")),
+                max_blocks=1,
+                duration_limit=10,
+                now=datetime(2026, 6, 17, 10, 5, 0),
+                dry_run=True,
+                status_callback=updates.append,
+            )
+        )
+
+        self.assertEqual(runner.calls[0].playout_mode, "ts-primary")
+        self.assertEqual(updates[0]["playout_mode"], "ts-primary")
+        self.assertEqual(result["playout_mode"], "ts-primary")
+
     @unittest.skipUnless(Path("/usr/bin/ffmpeg").exists() and Path("/usr/bin/ffprobe").exists(), "requires system ffmpeg/ffprobe")
     def test_direct_profile_keeps_dense_segment_numbering_across_block_boundary(self):
         class FixtureScheduleClient:
@@ -411,6 +432,33 @@ class LiveControllerTests(unittest.TestCase):
         self.assertEqual(diagnostics["hls_next_start_time_offset"], 50.0)
         self.assertNotIn("#EXT-X-DISCONTINUITY\n#EXT-X-DISCONTINUITY", playlist_text)
 
+    def test_status_and_block_start_event_share_supervisor_projection_state(self):
+        updates = []
+        controller = LiveController(schedule_client=FakeScheduleClient(), block_runner=FakeBlockRunner())
+
+        controller.run(
+            LiveControllerConfig(
+                channel="Sky One",
+                output_root=Path(datetime.now().strftime("/tmp/fs42-live-status-%Y%m%d%H%M%S")),
+                max_blocks=1,
+                duration_limit=10,
+                now=datetime(2026, 6, 17, 10, 5, 0),
+                dry_run=True,
+                status_callback=updates.append,
+            )
+        )
+
+        self.assertGreaterEqual(len(updates), 1)
+        first = updates[0]
+        start_event = first["events"][0]
+        self.assertEqual(first["active_block"], first["playout"]["current_block"])
+        self.assertEqual(first["upcoming_blocks"][0], first["playout"]["next_block"])
+        self.assertEqual(start_event["block"], first["playout"]["current_block"])
+        self.assertEqual(start_event["current_item"], first["playout"]["current_item"])
+        self.assertEqual(start_event["next_item"], first["playout"]["next_item"])
+        self.assertEqual(start_event["playout"]["current_block"]["plan"][0]["skip"], 300.0)
+        self.assertEqual(start_event["current_item"]["media_seek"], 300.0)
+
     @unittest.skipUnless(Path("/usr/bin/ffmpeg").exists() and Path("/usr/bin/ffprobe").exists(), "requires system ffmpeg/ffprobe")
     def test_jellyfin_live_repro_keeps_monotonic_segment_starts_without_discontinuities(self):
         class FixtureScheduleClient:
@@ -578,9 +626,99 @@ class LiveControllerTests(unittest.TestCase):
         self.assertEqual(first["hls"]["playlist"], str(Path(tmp) / "Sky_One" / "Sky_One.m3u8"))
         self.assertEqual(first["events"][-1]["event"], "block_start")
         self.assertEqual(first["schedule_now"], "2026-06-17T10:05:00")
+        self.assertEqual(first["active_block"]["selection_reason"], "current")
         self.assertEqual(first["active_block"]["plan"][0]["path"], "catalog/first.mp4")
+        self.assertEqual(first["active_block"]["plan"][0]["skip"], 300.0)
+        self.assertEqual(first["active_block"]["plan"][0]["duration"], 1500.0)
         self.assertEqual(updates[-1]["status"], "complete")
         self.assertEqual(result["status"], "complete")
+
+    def test_block_events_use_engine_owned_render_state_when_block_starts_mid_playout(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            controller = LiveController(schedule_client=FakeScheduleClient(), block_runner=FakeBlockRunner())
+
+            result = controller.run(
+                LiveControllerConfig(
+                    channel="Sky One",
+                    output_root=Path(tmp),
+                    max_blocks=1,
+                    duration_limit=10,
+                    now=datetime(2026, 6, 17, 10, 5, 0),
+                    dry_run=True,
+                )
+            )
+
+        start_event = [event for event in result["events"] if event["event"] == "block_start"][0]
+        complete_event = [event for event in result["events"] if event["event"] == "block_complete"][0]
+
+        self.assertEqual(start_event["block"]["selection_reason"], "current")
+        self.assertEqual(start_event["block"]["plan"][0]["skip"], 300.0)
+        self.assertEqual(start_event["block"]["plan"][0]["duration"], 1500.0)
+        self.assertEqual(complete_event["block"]["plan"][0]["skip"], 300.0)
+        self.assertEqual(complete_event["block"]["plan"][0]["duration"], 1500.0)
+
+    def test_status_callback_exposes_engine_owned_current_and_next_plan_items(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            updates = []
+            controller = LiveController(schedule_client=FakeScheduleClient(), block_runner=FakeBlockRunner())
+
+            controller.run(
+                LiveControllerConfig(
+                    channel="Sky One",
+                    output_root=Path(tmp),
+                    max_blocks=1,
+                    duration_limit=10,
+                    now=datetime(2026, 6, 17, 10, 5, 0),
+                    status_callback=updates.append,
+                    dry_run=True,
+                )
+            )
+
+        self.assertGreaterEqual(len(updates), 1)
+        first = updates[0]
+        self.assertEqual(first["supervisor"]["selection"], {"index": 0, "reason": "current"})
+        self.assertEqual(first["supervisor"]["current_block"], first["active_block"])
+        self.assertEqual(first["supervisor"]["upcoming_blocks"], first["upcoming_blocks"])
+        self.assertEqual(first["supervisor"]["current_item"], first["current_plan_item"])
+        self.assertEqual(first["supervisor"]["next_item"], first["next_plan_item"])
+        self.assertEqual(first["supervisor"]["timeline"], first["playout"]["timeline"])
+        self.assertEqual(first["supervisor"]["catch_up"], {"applied": True, "schedule_now": "2026-06-17T10:05:00", "block_elapsed": 300.0, "start_plan_index": 0, "offset_in_item": 300.0, "original_skip": 0.0, "media_seek": 300.0, "remaining_item_duration": 1500.0, "dropped_plan_items": 0, "current_content_type": None, "current_path": "catalog/first.mp4"})
+        self.assertEqual(first["supervisor"]["render_plan_item_count"], 1)
+        self.assertEqual(first["supervisor"]["source_plan_item_count"], 1)
+        self.assertEqual(first["catch_up"], first["supervisor"]["catch_up"])
+        self.assertEqual(first["playout"]["current_block"]["title"], "First Live Block")
+        self.assertEqual(first["playout"]["next_block"]["title"], "Second Live Block")
+        self.assertEqual(first["active_block"], first["playout"]["current_block"])
+        self.assertEqual(first["upcoming_blocks"][0], first["playout"]["next_block"])
+        self.assertEqual(first["current_plan_item"]["path"], "catalog/first.mp4")
+        self.assertEqual(first["current_plan_item"]["media_seek"], 300.0)
+        self.assertEqual(first["current_plan_item"], first["playout"]["current_item"])
+        self.assertIsNone(first["next_plan_item"])
+        self.assertIsNone(first["playout"]["next_item"])
+
+    def test_final_result_preserves_supervisor_contract_for_completed_run(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            controller = LiveController(schedule_client=FakeScheduleClient(), block_runner=FakeBlockRunner())
+
+            result = controller.run(
+                LiveControllerConfig(
+                    channel="Sky One",
+                    output_root=Path(tmp),
+                    max_blocks=1,
+                    duration_limit=10,
+                    now=datetime(2026, 6, 17, 10, 5, 0),
+                    dry_run=True,
+                )
+            )
+
+        self.assertEqual(result["status"], "complete")
+        self.assertEqual(result["schedule_now"], "2026-06-17T10:05:00")
+        self.assertEqual(result["supervisor"]["selection"], {"index": 0, "reason": "current"})
+        self.assertEqual(result["supervisor"]["current_block"], result["active_block"])
+        self.assertEqual(result["supervisor"]["current_item"], result["current_plan_item"])
+        self.assertEqual(result["playout"]["current_block"], result["active_block"])
+        self.assertEqual(result["playout"]["current_item"], result["current_plan_item"])
+        self.assertEqual(result["hls"]["playlist"], str(Path(tmp) / "Sky_One" / "Sky_One.m3u8"))
 
     def test_jellyfin_profile_writes_isolated_hls_directory_and_passes_profile_to_runner(self):
         with tempfile.TemporaryDirectory() as tmp:

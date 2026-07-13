@@ -388,6 +388,8 @@ class CatchUpBlockRunnerTests(unittest.TestCase):
 
         self.assertEqual(diagnostics["catch_up"]["applied"], True)
         self.assertEqual(diagnostics["catch_up"]["start_plan_index"], 2)
+        self.assertEqual(diagnostics["playout"]["current_item"]["path"], "catalog/SkyOne/show.mp4")
+        self.assertEqual(diagnostics["playout"]["current_item"]["media_seek"], 510.0)
         self.assertEqual(builder.block.items[0].source["content_type"], "feature")
         self.assertEqual(builder.block.items[0].skip, 510.0)
         self.assertEqual(builder.block.items[0].duration, 490.0)

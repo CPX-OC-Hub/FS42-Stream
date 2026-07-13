@@ -62,6 +62,23 @@ class BlockPlanner:
 
         return self._plan_block(block)
 
+    def plan_playout_items(
+        self,
+        items: Sequence[Mapping[str, Any]],
+        *,
+        title: str,
+        start_time: str | None,
+        end_time: str | None,
+        source: Mapping[str, Any],
+    ) -> PlannedBlock:
+        return PlannedBlock(
+            title=title,
+            start_time=start_time,
+            end_time=end_time,
+            source=source,
+            items=[self._plan_item(item) for item in items],
+        )
+
     def _plan_block(self, block: Mapping[str, Any]) -> PlannedBlock:
         raw_plan = block.get("plan")
         if not isinstance(raw_plan, list):

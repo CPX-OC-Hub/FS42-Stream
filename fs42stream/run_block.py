@@ -11,11 +11,12 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from .client import FS42ScheduleClient
-from .ffmpeg import FFMpegHLSCommandBuilder, StreamProfile
+from .ffmpeg import FFMpegHLSCommandBuilder, PlayoutMode, StreamProfile
 from .ffprobe import FFProbe
 from .hls_harness import inspect_hls_output
 from .paths import PathResolver
 from .planner import BlockPlanner, PlannedBlock, plan_item_type_summary
+from .playout_engine import resolve_block_playout
 
 DEFAULT_API_BASE_URL = "http://192.168.10.252:4242"
 DEFAULT_CHANNEL = "Sky One"
@@ -48,6 +49,7 @@ class BlockRunConfig:
     hls_boundary_starts: tuple[int, ...] = ()
     schedule_timezone: str | None = DEFAULT_SCHEDULE_TIMEZONE
     stream_profile: StreamProfile = "direct"
+    playout_mode: PlayoutMode = "hls-primary"
 
 
 def select_current_or_next_block(schedule: Mapping[str, Any], *, now: datetime | None = None, schedule_timezone: str | None = DEFAULT_SCHEDULE_TIMEZONE) -> SelectedBlock:
@@ -106,35 +108,70 @@ class BlockRunner:
             raise ValueError("duration_limit must be positive")
         if config.stream_profile not in {"direct", "jellyfin"}:
             raise ValueError("stream_profile must be 'direct' or 'jellyfin'")
+        if config.playout_mode not in {"hls-primary", "ts-primary"}:
+            raise ValueError("playout_mode must be 'hls-primary' or 'ts-primary'")
         config.output_dir.mkdir(parents=True, exist_ok=True)
 
         schedule = self.client.fetch_schedule(config.channel, expected_blocks=None)
         selected = select_current_or_next_block(schedule, now=config.now, schedule_timezone=config.schedule_timezone)
-        catch_up_block, catch_up = _catch_up_block_to_wallclock(selected.block, now=config.now, schedule_timezone=config.schedule_timezone)
-        planned = self.planner.plan_block(catch_up_block)
+        playout = resolve_block_playout(
+            selected.block,
+            now=config.now,
+            schedule_timezone=config.schedule_timezone,
+            selection_index=selected.index,
+            selection_reason=selected.reason,
+        )
+        planned = self.planner.plan_playout_items(
+            playout.render_state.plan,
+            title=playout.render_state.title,
+            start_time=playout.render_state.start_time,
+            end_time=playout.render_state.end_time,
+            source=playout.render_state.source,
+        )
         commands: list[list[str]] = []
         render_blocks: list[PlannedBlock] = [planned]
         render_duration_limits: list[float] = [config.duration_limit]
         hls_start_number = config.hls_start_number
         boundary_starts = sorted({int(number) for number in config.hls_boundary_starts if int(number) >= 0})
-        commands.append(
-            self.builder.build(
-                planned,
-                output_dir=config.output_dir,
-                duration_limit=config.duration_limit,
-                output_name=config.output_name,
-                hls_start_number=config.hls_start_number,
-                hls_start_time_offset=config.hls_start_time_offset if config.stream_profile == "jellyfin" else None,
-                hls_append=config.hls_append,
-                stream_profile=config.stream_profile,
+        transport_stream = config.output_dir / f"{FFMpegHLSCommandBuilder._slug(config.output_name or planned.title)}.playout.ts"
+        if config.playout_mode == "ts-primary":
+            commands.extend(
+                [
+                    self.builder.build_transport_stream(
+                        planned,
+                        output_path=transport_stream,
+                        duration_limit=config.duration_limit,
+                    ),
+                    self.builder.build_hls_from_transport_stream(
+                        transport_stream,
+                        output_dir=config.output_dir,
+                        output_name=config.output_name or planned.title,
+                        hls_start_number=config.hls_start_number,
+                        hls_start_time_offset=config.hls_start_time_offset if config.stream_profile == "jellyfin" else None,
+                        hls_append=config.hls_append,
+                        stream_profile=config.stream_profile,
+                    ),
+                ]
             )
-        )
+        else:
+            commands.append(
+                self.builder.build(
+                    planned,
+                    output_dir=config.output_dir,
+                    duration_limit=config.duration_limit,
+                    output_name=config.output_name,
+                    hls_start_number=config.hls_start_number,
+                    hls_start_time_offset=config.hls_start_time_offset if config.stream_profile == "jellyfin" else None,
+                    hls_append=config.hls_append,
+                    stream_profile=config.stream_profile,
+                )
+            )
 
         diagnostics = _diagnostics(
             status="dry-run" if config.dry_run else "ok",
             channel=config.channel,
             schedule=schedule,
-            selected=selected,
+            render_state=playout.render_state,
             planned=planned,
             output_dir=config.output_dir,
             duration_limit=config.duration_limit,
@@ -144,10 +181,13 @@ class BlockRunner:
             hls_start_time_offset=config.hls_start_time_offset,
             hls_append=config.hls_append,
             stream_profile=config.stream_profile,
-            catch_up=catch_up,
+            catch_up=playout.catch_up,
+            playout=playout.snapshot,
         )
-        diagnostics["render_mode"] = "block-concat"
+        diagnostics["render_mode"] = "ts-primary" if config.playout_mode == "ts-primary" else "block-concat"
         diagnostics["stream_profile"] = config.stream_profile
+        diagnostics["playout_mode"] = config.playout_mode
+        diagnostics["playout_artifacts"] = {"transport_stream": str(transport_stream)} if config.playout_mode == "ts-primary" else {}
         diagnostics["commands"] = commands
         diagnostics["item_command_count"] = len(commands)
         if config.dry_run:
@@ -159,36 +199,30 @@ class BlockRunner:
         command_hls_start_number = config.hls_start_number
         command_hls_start_time_offset = config.hls_start_time_offset
         final_playlist_state: dict[str, Any] | None = None
-        for run_index, render_block in enumerate(render_blocks):
-            appended_run = config.hls_append or run_index > 0
-            command = self.builder.build(
-                render_block,
-                output_dir=config.output_dir,
-                duration_limit=render_duration_limits[run_index],
-                output_name=config.output_name,
-                hls_start_number=command_hls_start_number,
-                hls_start_time_offset=command_hls_start_time_offset if config.stream_profile == "jellyfin" else None,
-                hls_append=appended_run,
-                stream_profile=config.stream_profile,
-            )
-            run_boundary_start = command_hls_start_number if appended_run and config.stream_profile != "jellyfin" else None
-            executed_commands.append(command)
-            completed = subprocess.run(command, check=False, shell=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-            run_info = {
-                "index": run_index,
-                "returncode": completed.returncode,
-                "stdout": completed.stdout,
-                "stderr": completed.stderr,
-                "hls_start_number": command_hls_start_number,
-                "hls_start_time_offset": command_hls_start_time_offset,
-            }
-            ffmpeg_runs.append(run_info)
-            final_returncode = completed.returncode
-            playlist = Path(diagnostics["playlist"])
-            if playlist.exists():
-                if run_boundary_start is not None and run_boundary_start not in boundary_starts:
-                    boundary_starts.append(run_boundary_start)
-                    boundary_starts.sort()
+        playlist = Path(diagnostics["playlist"])
+        if config.playout_mode == "ts-primary":
+            stage_commands = [
+                ("transport", commands[0]),
+                ("hls", commands[1]),
+            ]
+            for stage, command in stage_commands:
+                executed_commands.append(command)
+                completed = subprocess.run(command, check=False, shell=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                ffmpeg_runs.append(
+                    {
+                        "index": len(ffmpeg_runs),
+                        "stage": stage,
+                        "returncode": completed.returncode,
+                        "stdout": completed.stdout,
+                        "stderr": completed.stderr,
+                        "hls_start_number": command_hls_start_number,
+                        "hls_start_time_offset": command_hls_start_time_offset,
+                    }
+                )
+                final_returncode = completed.returncode
+                if completed.returncode != 0:
+                    break
+            if final_returncode == 0 and playlist.exists():
                 if config.stream_profile == "jellyfin":
                     _normalize_jellyfin_live_playlist(playlist)
                     final_playlist_state = {
@@ -198,14 +232,57 @@ class BlockRunner:
                     }
                 else:
                     final_playlist_state = _rewrite_live_playlist_boundaries(playlist, boundary_starts=boundary_starts)
-                previous_hls_start_number = command_hls_start_number
                 hls_start_number = _next_hls_start_number(playlist, fallback=hls_start_number)
-                command_hls_start_number = hls_start_number
                 if config.stream_profile == "jellyfin" and command_hls_start_time_offset is not None:
-                    emitted_duration = _hls_segment_duration_since(playlist, start_number=previous_hls_start_number)
+                    emitted_duration = _hls_segment_duration_since(playlist, start_number=config.hls_start_number)
                     command_hls_start_time_offset += emitted_duration
-            if completed.returncode != 0:
-                break
+        else:
+            for run_index, render_block in enumerate(render_blocks):
+                appended_run = config.hls_append or run_index > 0
+                command = self.builder.build(
+                    render_block,
+                    output_dir=config.output_dir,
+                    duration_limit=render_duration_limits[run_index],
+                    output_name=config.output_name,
+                    hls_start_number=command_hls_start_number,
+                    hls_start_time_offset=command_hls_start_time_offset if config.stream_profile == "jellyfin" else None,
+                    hls_append=appended_run,
+                    stream_profile=config.stream_profile,
+                )
+                run_boundary_start = command_hls_start_number if appended_run and config.stream_profile != "jellyfin" else None
+                executed_commands.append(command)
+                completed = subprocess.run(command, check=False, shell=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                run_info = {
+                    "index": run_index,
+                    "returncode": completed.returncode,
+                    "stdout": completed.stdout,
+                    "stderr": completed.stderr,
+                    "hls_start_number": command_hls_start_number,
+                    "hls_start_time_offset": command_hls_start_time_offset,
+                }
+                ffmpeg_runs.append(run_info)
+                final_returncode = completed.returncode
+                if playlist.exists():
+                    if run_boundary_start is not None and run_boundary_start not in boundary_starts:
+                        boundary_starts.append(run_boundary_start)
+                        boundary_starts.sort()
+                    if config.stream_profile == "jellyfin":
+                        _normalize_jellyfin_live_playlist(playlist)
+                        final_playlist_state = {
+                            "discontinuity_sequence": 0,
+                            "boundary_starts": [],
+                            "first_visible_segment_number": None,
+                        }
+                    else:
+                        final_playlist_state = _rewrite_live_playlist_boundaries(playlist, boundary_starts=boundary_starts)
+                    previous_hls_start_number = command_hls_start_number
+                    hls_start_number = _next_hls_start_number(playlist, fallback=hls_start_number)
+                    command_hls_start_number = hls_start_number
+                    if config.stream_profile == "jellyfin" and command_hls_start_time_offset is not None:
+                        emitted_duration = _hls_segment_duration_since(playlist, start_number=previous_hls_start_number)
+                        command_hls_start_time_offset += emitted_duration
+                if completed.returncode != 0:
+                    break
 
         diagnostics["status"] = "ok" if final_returncode == 0 else "ffmpeg-error"
         diagnostics["commands"] = executed_commands
@@ -263,6 +340,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--output-name", help="stable HLS playlist/segment prefix, e.g. Sky_One")
     parser.add_argument("--dry-run", action="store_true", help="validate and print command without running ffmpeg")
     parser.add_argument("--stream-profile", choices=("direct", "jellyfin"), default="direct", help="HLS packaging profile; jellyfin avoids discontinuity tags and offsets timestamps")
+    parser.add_argument("--playout-mode", choices=("hls-primary", "ts-primary"), default="hls-primary", help="render directly to HLS or render TS first then package HLS")
     args = parser.parse_args(argv)
 
     runner = BlockRunner(
@@ -279,6 +357,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         output_name=args.output_name,
         schedule_timezone=args.schedule_timezone,
         stream_profile=args.stream_profile,
+        playout_mode=args.playout_mode,
     )
     try:
         diagnostics = runner.run(config)
@@ -454,7 +533,7 @@ def _diagnostics(
     status: str,
     channel: str,
     schedule: Mapping[str, Any],
-    selected: SelectedBlock,
+    render_state: Any,
     planned: PlannedBlock,
     output_dir: Path,
     duration_limit: float,
@@ -465,6 +544,7 @@ def _diagnostics(
     hls_append: bool = False,
     stream_profile: StreamProfile = "direct",
     catch_up: Mapping[str, Any] | None = None,
+    playout: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     output_slug = FFMpegHLSCommandBuilder._slug(output_name or planned.title)
     playlist = output_dir / f"{output_slug}.m3u8"
@@ -481,13 +561,14 @@ def _diagnostics(
         "hls_append": hls_append,
         "stream_profile": stream_profile,
         "catch_up": dict(catch_up or {"applied": False}),
+        "playout": dict(playout or {}),
         **type_summary,
         "selection": {
-            "index": selected.index,
-            "reason": selected.reason,
-            "block_title": planned.title,
-            "start_time": planned.start_time,
-            "end_time": planned.end_time,
+            "index": render_state.selection.index,
+            "reason": render_state.selection.reason,
+            "block_title": render_state.selection.block_title,
+            "start_time": render_state.selection.start_time,
+            "end_time": render_state.selection.end_time,
         },
         "plan": [
             {
@@ -517,54 +598,6 @@ def _diagnostics(
         "command": command,
     }
     return diagnostics
-
-
-def _catch_up_block_to_wallclock(block: Mapping[str, Any], *, now: datetime | None, schedule_timezone: str | None) -> tuple[Mapping[str, Any], dict[str, Any]]:
-    if now is None:
-        return block, {"applied": False, "reason": "no_now"}
-    block_start = _parse_datetime(block.get("start_time"))
-    if block_start is None:
-        return block, {"applied": False, "reason": "missing_block_start"}
-    schedule_now = _schedule_now(now, schedule_timezone)
-    elapsed = (schedule_now - block_start).total_seconds()
-    if elapsed <= 0:
-        return block, {"applied": False, "reason": "before_or_at_block_start", "block_elapsed": max(0.0, elapsed)}
-    raw_plan = block.get("plan")
-    if not isinstance(raw_plan, list):
-        return block, {"applied": False, "reason": "missing_plan", "block_elapsed": elapsed}
-
-    cursor = 0.0
-    for index, item in enumerate(raw_plan):
-        if not isinstance(item, Mapping):
-            continue
-        duration = _float_or_zero(item.get("duration"))
-        item_end = cursor + duration
-        if cursor <= elapsed < item_end:
-            offset_in_item = elapsed - cursor
-            adjusted_first = dict(item)
-            original_skip = _float_or_zero(adjusted_first.get("skip"))
-            adjusted_first["skip"] = original_skip + offset_in_item
-            adjusted_first["duration"] = max(0.0, duration - offset_in_item)
-            adjusted_first["catch_up_offset"] = offset_in_item
-            trimmed_plan = [adjusted_first]
-            trimmed_plan.extend(dict(next_item) for next_item in raw_plan[index + 1 :] if isinstance(next_item, Mapping))
-            caught_block = dict(block)
-            caught_block["plan"] = trimmed_plan
-            return caught_block, {
-                "applied": True,
-                "schedule_now": schedule_now.isoformat(),
-                "block_elapsed": elapsed,
-                "start_plan_index": index,
-                "offset_in_item": offset_in_item,
-                "original_skip": original_skip,
-                "media_seek": original_skip + offset_in_item,
-                "remaining_item_duration": max(0.0, duration - offset_in_item),
-                "dropped_plan_items": index,
-                "current_content_type": item.get("content_type") or item.get("type") or item.get("media_type"),
-                "current_path": item.get("path") or item.get("realpath"),
-            }
-        cursor = item_end
-    return block, {"applied": False, "reason": "after_plan_end", "block_elapsed": elapsed, "plan_duration": cursor}
 
 
 def _float_or_zero(value: Any) -> float:

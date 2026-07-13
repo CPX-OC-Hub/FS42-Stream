@@ -173,6 +173,148 @@ class APIServerTests(unittest.TestCase):
             self.assertEqual(current["wallclock_start"], "2026-06-25T22:09:01")
             self.assertEqual(payload["timeline"][4]["media_seek_start"], 500.0)
 
+    def test_channel_schedule_exposes_next_plan_item_from_live_playout_status(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            status_path = root / "status.json"
+            status_path.write_text(json.dumps({
+                "status": "running",
+                "channel": "Sky One",
+                "schedule_now": "2026-06-25T22:08:35+01:00",
+                "active_block": {
+                    "index": 365,
+                    "title": "Star Trek The Next Generation",
+                    "start_time": "2026-06-25T22:00:00+01:00",
+                    "end_time": "2026-06-25T23:00:00+01:00",
+                    "plan": [
+                        {"content_type": "bump", "media_type": "video", "path": "ident.mp4", "duration": 10.0, "skip": 0},
+                        {"content_type": "feature", "media_type": "video", "path": "episode.avi", "duration": 500.0, "skip": 0},
+                        {"content_type": "commercial", "media_type": "video", "path": "ad-a.mp4", "duration": 30.0, "skip": 0},
+                    ],
+                },
+                "playout": {
+                    "timeline": [
+                        {"index": 0, "content_type": "bump", "path": "ident.mp4", "wallclock_start": "2026-06-25T22:00:00+01:00", "wallclock_end": "2026-06-25T22:00:10+01:00"},
+                        {"index": 1, "content_type": "feature", "path": "episode.avi", "wallclock_start": "2026-06-25T22:00:10+01:00", "wallclock_end": "2026-06-25T22:08:30+01:00"},
+                        {"index": 2, "content_type": "commercial", "path": "ad-a.mp4", "wallclock_start": "2026-06-25T22:08:30+01:00", "wallclock_end": "2026-06-25T22:09:00+01:00"},
+                    ],
+                    "current_item": {"index": 2, "content_type": "commercial", "path": "ad-a.mp4", "wallclock_start": "2026-06-25T22:08:30+01:00", "wallclock_end": "2026-06-25T22:09:00+01:00"},
+                    "next_item": None,
+                },
+                "events": [],
+            }))
+            server = self._start_server(root, status_json=status_path)
+
+            status, headers, body = self._request(server, "/api/channels/Sky_One/schedule")
+
+            self.assertEqual(status, 200)
+            payload = json.loads(body)
+            self.assertEqual(payload["current_plan_item"]["path"], "ad-a.mp4")
+            self.assertIsNone(payload["next_plan_item"])
+
+    def test_channel_schedule_prefers_engine_owned_playout_projection_for_blocks_and_items(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            status_path = root / "status.json"
+            status_path.write_text(json.dumps({
+                "status": "running",
+                "channel": "Sky One",
+                "schedule_now": "2026-06-25T22:08:35+01:00",
+                "playout": {
+                    "schedule_now": "2026-06-25T22:08:35+01:00",
+                    "current_block": {
+                        "index": 365,
+                        "selection_reason": "current",
+                        "title": "Star Trek The Next Generation",
+                        "start_time": "2026-06-25T22:00:00+01:00",
+                        "end_time": "2026-06-25T23:00:00+01:00",
+                        "plan": [{"path": "episode.avi", "duration": 500.0, "skip": 0}],
+                    },
+                    "next_block": {
+                        "index": 366,
+                        "selection_reason": "upcoming",
+                        "title": "The Simpsons",
+                        "start_time": "2026-06-25T23:00:00+01:00",
+                        "end_time": "2026-06-25T23:30:00+01:00",
+                    },
+                    "timeline": [
+                        {"index": 0, "content_type": "feature", "path": "episode.avi", "wallclock_start": "2026-06-25T22:00:10+01:00", "wallclock_end": "2026-06-25T22:08:30+01:00"},
+                        {"index": 1, "content_type": "commercial", "path": "ad-a.mp4", "wallclock_start": "2026-06-25T22:08:30+01:00", "wallclock_end": "2026-06-25T22:09:00+01:00"},
+                    ],
+                    "current_item": {"index": 1, "content_type": "commercial", "path": "ad-a.mp4", "wallclock_start": "2026-06-25T22:08:30+01:00", "wallclock_end": "2026-06-25T22:09:00+01:00"},
+                    "next_item": None,
+                },
+                "events": [],
+            }))
+            server = self._start_server(root, status_json=status_path)
+
+            status, headers, body = self._request(server, "/api/channels/Sky_One/schedule")
+
+            self.assertEqual(status, 200)
+            payload = json.loads(body)
+            self.assertEqual(payload["active_block"]["title"], "Star Trek The Next Generation")
+            self.assertEqual(payload["upcoming_blocks"][0]["title"], "The Simpsons")
+            self.assertEqual(payload["current_plan_item"]["path"], "ad-a.mp4")
+            self.assertIsNone(payload["next_plan_item"])
+
+    def test_channel_schedule_prefers_supervisor_contract_over_legacy_top_level_reconstruction(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            status_path = root / "status.json"
+            status_path.write_text(json.dumps({
+                "status": "running",
+                "channel": "Sky One",
+                "active_block": {"index": 1, "title": "Legacy Block", "start_time": "2026-06-25T21:00:00+01:00", "end_time": "2026-06-25T21:30:00+01:00"},
+                "upcoming_blocks": [{"index": 2, "title": "Legacy Next", "start_time": "2026-06-25T21:30:00+01:00", "end_time": "2026-06-25T22:00:00+01:00"}],
+                "supervisor": {
+                    "selection": {"index": 365, "reason": "current"},
+                    "schedule_now": "2026-06-25T22:08:35+01:00",
+                    "current_block": {
+                        "index": 365,
+                        "selection_reason": "current",
+                        "title": "Supervisor Block",
+                        "start_time": "2026-06-25T22:00:00+01:00",
+                        "end_time": "2026-06-25T23:00:00+01:00",
+                        "plan": [{"path": "episode.avi", "duration": 500.0, "skip": 0.0}],
+                    },
+                    "next_block": {
+                        "index": 366,
+                        "selection_reason": "upcoming",
+                        "title": "Supervisor Next",
+                        "start_time": "2026-06-25T23:00:00+01:00",
+                        "end_time": "2026-06-25T23:30:00+01:00",
+                    },
+                    "upcoming_blocks": [{
+                        "index": 366,
+                        "selection_reason": "upcoming",
+                        "title": "Supervisor Next",
+                        "start_time": "2026-06-25T23:00:00+01:00",
+                        "end_time": "2026-06-25T23:30:00+01:00",
+                    }],
+                    "timeline": [
+                        {"index": 0, "content_type": "commercial", "path": "ad-a.mp4", "wallclock_start": "2026-06-25T22:08:30+01:00", "wallclock_end": "2026-06-25T22:09:00+01:00"}
+                    ],
+                    "catch_up": {"applied": True, "media_seek": 25.0},
+                    "render_plan_item_count": 1,
+                    "source_plan_item_count": 3,
+                    "current_item": {"index": 0, "content_type": "commercial", "path": "ad-a.mp4", "wallclock_start": "2026-06-25T22:08:30+01:00", "wallclock_end": "2026-06-25T22:09:00+01:00"},
+                    "next_item": None,
+                },
+                "events": [],
+            }))
+            server = self._start_server(root, status_json=status_path)
+
+            status, headers, body = self._request(server, "/api/channels/Sky_One/schedule")
+
+            self.assertEqual(status, 200)
+            payload = json.loads(body)
+            self.assertEqual(payload["schedule_now"], "2026-06-25T22:08:35+01:00")
+            self.assertEqual(payload["active_block"]["title"], "Supervisor Block")
+            self.assertEqual(payload["upcoming_blocks"][0]["title"], "Supervisor Next")
+            self.assertEqual(payload["current_plan_item"]["path"], "ad-a.mp4")
+            self.assertEqual(payload["timeline"][0]["path"], "ad-a.mp4")
+            self.assertEqual(payload["catch_up"], {"applied": True, "media_seek": 25.0})
+
     def test_runtime_route_derives_current_next_item_transition_ffmpeg_and_hls_health(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -216,6 +358,7 @@ class APIServerTests(unittest.TestCase):
                     "start_time": "2026-06-25T23:00:00+01:00",
                     "end_time": "2026-06-25T23:30:00+01:00",
                 }],
+                "catch_up": {"applied": True, "media_seek": 25.0},
                 "ffmpeg": {"pid": 18422, "state": "running", "started_at": "2026-06-25T22:00:01+01:00", "last_exit_code": None, "last_error": None},
                 "events": [
                     {"event": "block_start", "at": "2026-06-25T22:00:00+01:00", "block_number": 1, "block": {"index": 365, "title": "Star Trek The Next Generation"}},
@@ -236,9 +379,14 @@ class APIServerTests(unittest.TestCase):
             self.assertEqual(payload["item"]["current"]["index"], 2)
             self.assertEqual(payload["item"]["current"]["content_type"], "commercial")
             self.assertEqual(payload["item"]["current"]["seconds_remaining"], 25.0)
+            self.assertIsNone(payload["item"]["next"])
             self.assertEqual(payload["transition"]["last_reason"], "item_advance")
             self.assertEqual(payload["ffmpeg"]["pid"], 18422)
             self.assertEqual(payload["ffmpeg"]["state"], "running")
+            self.assertEqual(payload["playout"]["catch_up"], {"applied": True, "media_seek": 25.0})
+            self.assertEqual(payload["playout"]["render_plan_item_count"], 1)
+            self.assertEqual(payload["playout"]["source_plan_item_count"], 3)
+            self.assertEqual(payload["playout"]["trimmed"], True)
             self.assertEqual(payload["hls"]["playlist_url"], "/hls/Sky_One/Sky_One.m3u8")
             self.assertEqual(payload["hls"]["playlist_path"], str(playlist))
             self.assertEqual(payload["hls"]["media_sequence"], 10)
@@ -279,6 +427,123 @@ class APIServerTests(unittest.TestCase):
             self.assertEqual(status, 200)
             self.assertEqual(headers["content-type"], "application/vnd.apple.mpegurl")
             self.assertEqual(body, playlist.read_bytes())
+
+    def test_runtime_and_health_prefer_supervisor_contract_over_conflicting_legacy_fields(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            channel_dir = root / "Sky_One"
+            channel_dir.mkdir()
+            playlist = channel_dir / "Sky_One.m3u8"
+            segment = channel_dir / "Sky_One_00001.ts"
+            segment.write_bytes(b"segment")
+            playlist.write_text("#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXT-X-MEDIA-SEQUENCE:1\n#EXTINF:2,\nSky_One_00001.ts\n")
+            status_path = root / "status.json"
+            status_path.write_text(json.dumps({
+                "status": "running",
+                "channel": "Sky One",
+                "updated_at": "2026-06-25T21:09:10+00:00",
+                "schedule_now": "2026-06-25T21:40:00+01:00",
+                "active_block": {"index": 1, "title": "Legacy Block", "start_time": "2026-06-25T21:00:00+01:00", "end_time": "2026-06-25T21:30:00+01:00"},
+                "upcoming_blocks": [{"index": 2, "title": "Legacy Next", "start_time": "2026-06-25T21:30:00+01:00", "end_time": "2026-06-25T22:00:00+01:00"}],
+                "current_plan_item": {"index": 0, "path": "legacy.mp4", "wallclock_start": "2026-06-25T21:00:00+01:00", "wallclock_end": "2026-06-25T21:10:00+01:00"},
+                "supervisor": {
+                    "selection": {"index": 365, "reason": "current"},
+                    "schedule_now": "2026-06-25T22:08:35+01:00",
+                    "current_block": {
+                        "index": 365,
+                        "selection_reason": "current",
+                        "title": "Supervisor Block",
+                        "start_time": "2026-06-25T22:00:00+01:00",
+                        "end_time": "2026-06-25T23:00:00+01:00",
+                        "plan": [{"path": "episode.avi", "duration": 500.0, "skip": 0.0}],
+                    },
+                    "next_block": {
+                        "index": 366,
+                        "selection_reason": "upcoming",
+                        "title": "Supervisor Next",
+                        "start_time": "2026-06-25T23:00:00+01:00",
+                        "end_time": "2026-06-25T23:30:00+01:00",
+                    },
+                    "upcoming_blocks": [{
+                        "index": 366,
+                        "selection_reason": "upcoming",
+                        "title": "Supervisor Next",
+                        "start_time": "2026-06-25T23:00:00+01:00",
+                        "end_time": "2026-06-25T23:30:00+01:00",
+                    }],
+                    "timeline": [
+                        {"index": 0, "content_type": "commercial", "path": "ad-a.mp4", "wallclock_start": "2026-06-25T22:08:30+01:00", "wallclock_end": "2026-06-25T22:09:00+01:00"}
+                    ],
+                    "catch_up": {"applied": True, "media_seek": 25.0},
+                    "render_plan_item_count": 1,
+                    "source_plan_item_count": 3,
+                    "current_item": {"index": 0, "content_type": "commercial", "path": "ad-a.mp4", "wallclock_start": "2026-06-25T22:08:30+01:00", "wallclock_end": "2026-06-25T22:09:00+01:00"},
+                    "next_item": None,
+                },
+                "ffmpeg": {"pid": 18422, "state": "running", "started_at": "2026-06-25T22:00:01+01:00"},
+                "events": [{"event": "item_advance", "at": "2026-06-25T22:08:30+01:00", "reason": "item_advance"}],
+            }))
+            server = self._start_server(root, status_json=status_path)
+
+            status, headers, body = self._request(server, "/api/channels/Sky_One/runtime")
+
+            self.assertEqual(status, 200)
+            payload = json.loads(body)
+            self.assertEqual(payload["service"]["schedule_now"], "2026-06-25T22:08:35+01:00")
+            self.assertEqual(payload["block"]["current"]["title"], "Supervisor Block")
+            self.assertEqual(payload["block"]["next"]["title"], "Supervisor Next")
+            self.assertEqual(payload["item"]["current"]["path"], "ad-a.mp4")
+            self.assertIsNone(payload["item"]["next"])
+
+            status, headers, body = self._request(server, "/api/channels/Sky_One/health")
+
+            self.assertEqual(status, 200)
+            health = json.loads(body)
+            self.assertEqual(health["status"], "ok")
+            self.assertEqual(health["checks"]["active_block_present"], "ok")
+
+    def test_epg_and_xmltv_prefer_supervisor_contract_programmes_over_legacy_fields(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            status_path = root / "status.json"
+            status_path.write_text(json.dumps({
+                "status": "running",
+                "channel": "Sky One",
+                "active_block": {"index": 1, "title": "Legacy Block", "start_time": "2026-06-25T21:00:00+01:00", "end_time": "2026-06-25T21:30:00+01:00"},
+                "upcoming_blocks": [{"index": 2, "title": "Legacy Next", "start_time": "2026-06-25T21:30:00+01:00", "end_time": "2026-06-25T22:00:00+01:00"}],
+                "supervisor": {
+                    "selection": {"index": 365, "reason": "current"},
+                    "schedule_now": "2026-06-25T22:08:35+01:00",
+                    "current_block": {
+                        "index": 365,
+                        "selection_reason": "current",
+                        "title": "Supervisor Block",
+                        "start_time": "2026-06-25T22:00:00+01:00",
+                        "end_time": "2026-06-25T23:00:00+01:00",
+                    },
+                    "upcoming_blocks": [{
+                        "index": 366,
+                        "selection_reason": "upcoming",
+                        "title": "Supervisor Next",
+                        "start_time": "2026-06-25T23:00:00+01:00",
+                        "end_time": "2026-06-25T23:30:00+01:00",
+                    }],
+                },
+                "events": [],
+            }))
+            server = self._start_server(root, status_json=status_path)
+
+            status, headers, body = self._request(server, "/api/channels/Sky_One/epg")
+
+            self.assertEqual(status, 200)
+            epg = json.loads(body)
+            self.assertEqual([programme["title"] for programme in epg["programmes"]], ["Supervisor Block", "Supervisor Next"])
+
+            status, headers, body = self._request(server, "/iptv/xmltv.xml")
+
+            self.assertEqual(status, 200)
+            xmltv = ET.fromstring(body)
+            self.assertEqual([programme.findtext("title") for programme in xmltv.findall("programme")], ["Supervisor Block", "Supervisor Next"])
 
     def test_channel_health_reports_ok_degraded_or_error_from_runtime_checks(self):
         with tempfile.TemporaryDirectory() as tmp:

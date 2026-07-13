@@ -8,6 +8,7 @@ from .planner import PlannedBlock
 
 
 StreamProfile = Literal["direct", "jellyfin"]
+PlayoutMode = Literal["hls-primary", "ts-primary"]
 
 DIRECT_HLS_LIST_SIZE = 12
 JELLYFIN_HLS_LIST_SIZE = 60
@@ -18,7 +19,7 @@ def hls_list_size_for_profile(stream_profile: StreamProfile) -> int:
 
 
 class FFMpegHLSCommandBuilder:
-    """Build a one-shot block-level normalized concat-filter HLS command."""
+    """Build normalized FFmpeg commands for playout and HLS packaging."""
 
     def __init__(self, ffmpeg: str = "/usr/bin/ffmpeg", *, video_encoder: str = "libx264", vaapi_device: str | None = None) -> None:
         self.ffmpeg = ffmpeg
@@ -50,6 +51,95 @@ class FFMpegHLSCommandBuilder:
         if stream_profile not in {"direct", "jellyfin"}:
             raise ValueError("stream_profile must be 'direct' or 'jellyfin'")
 
+        cmd = self._build_block_inputs(block, stream_profile=stream_profile)
+        filter_complex = self._filter_complex(block, upload_to_vaapi=self.video_encoder.endswith("_vaapi"))
+        output_slug = self._slug(output_name or block.title)
+        playlist = output_dir / f"{output_slug}.m3u8"
+        segment_pattern = output_dir / f"{output_slug}_%05d.ts"
+        cmd.extend(self._normalized_video_audio_output_args(filter_complex))
+        if duration_limit is not None:
+            cmd.extend(["-t", self._num(duration_limit)])
+        if stream_profile == "jellyfin" and hls_start_time_offset is not None:
+            cmd.extend(["-output_ts_offset", self._num(hls_start_time_offset)])
+        hls_args = ["-f", "hls", "-hls_time", "2", "-hls_list_size", str(hls_list_size_for_profile(stream_profile))]
+        if not hls_append:
+            hls_args.extend(["-start_number", str(hls_start_number)])
+        hls_flags = ["omit_endlist"]
+        if hls_append:
+            hls_flags.append("append_list")
+            hls_flags.append("discont_start")
+        hls_args.extend(["-hls_flags", "+".join(hls_flags)])
+        hls_args.extend(
+            [
+                "-hls_segment_filename",
+                str(segment_pattern),
+                str(playlist),
+            ]
+        )
+        cmd.extend(hls_args)
+        return cmd
+
+    def build_transport_stream(
+        self,
+        block: PlannedBlock,
+        *,
+        output_path: Path,
+        duration_limit: float | None = None,
+    ) -> list[str]:
+        if not block.items:
+            raise ValueError("cannot build ffmpeg command for an empty block")
+        if duration_limit is not None and duration_limit <= 0:
+            raise ValueError("duration_limit must be positive")
+
+        cmd = self._build_block_inputs(block, stream_profile="direct")
+        filter_complex = self._filter_complex(block, upload_to_vaapi=self.video_encoder.endswith("_vaapi"))
+        cmd.extend(self._normalized_video_audio_output_args(filter_complex))
+        if duration_limit is not None:
+            cmd.extend(["-t", self._num(duration_limit)])
+        cmd.extend(["-f", "mpegts", "-muxdelay", "0", "-muxpreload", "0", str(output_path)])
+        return cmd
+
+    def build_hls_from_transport_stream(
+        self,
+        input_path: Path,
+        *,
+        output_dir: Path,
+        output_name: str,
+        hls_start_number: int = 0,
+        hls_start_time_offset: float | None = None,
+        hls_append: bool = False,
+        stream_profile: StreamProfile = "direct",
+    ) -> list[str]:
+        if hls_start_number < 0:
+            raise ValueError("hls_start_number must be non-negative")
+        if hls_start_time_offset is not None and hls_start_time_offset < 0:
+            raise ValueError("hls_start_time_offset must be non-negative")
+        if stream_profile not in {"direct", "jellyfin"}:
+            raise ValueError("stream_profile must be 'direct' or 'jellyfin'")
+
+        output_slug = self._slug(output_name)
+        playlist = output_dir / f"{output_slug}.m3u8"
+        segment_pattern = output_dir / f"{output_slug}_%05d.ts"
+        cmd: list[str] = [self.ffmpeg, "-hide_banner", "-y"]
+        if stream_profile == "jellyfin":
+            cmd.extend(["-fflags", "+genpts"])
+        cmd.extend(["-re", "-i", str(input_path), "-map", "0:v:0", "-map", "0:a:0", "-c:v", "copy", "-c:a", "copy"])
+        if stream_profile == "jellyfin" and hls_start_time_offset is not None:
+            cmd.extend(["-output_ts_offset", self._num(hls_start_time_offset)])
+        hls_args = ["-f", "hls", "-hls_time", "2", "-hls_list_size", str(hls_list_size_for_profile(stream_profile))]
+        if not hls_append:
+            hls_args.extend(["-start_number", str(hls_start_number)])
+        hls_flags = ["omit_endlist"]
+        if hls_append:
+            hls_flags.append("append_list")
+            if stream_profile != "jellyfin":
+                hls_flags.append("discont_start")
+        hls_args.extend(["-hls_flags", "+".join(hls_flags)])
+        hls_args.extend(["-hls_segment_filename", str(segment_pattern), str(playlist)])
+        cmd.extend(hls_args)
+        return cmd
+
+    def _build_block_inputs(self, block: PlannedBlock, *, stream_profile: StreamProfile) -> list[str]:
         cmd: list[str] = [self.ffmpeg, "-hide_banner", "-y"]
         if stream_profile == "jellyfin":
             cmd.extend(["-fflags", "+genpts"])
@@ -72,54 +162,29 @@ class FFMpegHLSCommandBuilder:
             if item.duration > 0:
                 cmd.extend(["-t", self._num(item.duration)])
             cmd.extend(["-re", "-i", item.ffmpeg_input or str(item.resolved_path)])
+        return cmd
 
-        filter_complex = self._filter_complex(block, upload_to_vaapi=self.video_encoder.endswith("_vaapi"))
-        output_slug = self._slug(output_name or block.title)
-        playlist = output_dir / f"{output_slug}.m3u8"
-        segment_pattern = output_dir / f"{output_slug}_%05d.ts"
+    def _normalized_video_audio_output_args(self, filter_complex: str) -> list[str]:
         video_args = ["-c:v", self.video_encoder]
         if self.video_encoder.endswith("_vaapi"):
             video_args.extend(["-qp", "23", "-g", "50"])
         else:
             video_args.extend(["-preset", "veryfast", "-crf", "23", "-g", "50", "-keyint_min", "50", "-sc_threshold", "0"])
-        cmd.extend(
-            [
-                "-filter_complex",
-                filter_complex,
-                "-map",
-                "[vout]",
-                "-map",
-                "[aout]",
-                *video_args,
-                "-c:a",
-                "aac",
-                "-ar",
-                "48000",
-                "-ac",
-                "2",
-            ]
-        )
-        if duration_limit is not None:
-            cmd.extend(["-t", self._num(duration_limit)])
-        if stream_profile == "jellyfin" and hls_start_time_offset is not None:
-            cmd.extend(["-output_ts_offset", self._num(hls_start_time_offset)])
-        hls_args = ["-f", "hls", "-hls_time", "2", "-hls_list_size", str(hls_list_size_for_profile(stream_profile))]
-        if not hls_append:
-            hls_args.extend(["-start_number", str(hls_start_number)])
-        hls_flags = ["omit_endlist"]
-        if hls_append:
-            hls_flags.append("append_list")
-            hls_flags.append("discont_start")
-        hls_args.extend(["-hls_flags", "+".join(hls_flags)])
-        hls_args.extend(
-            [
-                "-hls_segment_filename",
-                str(segment_pattern),
-                str(playlist),
-            ]
-        )
-        cmd.extend(hls_args)
-        return cmd
+        return [
+            "-filter_complex",
+            filter_complex,
+            "-map",
+            "[vout]",
+            "-map",
+            "[aout]",
+            *video_args,
+            "-c:a",
+            "aac",
+            "-ar",
+            "48000",
+            "-ac",
+            "2",
+        ]
 
     @staticmethod
     def _filter_complex(block: PlannedBlock, *, upload_to_vaapi: bool = False) -> str:
