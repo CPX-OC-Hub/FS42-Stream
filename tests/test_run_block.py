@@ -1,4 +1,6 @@
 import json
+import threading
+import time
 import subprocess
 import tempfile
 import unittest
@@ -11,7 +13,7 @@ from fs42stream.ffprobe import ProbeResult
 from fs42stream.hls_harness import create_fixture_clips, inspect_hls_output
 from fs42stream.paths import PathResolver
 from fs42stream.planner import BlockPlanner
-from fs42stream.run_block import BlockRunConfig, BlockRunner, _hls_segment_duration_since, _normalize_jellyfin_live_playlist, _rewrite_live_playlist_boundaries, select_current_or_next_block
+from fs42stream.run_block import BlockRunConfig, BlockRunner, _hls_segment_duration_since, _normalize_jellyfin_live_playlist, _rewrite_live_playlist_boundaries, _run_ffmpeg_command, select_current_or_next_block
 
 
 SCHEDULE = {
@@ -61,6 +63,23 @@ class BlockSelectionTests(unittest.TestCase):
 
 
 class BlockRunnerTests(unittest.TestCase):
+    def test_jellyfin_live_normalization_runner_does_not_use_undrained_pipes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            playlist = Path(tmp) / "Sky_One.m3u8"
+            playlist.write_text("#EXTM3U\n#EXT-X-DISCONTINUITY\n#EXTINF:2.0,\nSky_One_00000.ts\n")
+            process = mock.Mock()
+            process.poll.side_effect = [None, 0]
+            process.wait.return_value = 0
+
+            with mock.patch("fs42stream.run_block.subprocess.Popen", return_value=process) as popen, mock.patch("fs42stream.run_block.time.sleep"):
+                completed = _run_ffmpeg_command(["ffmpeg", "-i", "in", "out"], playlist=playlist, normalize_jellyfin=True)
+
+            self.assertEqual(completed.returncode, 0)
+            self.assertNotIn("#EXT-X-DISCONTINUITY", playlist.read_text())
+            kwargs = popen.call_args.kwargs
+            self.assertIsNot(kwargs["stdout"], subprocess.PIPE)
+            self.assertIsNot(kwargs["stderr"], subprocess.PIPE)
+
     def test_runner_uses_placeholder_schedule_when_summary_is_stale(self):
         client = mock.Mock()
         client.fetch_schedule.return_value = SCHEDULE
@@ -428,15 +447,16 @@ class BlockRunnerTests(unittest.TestCase):
         self.assertEqual(diagnostics["item_command_count"], 2)
         self.assertEqual(len(diagnostics["commands"]), 2)
         self.assertEqual(diagnostics["playout_artifacts"]["transport_stream"], "/tmp/out/Sky_One.playout.ts")
-        render_command, package_command = diagnostics["commands"]
-        self.assertIn("concat=n=2:v=1:a=1", " ".join(render_command))
-        self.assertIn("mpegts", render_command)
-        self.assertIn("/tmp/out/Sky_One.playout.ts", render_command)
-        self.assertIn("libx264", render_command)
-        self.assertIn("/tmp/out/Sky_One.playout.ts", package_command)
-        self.assertIn("-c:v", package_command)
-        self.assertIn("copy", package_command)
-        self.assertIn("hls", package_command)
+        first_command = diagnostics["commands"][0]
+        second_command = diagnostics["commands"][1]
+        self.assertIn("concat=n=1:v=1:a=1", " ".join(first_command))
+        self.assertIn("tee", first_command)
+        self.assertIn("/tmp/out/Sky_One.item00000.playout.ts", " ".join(first_command))
+        self.assertIn("libx264", first_command)
+        self.assertIn("/tmp/out/Sky_One.m3u8", " ".join(first_command))
+        self.assertIn("hls_segment_filename=/tmp/out/Sky_One_%05d.ts", " ".join(first_command))
+        self.assertIn("/tmp/out/Sky_One.item00001.playout.ts", " ".join(second_command))
+        self.assertIn("append_list", " ".join(second_command))
 
     @unittest.skipUnless(Path("/usr/bin/ffmpeg").exists() and Path("/usr/bin/ffprobe").exists(), "requires system ffmpeg/ffprobe")
     def test_ts_primary_runner_generates_hls_from_transport_stream_playout_artifact(self):
@@ -484,9 +504,112 @@ class BlockRunnerTests(unittest.TestCase):
         self.assertEqual(diagnostics["playout_mode"], "ts-primary")
         self.assertEqual(diagnostics["playout_artifacts"]["transport_stream"], str(transport_stream))
         self.assertEqual(len(diagnostics["commands"]), 2)
-        self.assertEqual(diagnostics["commands"][0][-1], str(transport_stream))
-        self.assertEqual(diagnostics["commands"][1][-1], str(root / "out" / "Sky_One.m3u8"))
+        self.assertEqual(diagnostics["commands"][0][-2], "tee")
         self.assertGreaterEqual(len(inspection.segments), 2)
+
+    @unittest.skipUnless(Path("/usr/bin/ffmpeg").exists() and Path("/usr/bin/ffprobe").exists(), "requires system ffmpeg/ffprobe")
+    def test_ts_primary_runner_publishes_playlist_before_transport_render_finishes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            clips = create_fixture_clips(root / "clips", count=2, duration=8.0)
+            schedule = {
+                "network_name": "Sky One",
+                "schedule_blocks": [
+                    {
+                        "title": "TS Primary Live Block",
+                        "start_time": "2026-06-17T10:00:00",
+                        "end_time": "2026-06-17T10:00:16",
+                        "plan": [
+                            {"realpath": str(clips[0]), "duration": 8.0, "skip": 0, "is_stream": False, "content_type": "feature", "media_type": "video"},
+                            {"realpath": str(clips[1]), "duration": 8.0, "skip": 0, "is_stream": False, "content_type": "commercial", "media_type": "video"},
+                        ],
+                    }
+                ],
+            }
+            client = mock.Mock(fetch_schedule=mock.Mock(return_value=schedule))
+            probe = mock.Mock(validate_video=mock.Mock(return_value=ProbeResult(8.0, 640, 480, 25, 48000, 2)))
+            runner = BlockRunner(
+                client=client,
+                planner=BlockPlanner(PathResolver(fs42_root=root, sdtv_root=root), probe),
+                builder=FFMpegHLSCommandBuilder("/usr/bin/ffmpeg"),
+            )
+            diagnostics_holder: dict[str, object] = {}
+            thread = threading.Thread(
+                target=lambda: diagnostics_holder.setdefault(
+                    "diagnostics",
+                    runner.run(
+                        BlockRunConfig(
+                            channel="Sky One",
+                            duration_limit=16,
+                            output_dir=root / "out",
+                            now=datetime(2026, 6, 17, 10, 0, 0),
+                            output_name="Sky_One",
+                            playout_mode="ts-primary",
+                        )
+                    ),
+                ),
+                daemon=True,
+            )
+            thread.start()
+            playlist = root / "out" / "Sky_One.m3u8"
+            deadline = time.monotonic() + 6.5
+            published_while_running = False
+            while time.monotonic() < deadline:
+                if playlist.exists() and thread.is_alive() and playlist.stat().st_size > 0:
+                    published_while_running = True
+                    break
+                time.sleep(0.2)
+            thread.join(timeout=20)
+            self.assertFalse(thread.is_alive(), "ts-primary live run did not finish in time")
+
+        self.assertTrue(published_while_running)
+        diagnostics = diagnostics_holder["diagnostics"]
+        assert isinstance(diagnostics, dict)
+        self.assertEqual(diagnostics["status"], "ok")
+
+    @unittest.skipUnless(Path("/usr/bin/ffmpeg").exists() and Path("/usr/bin/ffprobe").exists(), "requires system ffmpeg/ffprobe")
+    def test_ts_primary_runner_stays_close_to_wall_clock(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            clips = create_fixture_clips(root / "clips", count=2, duration=2.2)
+            schedule = {
+                "network_name": "Sky One",
+                "schedule_blocks": [
+                    {
+                        "title": "TS Primary Pace Test",
+                        "start_time": "2026-06-17T10:00:00",
+                        "end_time": "2026-06-17T10:00:04.4",
+                        "plan": [
+                            {"realpath": str(clips[0]), "duration": 2.2, "skip": 0, "is_stream": False, "content_type": "feature", "media_type": "video"},
+                            {"realpath": str(clips[1]), "duration": 2.2, "skip": 0, "is_stream": False, "content_type": "commercial", "media_type": "video"},
+                        ],
+                    }
+                ],
+            }
+            client = mock.Mock(fetch_schedule=mock.Mock(return_value=schedule))
+            probe = mock.Mock(validate_video=mock.Mock(return_value=ProbeResult(2.2, 640, 480, 25, 48000, 2)))
+            runner = BlockRunner(
+                client=client,
+                planner=BlockPlanner(PathResolver(fs42_root=root, sdtv_root=root), probe),
+                builder=FFMpegHLSCommandBuilder("/usr/bin/ffmpeg"),
+            )
+
+            started = time.monotonic()
+            diagnostics = runner.run(
+                BlockRunConfig(
+                    channel="Sky One",
+                    duration_limit=4.4,
+                    output_dir=root / "out",
+                    now=datetime(2026, 6, 17, 10, 0, 0),
+                    output_name="Sky_One",
+                    playout_mode="ts-primary",
+                )
+            )
+            elapsed = time.monotonic() - started
+
+        self.assertEqual(diagnostics["status"], "ok")
+        self.assertGreaterEqual(elapsed, 3.5)
+        self.assertLess(elapsed, 8.5)
 
     @unittest.skipUnless(Path("/usr/bin/ffmpeg").exists() and Path("/usr/bin/ffprobe").exists(), "requires system ffmpeg/ffprobe")
     def test_jellyfin_runner_keeps_item_boundaries_inside_single_command_and_dense_numbering(self):
@@ -703,7 +826,7 @@ class RunBlockCLITests(unittest.TestCase):
              mock.patch("subprocess.run", return_value=completed), \
              mock.patch("sys.stdout") as stdout:
             from fs42stream.run_block import main
-            rc = main(["--channel", "Sky One", "--duration-limit", "120", "--output-dir", "/tmp/fs42stream-hls", "--now", "2026-06-17T10:05:00"])
+            rc = main(["--channel", "Sky One", "--duration-limit", "120", "--output-dir", "/tmp/fs42stream-hls", "--now", "2026-06-17T10:05:00", "--playout-mode", "hls-primary"])
         self.assertEqual(rc, 0)
         written = "".join(call.args[0] for call in stdout.write.call_args_list)
         payload = json.loads(written)

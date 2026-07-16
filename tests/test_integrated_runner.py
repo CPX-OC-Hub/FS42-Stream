@@ -20,7 +20,7 @@ class IntegratedRunnerTests(unittest.TestCase):
         self.assertEqual(DEFAULT_DURATION_LIMIT, ServiceConfig.duration_limit)
         self.assertEqual(config.max_blocks, ServiceConfig.max_blocks)
         self.assertEqual(config.duration_limit, ServiceConfig.duration_limit)
-        self.assertEqual(config.playout_mode, "hls-primary")
+        self.assertEqual(config.playout_mode, "ts-primary")
 
     def test_fake_server_and_controller_lifecycle_writes_status_and_closes_server(self):
         events = []
@@ -159,11 +159,11 @@ class IntegratedRunnerTests(unittest.TestCase):
             )
 
         self.assertEqual([event[1] for event in events if isinstance(event, tuple) and event[0] == "controller"], ["direct", "jellyfin"])
-        self.assertEqual([event[2] for event in events if isinstance(event, tuple) and event[0] == "controller"], ["hls-primary", "hls-primary"])
+        self.assertEqual([event[2] for event in events if isinstance(event, tuple) and event[0] == "controller"], ["ts-primary", "ts-primary"])
         self.assertEqual(result["profile_statuses"]["direct"]["stream_profile"], "direct")
         self.assertEqual(result["profile_statuses"]["jellyfin"]["stream_profile"], "jellyfin")
-        self.assertEqual(result["profile_statuses"]["direct"]["playout_mode"], "hls-primary")
-        self.assertEqual(result["profile_statuses"]["jellyfin"]["playout_mode"], "hls-primary")
+        self.assertEqual(result["profile_statuses"]["direct"]["playout_mode"], "ts-primary")
+        self.assertEqual(result["profile_statuses"]["jellyfin"]["playout_mode"], "ts-primary")
         self.assertEqual(result["stream_profiles"], ["direct", "jellyfin"])
         self.assertEqual(events[0], "served")
         self.assertEqual(events[-2:], ["shutdown", "closed"])

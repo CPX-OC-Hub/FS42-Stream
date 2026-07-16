@@ -13,7 +13,7 @@ from .api_server import DEFAULT_HOST, DEFAULT_OUTPUT_ROOT, DEFAULT_PORT, create_
 from .client import FS42ScheduleClient
 from .ffmpeg import FFMpegHLSCommandBuilder, PlayoutMode, StreamProfile
 from .ffprobe import FFProbe
-from .live_controller import LiveController, LiveControllerConfig
+from .live_controller import LiveController, LiveControllerConfig, SharedScheduleBlockClock
 from .paths import PathResolver
 from .planner import BlockPlanner
 from .run_block import DEFAULT_API_BASE_URL, DEFAULT_CHANNEL, DEFAULT_FFMPEG, DEFAULT_FFPROBE, DEFAULT_FS42_ROOT, DEFAULT_SCHEDULE_TIMEZONE, DEFAULT_SDTV_ROOT, BlockRunner
@@ -42,7 +42,7 @@ class IntegratedRunnerConfig:
     vaapi_device: str | None = None
     schedule_timezone: str | None = DEFAULT_SCHEDULE_TIMEZONE
     stream_profiles: tuple[StreamProfile, ...] = ("direct", "jellyfin")
-    playout_mode: PlayoutMode = "hls-primary"
+    playout_mode: PlayoutMode = "ts-primary"
 
 
 class IntegratedServer(Protocol):
@@ -101,7 +101,14 @@ def run_integrated(
         },
     )
 
-    server = server_factory(host=config.host, port=config.port, output_root=output_root, status_json=status_json)
+    server = server_factory(
+        host=config.host,
+        port=config.port,
+        output_root=output_root,
+        status_json=status_json,
+        api_base_url=config.api_base_url,
+        schedule_timezone=config.schedule_timezone,
+    )
     thread = threading.Thread(target=server.serve_forever, name="fs42stream-api", daemon=True)
     thread.start()
 
@@ -138,6 +145,7 @@ def run_integrated(
         results: dict[StreamProfile, dict[str, Any]] = {}
         errors: dict[StreamProfile, BaseException] = {}
         result_lock = threading.Lock()
+        shared_schedule_clock = SharedScheduleBlockClock(profile_count=len(stream_profiles), timeout=max(90.0, config.duration_limit * 2.0))
 
         def run_profile(profile: StreamProfile) -> None:
             try:
@@ -154,6 +162,7 @@ def run_integrated(
                             schedule_timezone=config.schedule_timezone,
                             stream_profile=profile,
                             playout_mode=config.playout_mode,
+                            shared_schedule_clock=shared_schedule_clock,
                         )
                     )
                 )
@@ -215,7 +224,7 @@ def main(
     parser.add_argument("--video-encoder", default="libx264", help="video encoder, e.g. libx264 or h264_vaapi")
     parser.add_argument("--vaapi-device", help="VAAPI device path, e.g. /dev/dri/renderD128")
     parser.add_argument("--schedule-timezone", default=DEFAULT_SCHEDULE_TIMEZONE, help="timezone for naive FS42 schedule timestamps, e.g. Europe/London")
-    parser.add_argument("--playout-mode", choices=("hls-primary", "ts-primary"), default="hls-primary", help="render directly to HLS or render TS first then package HLS")
+    parser.add_argument("--playout-mode", choices=("hls-primary", "ts-primary"), default="ts-primary", help="render directly to HLS or render TS first then package HLS")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv)
 

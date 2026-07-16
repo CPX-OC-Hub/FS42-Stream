@@ -110,6 +110,7 @@ class FFMpegHLSCommandBuilder:
         hls_start_time_offset: float | None = None,
         hls_append: bool = False,
         stream_profile: StreamProfile = "direct",
+        realtime_input: bool = True,
     ) -> list[str]:
         if hls_start_number < 0:
             raise ValueError("hls_start_number must be non-negative")
@@ -122,9 +123,17 @@ class FFMpegHLSCommandBuilder:
         playlist = output_dir / f"{output_slug}.m3u8"
         segment_pattern = output_dir / f"{output_slug}_%05d.ts"
         cmd: list[str] = [self.ffmpeg, "-hide_banner", "-y"]
+        fflags: list[str] = []
         if stream_profile == "jellyfin":
-            cmd.extend(["-fflags", "+genpts"])
-        cmd.extend(["-re", "-i", str(input_path), "-map", "0:v:0", "-map", "0:a:0", "-c:v", "copy", "-c:a", "copy"])
+            fflags.append("genpts")
+        if not realtime_input and str(input_path) == "pipe:0":
+            cmd.extend(["-probesize", "32768", "-analyzeduration", "0"])
+            fflags.append("nobuffer")
+        if fflags:
+            cmd.extend(["-fflags", "+" + "+".join(fflags)])
+        if realtime_input:
+            cmd.append("-re")
+        cmd.extend(["-i", str(input_path), "-map", "0:v:0", "-map", "0:a:0", "-c:v", "copy", "-c:a", "copy"])
         if stream_profile == "jellyfin" and hls_start_time_offset is not None:
             cmd.extend(["-output_ts_offset", self._num(hls_start_time_offset)])
         hls_args = ["-f", "hls", "-hls_time", "2", "-hls_list_size", str(hls_list_size_for_profile(stream_profile))]
@@ -138,6 +147,61 @@ class FFMpegHLSCommandBuilder:
         hls_args.extend(["-hls_flags", "+".join(hls_flags)])
         hls_args.extend(["-hls_segment_filename", str(segment_pattern), str(playlist)])
         cmd.extend(hls_args)
+        return cmd
+
+    def build_transport_stream_and_hls(
+        self,
+        block: PlannedBlock,
+        *,
+        output_dir: Path,
+        output_name: str,
+        transport_stream_path: Path,
+        duration_limit: float | None = None,
+        hls_start_number: int = 0,
+        hls_start_time_offset: float | None = None,
+        hls_append: bool = False,
+        stream_profile: StreamProfile = "direct",
+    ) -> list[str]:
+        if hls_start_number < 0:
+            raise ValueError("hls_start_number must be non-negative")
+        if hls_start_time_offset is not None and hls_start_time_offset < 0:
+            raise ValueError("hls_start_time_offset must be non-negative")
+        if stream_profile not in {"direct", "jellyfin"}:
+            raise ValueError("stream_profile must be 'direct' or 'jellyfin'")
+
+        output_slug = self._slug(output_name)
+        playlist = output_dir / f"{output_slug}.m3u8"
+        segment_pattern = output_dir / f"{output_slug}_%05d.ts"
+        hls_flags = ["omit_endlist"]
+        if hls_append:
+            hls_flags.append("append_list")
+            if stream_profile != "jellyfin":
+                hls_flags.append("discont_start")
+        hls_options = [
+            "f=hls",
+            "hls_time=2",
+            f"hls_list_size={hls_list_size_for_profile(stream_profile)}",
+            f"hls_flags={'+'.join(hls_flags)}",
+            f"hls_segment_filename={segment_pattern}",
+        ]
+        if not hls_append:
+            hls_options.append(f"start_number={hls_start_number}")
+
+        tee_output = "|".join(
+            [
+                f"[f=mpegts:muxdelay=0:muxpreload=0]{transport_stream_path}",
+                f"[{':'.join(hls_options)}]{playlist}",
+            ]
+        )
+
+        cmd = self._build_block_inputs(block, stream_profile=stream_profile)
+        filter_complex = self._filter_complex(block, upload_to_vaapi=self.video_encoder.endswith("_vaapi"))
+        cmd.extend(self._normalized_video_audio_output_args(filter_complex))
+        if duration_limit is not None:
+            cmd.extend(["-t", self._num(duration_limit)])
+        if stream_profile == "jellyfin" and hls_start_time_offset is not None:
+            cmd.extend(["-output_ts_offset", self._num(hls_start_time_offset)])
+        cmd.extend(["-f", "tee", tee_output])
         return cmd
 
     def _build_block_inputs(self, block: PlannedBlock, *, stream_profile: StreamProfile) -> list[str]:

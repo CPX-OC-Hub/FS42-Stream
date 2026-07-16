@@ -10,8 +10,8 @@ from fs42stream.api_server import create_server, main
 
 
 class APIServerTests(unittest.TestCase):
-    def _start_server(self, output_root, status_json=None):
-        server = create_server(host="127.0.0.1", port=0, output_root=output_root, status_json=status_json)
+    def _start_server(self, output_root, status_json=None, schedule_fetcher=None):
+        server = create_server(host="127.0.0.1", port=0, output_root=output_root, status_json=status_json, schedule_fetcher=schedule_fetcher)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         self.addCleanup(server.server_close)
@@ -49,6 +49,7 @@ class APIServerTests(unittest.TestCase):
             self.assertEqual(payload["channels"][0]["hls_url"], "/hls/Sky_One/")
             self.assertEqual(payload["channels"][0]["jellyfin_hls_playlist_url"], "/hls/Sky_One/jellyfin/Sky_One.m3u8")
             self.assertEqual(payload["channels"][0]["jellyfin_iptv_url"], "/iptv/jellyfin/channels.m3u")
+            self.assertEqual(payload["channels"][0]["logo_url"], "http://192.168.10.139:8088/hls/Sky_One/skyone.png")
 
     def test_channel_status_exposes_latest_status_json_when_present(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -372,7 +373,7 @@ class APIServerTests(unittest.TestCase):
             self.assertEqual(status, 200)
             self.assertEqual(headers["content-type"], "application/json")
             payload = json.loads(body)
-            self.assertEqual(payload["channel"], {"id": "fs42.sky_one", "slug": "Sky_One", "name": "Sky One"})
+            self.assertEqual(payload["channel"], {"id": "fs42.sky_one", "slug": "Sky_One", "name": "Sky One", "logo_url": "http://192.168.10.139:8088/hls/Sky_One/skyone.png"})
             self.assertEqual(payload["block"]["current"]["title"], "Star Trek The Next Generation")
             self.assertEqual(payload["block"]["current"]["seconds_remaining"], 3085.0)
             self.assertEqual(payload["block"]["next"]["title"], "The Simpsons")
@@ -643,7 +644,7 @@ class APIServerTests(unittest.TestCase):
             self.assertEqual(status, 200)
             self.assertEqual(headers["content-type"], "application/vnd.apple.mpegurl")
             m3u = body.decode("utf-8")
-            self.assertIn('#EXTINF:-1 tvg-id="fs42.sky_one" tvg-name="Sky One" tvg-logo="" group-title="FS42",Sky One', m3u)
+            self.assertIn('#EXTINF:-1 tvg-id="fs42.sky_one" tvg-name="Sky One" tvg-logo="http://192.168.10.139:8088/hls/Sky_One/skyone.png" group-title="FS42",Sky One', m3u)
             self.assertIn(f"http://127.0.0.1:{port}/hls/Sky_One/Sky_One.m3u8", m3u)
 
             status, headers, body = self._request(server, "/iptv/xmltv.xml")
@@ -653,6 +654,7 @@ class APIServerTests(unittest.TestCase):
             channel = root_xml.find("channel")
             self.assertIsNotNone(channel)
             self.assertEqual(channel.attrib["id"], "fs42.sky_one")
+            self.assertEqual(channel.find("icon").attrib["src"], "http://192.168.10.139:8088/hls/Sky_One/skyone.png")
             programmes = root_xml.findall("programme")
             self.assertEqual([programme.attrib["channel"] for programme in programmes], ["fs42.sky_one", "fs42.sky_one"])
             self.assertEqual(programmes[0].findtext("title"), "Show A")
@@ -662,7 +664,7 @@ class APIServerTests(unittest.TestCase):
             self.assertEqual(status, 200)
             self.assertEqual(headers["content-type"], "application/vnd.apple.mpegurl")
             jellyfin_m3u = body.decode("utf-8")
-            self.assertIn('#EXTINF:-1 tvg-id="fs42.sky_one" tvg-name="Sky One (Jellyfin)" tvg-logo="" group-title="FS42",Sky One (Jellyfin)', jellyfin_m3u)
+            self.assertIn('#EXTINF:-1 tvg-id="fs42.sky_one" tvg-name="Sky One (Jellyfin)" tvg-logo="http://192.168.10.139:8088/hls/Sky_One/skyone.png" group-title="FS42",Sky One (Jellyfin)', jellyfin_m3u)
             self.assertIn(f"http://127.0.0.1:{port}/hls/Sky_One/jellyfin/Sky_One.m3u8", jellyfin_m3u)
 
             status, headers, body = self._request(server, "/api/channels/Sky_One/epg")
@@ -670,6 +672,38 @@ class APIServerTests(unittest.TestCase):
             epg = json.loads(body)
             self.assertEqual(epg["channel"]["id"], "fs42.sky_one")
             self.assertEqual(epg["programmes"][0]["channel_id"], "fs42.sky_one")
+
+    def test_xmltv_prefers_full_fs42_schedule_when_fetcher_is_available(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            status_path = root / "status.json"
+            status_path.write_text(json.dumps({
+                "status": "running",
+                "channel": "Sky One",
+                "active_block": {"index": 1, "title": "Status Current", "start_time": "2026-06-25T22:00:00+01:00", "end_time": "2026-06-25T22:30:00+01:00"},
+                "upcoming_blocks": [],
+            }))
+            calls = []
+
+            def schedule_fetcher(channel):
+                calls.append(channel)
+                return {
+                    "network_name": "Sky One",
+                    "schedule_blocks": [
+                        {"index": 10, "title": "FS42 Show A", "start_time": "2026-06-25T22:00:00+01:00", "end_time": "2026-06-25T22:30:00+01:00"},
+                        {"index": 11, "title": "FS42 Show B", "start_time": "2026-06-25T22:30:00+01:00", "end_time": "2026-06-25T23:00:00+01:00"},
+                        {"index": 12, "title": "FS42 Show C", "start_time": "2026-06-25T23:00:00+01:00", "end_time": "2026-06-25T23:30:00+01:00"},
+                    ],
+                }
+
+            server = self._start_server(root, status_json=status_path, schedule_fetcher=schedule_fetcher)
+
+            status, _headers, body = self._request(server, "/iptv/xmltv.xml")
+
+            self.assertEqual(status, 200)
+            self.assertEqual(calls, ["Sky One"])
+            root_xml = ET.fromstring(body)
+            self.assertEqual([programme.findtext("title") for programme in root_xml.findall("programme")], ["FS42 Show A", "FS42 Show B", "FS42 Show C"])
 
     def test_unknown_iptv_channel_playlist_returns_channel_not_found(self):
         with tempfile.TemporaryDirectory() as tmp:

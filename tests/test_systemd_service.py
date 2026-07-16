@@ -35,6 +35,7 @@ class SystemdServiceTests(unittest.TestCase):
         self.assertIn('FS42STREAM_DURATION_LIMIT="7200"', env)
         self.assertIn('FS42STREAM_VIDEO_ENCODER="h264_vaapi"', env)
         self.assertIn('FS42STREAM_VAAPI_DEVICE="/dev/dri/renderD128"', env)
+        self.assertIn('FS42STREAM_PLAYOUT_MODE="ts-primary"', env)
 
     def test_renders_systemd_unit_with_env_file_and_restart_policy(self):
         config = ServiceConfig(
@@ -56,6 +57,7 @@ class SystemdServiceTests(unittest.TestCase):
         self.assertIn('--channel "${FS42STREAM_CHANNEL}"', unit)
         self.assertIn("--video-encoder ${FS42STREAM_VIDEO_ENCODER}", unit)
         self.assertIn("--vaapi-device ${FS42STREAM_VAAPI_DEVICE}", unit)
+        self.assertIn("--playout-mode ${FS42STREAM_PLAYOUT_MODE}", unit)
         self.assertIn("Restart=on-failure", unit)
         self.assertIn("RestartSec=5", unit)
         self.assertIn("WantedBy=multi-user.target", unit)

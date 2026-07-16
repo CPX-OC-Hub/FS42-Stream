@@ -12,7 +12,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Mapping, Sequence, cast
 from urllib.parse import quote, unquote, urlsplit
+from zoneinfo import ZoneInfo
 
+from .client import FS42ScheduleClient
 from .playout_engine import build_block_timeline, playout_snapshot
 
 
@@ -21,6 +23,11 @@ DEFAULT_PORT = 8088
 DEFAULT_OUTPUT_ROOT = Path("/tmp/fs42stream-live")
 DEFAULT_CHANNEL_NAME = "Sky One"
 DEFAULT_CHANNEL_SLUG = "Sky_One"
+DEFAULT_CHANNEL_LOGO_URL = "http://192.168.10.139:8088/hls/Sky_One/skyone.png"
+DEFAULT_API_BASE_URL = "http://192.168.10.252:4242"
+DEFAULT_SCHEDULE_TIMEZONE = "Europe/London"
+
+ScheduleFetcher = Callable[[str], Mapping[str, Any]]
 
 
 @dataclass(frozen=True)
@@ -29,6 +36,8 @@ class APIServerConfig:
     port: int = DEFAULT_PORT
     output_root: Path = DEFAULT_OUTPUT_ROOT
     status_json: Path | None = None
+    schedule_fetcher: ScheduleFetcher | None = None
+    schedule_timezone: str | None = DEFAULT_SCHEDULE_TIMEZONE
 
 
 class FS42APIHTTPServer(ThreadingHTTPServer):
@@ -215,7 +224,18 @@ class FS42APIRequestHandler(BaseHTTPRequestHandler):
         status_payload = self._read_status_payload()
         if status_payload is None:
             return
-        body = _xmltv_payload(status_payload).encode("utf-8")
+        schedule_payload = None
+        schedule_fetcher = self._api_server().config.schedule_fetcher
+        if schedule_fetcher is not None:
+            try:
+                schedule_payload = schedule_fetcher(str(status_payload.get("channel") or DEFAULT_CHANNEL_NAME))
+            except Exception:
+                schedule_payload = None
+        body = _xmltv_payload(
+            status_payload,
+            schedule_payload=schedule_payload,
+            schedule_timezone=self._api_server().config.schedule_timezone,
+        ).encode("utf-8")
         self._send_bytes(HTTPStatus.OK, body, "application/xml; charset=utf-8")
 
     def _request_base_url(self) -> str:
@@ -278,8 +298,8 @@ class FS42APIRequestHandler(BaseHTTPRequestHandler):
             self._send_error(HTTPStatus.BAD_REQUEST, "unsafe_hls_path", "HLS path resolves outside the channel output directory")
             return
 
-        if candidate.suffix not in {".m3u8", ".ts"}:
-            self._send_error(HTTPStatus.NOT_FOUND, "hls_not_found", "only .m3u8 playlists and .ts segments are served")
+        if candidate.suffix not in {".m3u8", ".ts", ".png"}:
+            self._send_error(HTTPStatus.NOT_FOUND, "hls_not_found", "only .m3u8 playlists, .ts segments, and .png assets are served")
             return
         if not candidate.is_file():
             self._send_error(HTTPStatus.NOT_FOUND, "hls_not_found", f"HLS file not found: {safe_relative}")
@@ -333,7 +353,7 @@ def _safe_hls_relative_path(raw_relative: str) -> Path | None:
 
 
 def _channel_metadata(*, channel_slug: str = DEFAULT_CHANNEL_SLUG, name: str = DEFAULT_CHANNEL_NAME) -> dict[str, str]:
-    return {"id": _channel_id(channel_slug), "slug": channel_slug, "name": name}
+    return {"id": _channel_id(channel_slug), "slug": channel_slug, "name": name, "logo_url": DEFAULT_CHANNEL_LOGO_URL}
 
 
 def _channel_id(channel_slug: str) -> str:
@@ -582,20 +602,29 @@ def _m3u_payload(*, base_url: str, stream_profile: str = "direct") -> str:
         hls_url = f"{base_url}/hls/{channel['slug']}/{channel['slug']}.m3u8"
     return "\n".join([
         "#EXTM3U",
-        f"#EXTINF:-1 tvg-id=\"{channel['id']}\" tvg-name=\"{display_name}\" tvg-logo=\"\" group-title=\"FS42\",{display_name}",
+        f"#EXTINF:-1 tvg-id=\"{channel['id']}\" tvg-name=\"{display_name}\" tvg-logo=\"{channel['logo_url']}\" group-title=\"FS42\",{display_name}",
         hls_url,
         "",
     ])
 
 
-def _xmltv_payload(status_payload: Mapping[str, Any]) -> str:
+def _xmltv_payload(
+    status_payload: Mapping[str, Any],
+    *,
+    schedule_payload: Mapping[str, Any] | None = None,
+    schedule_timezone: str | None = DEFAULT_SCHEDULE_TIMEZONE,
+) -> str:
     channel = _channel_metadata(name=str(status_payload.get("channel") or DEFAULT_CHANNEL_NAME))
     tv = ET.Element("tv", {"generator-info-name": "fs42stream"})
     channel_element = ET.SubElement(tv, "channel", {"id": channel["id"]})
     ET.SubElement(channel_element, "display-name").text = channel["name"]
-    for row in _programme_rows(status_payload, channel_id=channel["id"]):
-        start = _xmltv_time(row.get("start_time"))
-        stop = _xmltv_time(row.get("end_time"))
+    ET.SubElement(channel_element, "icon", {"src": channel["logo_url"]})
+    rows = _programme_rows_from_schedule(schedule_payload, channel_id=channel["id"]) if isinstance(schedule_payload, Mapping) else []
+    if not rows:
+        rows = _programme_rows(status_payload, channel_id=channel["id"])
+    for row in rows:
+        start = _xmltv_time(row.get("start_time"), schedule_timezone=schedule_timezone)
+        stop = _xmltv_time(row.get("end_time"), schedule_timezone=schedule_timezone)
         if not start or not stop:
             continue
         programme = ET.SubElement(tv, "programme", {"start": start, "stop": stop, "channel": channel["id"]})
@@ -604,12 +633,37 @@ def _xmltv_payload(status_payload: Mapping[str, Any]) -> str:
     return '<?xml version="1.0" encoding="UTF-8"?>\n' + xml + "\n"
 
 
-def _xmltv_time(value: Any) -> str | None:
+def _programme_rows_from_schedule(schedule_payload: Mapping[str, Any], *, channel_id: str) -> list[dict[str, Any]]:
+    blocks = schedule_payload.get("schedule_blocks")
+    if not isinstance(blocks, list):
+        return []
+    rows: list[dict[str, Any]] = []
+    seen: set[tuple[Any, Any, Any]] = set()
+    for block in blocks:
+        if not isinstance(block, Mapping):
+            continue
+        start = block.get("start_time")
+        stop = block.get("end_time")
+        title = str(block.get("title") or "untitled")
+        if not start or not stop:
+            continue
+        identity = (start, stop, title)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        rows.append({"channel_id": channel_id, "title": title, "start_time": start, "end_time": stop})
+    return rows
+
+
+def _xmltv_time(value: Any, *, schedule_timezone: str | None = DEFAULT_SCHEDULE_TIMEZONE) -> str | None:
     dt = _parse_iso_datetime(value)
     if dt is None:
         return None
     if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
+        if schedule_timezone:
+            dt = dt.replace(tzinfo=ZoneInfo(schedule_timezone))
+        else:
+            dt = dt.replace(tzinfo=timezone.utc)
     return dt.strftime("%Y%m%d%H%M%S %z")
 
 
@@ -831,10 +885,29 @@ def _hls_content_type(path: Path) -> str:
     return mimetypes.guess_type(path.name)[0] or "application/octet-stream"
 
 
-def create_server(*, host: str = DEFAULT_HOST, port: int = DEFAULT_PORT, output_root: Path | str = DEFAULT_OUTPUT_ROOT, status_json: Path | str | None = None) -> FS42APIHTTPServer:
+def create_server(
+    *,
+    host: str = DEFAULT_HOST,
+    port: int = DEFAULT_PORT,
+    output_root: Path | str = DEFAULT_OUTPUT_ROOT,
+    status_json: Path | str | None = None,
+    schedule_fetcher: ScheduleFetcher | None = None,
+    api_base_url: str | None = None,
+    schedule_timezone: str | None = DEFAULT_SCHEDULE_TIMEZONE,
+) -> FS42APIHTTPServer:
     output_root_path = Path(output_root)
     status_json_path = Path(status_json) if status_json is not None else None
-    config = APIServerConfig(host=host, port=port, output_root=output_root_path, status_json=status_json_path)
+    if schedule_fetcher is None and api_base_url:
+        client = FS42ScheduleClient(api_base_url)
+        schedule_fetcher = lambda channel: client.fetch_schedule(channel, expected_blocks=None)
+    config = APIServerConfig(
+        host=host,
+        port=port,
+        output_root=output_root_path,
+        status_json=status_json_path,
+        schedule_fetcher=schedule_fetcher,
+        schedule_timezone=schedule_timezone,
+    )
     output_root_path.mkdir(parents=True, exist_ok=True)
     return FS42APIHTTPServer((host, port), FS42APIRequestHandler, config)
 
@@ -845,9 +918,18 @@ def main(argv: Sequence[str] | None = None, *, server_factory: Callable[..., FS4
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
     parser.add_argument("--output-root", type=Path, default=DEFAULT_OUTPUT_ROOT)
     parser.add_argument("--status-json", type=Path, default=None)
+    parser.add_argument("--api-base-url", default=DEFAULT_API_BASE_URL)
+    parser.add_argument("--schedule-timezone", default=DEFAULT_SCHEDULE_TIMEZONE)
     args = parser.parse_args(argv)
 
-    server = server_factory(host=args.host, port=args.port, output_root=args.output_root, status_json=args.status_json)
+    server = server_factory(
+        host=args.host,
+        port=args.port,
+        output_root=args.output_root,
+        status_json=args.status_json,
+        api_base_url=args.api_base_url,
+        schedule_timezone=args.schedule_timezone,
+    )
     try:
         server.serve_forever()
     except KeyboardInterrupt:

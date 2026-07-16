@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
 import subprocess
 import sys
+import tempfile
+import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
@@ -50,6 +53,9 @@ class BlockRunConfig:
     schedule_timezone: str | None = DEFAULT_SCHEDULE_TIMEZONE
     stream_profile: StreamProfile = "direct"
     playout_mode: PlayoutMode = "hls-primary"
+    schedule: Mapping[str, Any] | None = None
+    selected_block_index: int | None = None
+    selected_block_reason: str | None = None
 
 
 def select_current_or_next_block(schedule: Mapping[str, Any], *, now: datetime | None = None, schedule_timezone: str | None = DEFAULT_SCHEDULE_TIMEZONE) -> SelectedBlock:
@@ -176,19 +182,30 @@ class BlockRunner:
             raise ValueError("playout_mode must be 'hls-primary' or 'ts-primary'")
         config.output_dir.mkdir(parents=True, exist_ok=True)
 
-        schedule = self.client.fetch_schedule(config.channel, expected_blocks=None)
-        summary = None
-        if hasattr(self.client, "fetch_schedule_summary"):
-            try:
-                summary = self.client.fetch_schedule_summary(config.channel)
-            except Exception:
-                summary = None
-        stale_schedule = _stale_schedule_state(summary, channel=config.channel, now=config.now, schedule_timezone=config.schedule_timezone)
-        if stale_schedule and stale_schedule.get("active"):
-            schedule = _build_stale_placeholder_schedule(config.channel, now=config.now, duration_limit=config.duration_limit, schedule_timezone=config.schedule_timezone)
-            selected = SelectedBlock(index=0, reason="stale", block=schedule["schedule_blocks"][0])
+        if config.schedule is not None:
+            schedule = config.schedule
+            blocks = schedule.get("schedule_blocks")
+            if not isinstance(blocks, list) or not blocks:
+                raise ValueError("schedule contains no schedule_blocks")
+            selected_index = int(config.selected_block_index or 0)
+            if selected_index < 0 or selected_index >= len(blocks) or not isinstance(blocks[selected_index], Mapping):
+                raise ValueError(f"selected_block_index {selected_index} is not present in schedule")
+            selected = SelectedBlock(index=selected_index, reason=config.selected_block_reason or "shared", block=blocks[selected_index])
+            stale_schedule = None
         else:
-            selected = select_current_or_next_block(schedule, now=config.now, schedule_timezone=config.schedule_timezone)
+            schedule = self.client.fetch_schedule(config.channel, expected_blocks=None)
+            summary = None
+            if hasattr(self.client, "fetch_schedule_summary"):
+                try:
+                    summary = self.client.fetch_schedule_summary(config.channel)
+                except Exception:
+                    summary = None
+            stale_schedule = _stale_schedule_state(summary, channel=config.channel, now=config.now, schedule_timezone=config.schedule_timezone)
+            if stale_schedule and stale_schedule.get("active"):
+                schedule = _build_stale_placeholder_schedule(config.channel, now=config.now, duration_limit=config.duration_limit, schedule_timezone=config.schedule_timezone)
+                selected = SelectedBlock(index=0, reason="stale", block=schedule["schedule_blocks"][0])
+            else:
+                selected = select_current_or_next_block(schedule, now=config.now, schedule_timezone=config.schedule_timezone)
         playout = resolve_block_playout(
             selected.block,
             now=config.now,
@@ -206,28 +223,40 @@ class BlockRunner:
         commands: list[list[str]] = []
         render_blocks: list[PlannedBlock] = [planned]
         render_duration_limits: list[float] = [config.duration_limit]
+        ts_primary_blocks: list[PlannedBlock] = []
+        ts_primary_duration_limits: list[float] = []
         hls_start_number = config.hls_start_number
         boundary_starts = sorted({int(number) for number in config.hls_boundary_starts if int(number) >= 0})
-        transport_stream = config.output_dir / f"{FFMpegHLSCommandBuilder._slug(config.output_name or planned.title)}.playout.ts"
+        output_slug = FFMpegHLSCommandBuilder._slug(config.output_name or planned.title)
+        transport_stream = config.output_dir / f"{output_slug}.playout.ts"
+        transport_stream_parts: list[Path] = []
         if config.playout_mode == "ts-primary":
-            commands.extend(
-                [
-                    self.builder.build_transport_stream(
-                        planned,
-                        output_path=transport_stream,
-                        duration_limit=config.duration_limit,
-                    ),
-                    self.builder.build_hls_from_transport_stream(
-                        transport_stream,
+            remaining_duration = max(0.0, float(config.duration_limit))
+            for item_index, item in enumerate(planned.items):
+                if remaining_duration <= 0:
+                    break
+                item_duration = max(0.0, float(item.duration or item.probe.duration or remaining_duration))
+                item_duration_limit = min(remaining_duration, item_duration) if item_duration > 0 else remaining_duration
+                if item_duration_limit <= 0:
+                    continue
+                transport_stream_part = config.output_dir / f"{output_slug}.item{item_index:05d}.playout.ts"
+                transport_stream_parts.append(transport_stream_part)
+                ts_primary_blocks.append(_single_item_block(planned, item, item_index=item_index))
+                ts_primary_duration_limits.append(item_duration_limit)
+                commands.append(
+                    self.builder.build_transport_stream_and_hls(
+                        ts_primary_blocks[-1],
                         output_dir=config.output_dir,
                         output_name=config.output_name or planned.title,
+                        transport_stream_path=transport_stream_part,
+                        duration_limit=item_duration_limit,
                         hls_start_number=config.hls_start_number,
                         hls_start_time_offset=config.hls_start_time_offset if config.stream_profile == "jellyfin" else None,
-                        hls_append=config.hls_append,
+                        hls_append=config.hls_append or item_index > 0,
                         stream_profile=config.stream_profile,
-                    ),
-                ]
-            )
+                    )
+                )
+                remaining_duration -= item_duration_limit
         else:
             commands.append(
                 self.builder.build(
@@ -277,17 +306,28 @@ class BlockRunner:
         final_playlist_state: dict[str, Any] | None = None
         playlist = Path(diagnostics["playlist"])
         if config.playout_mode == "ts-primary":
-            stage_commands = [
-                ("transport", commands[0]),
-                ("hls", commands[1]),
-            ]
-            for stage, command in stage_commands:
+            if transport_stream.exists():
+                transport_stream.unlink()
+            for run_index, _preview_command in enumerate(commands):
+                appended_run = config.hls_append or run_index > 0
+                run_boundary_start = command_hls_start_number if appended_run and config.stream_profile != "jellyfin" else None
+                command = self.builder.build_transport_stream_and_hls(
+                    ts_primary_blocks[run_index],
+                    output_dir=config.output_dir,
+                    output_name=config.output_name or planned.title,
+                    transport_stream_path=transport_stream_parts[run_index],
+                    duration_limit=ts_primary_duration_limits[run_index],
+                    hls_start_number=command_hls_start_number,
+                    hls_start_time_offset=command_hls_start_time_offset if config.stream_profile == "jellyfin" else None,
+                    hls_append=appended_run,
+                    stream_profile=config.stream_profile,
+                )
                 executed_commands.append(command)
-                completed = subprocess.run(command, check=False, shell=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                completed = _run_ffmpeg_command(command, playlist=playlist, normalize_jellyfin=config.stream_profile == "jellyfin" and config.playout_mode == "ts-primary")
                 ffmpeg_runs.append(
                     {
-                        "index": len(ffmpeg_runs),
-                        "stage": stage,
+                        "index": run_index,
+                        "stage": "transport+hls",
                         "returncode": completed.returncode,
                         "stdout": completed.stdout,
                         "stderr": completed.stderr,
@@ -296,22 +336,32 @@ class BlockRunner:
                     }
                 )
                 final_returncode = completed.returncode
+                part_path = transport_stream_parts[run_index] if run_index < len(transport_stream_parts) else None
+                if isinstance(part_path, Path) and part_path.exists():
+                    with transport_stream.open("ab") as combined_stream, part_path.open("rb") as part_stream:
+                        shutil.copyfileobj(part_stream, combined_stream)
+                    part_path.unlink(missing_ok=True)
+                if playlist.exists():
+                    if run_boundary_start is not None and run_boundary_start not in boundary_starts:
+                        boundary_starts.append(run_boundary_start)
+                        boundary_starts.sort()
+                    if config.stream_profile == "jellyfin":
+                        _normalize_jellyfin_live_playlist(playlist)
+                        final_playlist_state = {
+                            "discontinuity_sequence": 0,
+                            "boundary_starts": [],
+                            "first_visible_segment_number": None,
+                        }
+                    else:
+                        final_playlist_state = _rewrite_live_playlist_boundaries(playlist, boundary_starts=boundary_starts)
+                    previous_hls_start_number = command_hls_start_number
+                    hls_start_number = _next_hls_start_number(playlist, fallback=hls_start_number)
+                    command_hls_start_number = hls_start_number
+                    if config.stream_profile == "jellyfin" and command_hls_start_time_offset is not None:
+                        emitted_duration = _hls_segment_duration_since(playlist, start_number=previous_hls_start_number)
+                        command_hls_start_time_offset += emitted_duration
                 if completed.returncode != 0:
                     break
-            if final_returncode == 0 and playlist.exists():
-                if config.stream_profile == "jellyfin":
-                    _normalize_jellyfin_live_playlist(playlist)
-                    final_playlist_state = {
-                        "discontinuity_sequence": 0,
-                        "boundary_starts": [],
-                        "first_visible_segment_number": None,
-                    }
-                else:
-                    final_playlist_state = _rewrite_live_playlist_boundaries(playlist, boundary_starts=boundary_starts)
-                hls_start_number = _next_hls_start_number(playlist, fallback=hls_start_number)
-                if config.stream_profile == "jellyfin" and command_hls_start_time_offset is not None:
-                    emitted_duration = _hls_segment_duration_since(playlist, start_number=config.hls_start_number)
-                    command_hls_start_time_offset += emitted_duration
         else:
             for run_index, render_block in enumerate(render_blocks):
                 appended_run = config.hls_append or run_index > 0
@@ -327,7 +377,7 @@ class BlockRunner:
                 )
                 run_boundary_start = command_hls_start_number if appended_run and config.stream_profile != "jellyfin" else None
                 executed_commands.append(command)
-                completed = subprocess.run(command, check=False, shell=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                completed = _run_ffmpeg_command(command, playlist=playlist, normalize_jellyfin=config.stream_profile == "jellyfin" and config.playout_mode == "ts-primary")
                 run_info = {
                     "index": run_index,
                     "returncode": completed.returncode,
@@ -386,11 +436,12 @@ class BlockRunner:
                 "segment_count": len(inspection.segments),
                 "has_endlist": inspection.has_endlist,
             }
+            emitted_duration = _hls_segment_duration_since(playlist, start_number=config.hls_start_number)
+            diagnostics["emitted_media_duration"] = emitted_duration
             diagnostics["hls_next_start_number"] = _next_hls_start_number(playlist, fallback=hls_start_number)
             if config.hls_start_time_offset is not None:
-                new_duration = _hls_segment_duration_since(playlist, start_number=config.hls_start_number)
-                diagnostics["hls_segment_duration"] = new_duration
-                diagnostics["hls_next_start_time_offset"] = config.hls_start_time_offset + new_duration
+                diagnostics["hls_segment_duration"] = emitted_duration
+                diagnostics["hls_next_start_time_offset"] = config.hls_start_time_offset + emitted_duration
         diagnostics["hls_boundary_starts"] = [] if config.stream_profile == "jellyfin" else boundary_starts
         if isinstance(final_playlist_state, Mapping):
             diagnostics["hls_discontinuity_sequence"] = final_playlist_state.get("discontinuity_sequence")
@@ -416,7 +467,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--output-name", help="stable HLS playlist/segment prefix, e.g. Sky_One")
     parser.add_argument("--dry-run", action="store_true", help="validate and print command without running ffmpeg")
     parser.add_argument("--stream-profile", choices=("direct", "jellyfin"), default="direct", help="HLS packaging profile; jellyfin avoids discontinuity tags and offsets timestamps")
-    parser.add_argument("--playout-mode", choices=("hls-primary", "ts-primary"), default="hls-primary", help="render directly to HLS or render TS first then package HLS")
+    parser.add_argument("--playout-mode", choices=("hls-primary", "ts-primary"), default="ts-primary", help="render directly to HLS or render TS first then package HLS")
     args = parser.parse_args(argv)
 
     runner = BlockRunner(
@@ -453,6 +504,28 @@ def _single_item_block(block: PlannedBlock, item: Any, *, item_index: int) -> Pl
         source=block.source,
         items=[item],
     )
+
+
+def _run_ffmpeg_command(command: Sequence[str], *, playlist: Path, normalize_jellyfin: bool) -> subprocess.CompletedProcess[str]:
+    if not normalize_jellyfin:
+        return subprocess.run(command, check=False, shell=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+    # Do not leave ffmpeg stdout/stderr connected to PIPE while we poll for
+    # live Jellyfin playlist normalization. FFmpeg writes progress/log output
+    # continuously; if the parent does not drain a PIPE, the child can block in
+    # pipe_write and freeze the live profile indefinitely.
+    with tempfile.TemporaryFile(mode="w+t") as stdout_file, tempfile.TemporaryFile(mode="w+t") as stderr_file:
+        process = subprocess.Popen(command, shell=False, stdout=stdout_file, stderr=stderr_file, text=True)
+        while process.poll() is None:
+            if playlist.exists():
+                _normalize_jellyfin_live_playlist(playlist)
+            time.sleep(0.25)
+        returncode = process.wait()
+        if playlist.exists():
+            _normalize_jellyfin_live_playlist(playlist)
+        stdout_file.seek(0)
+        stderr_file.seek(0)
+        return subprocess.CompletedProcess(command, returncode, stdout=stdout_file.read(), stderr=stderr_file.read())
 
 
 def _next_hls_start_number(playlist: Path, *, fallback: int) -> int:
