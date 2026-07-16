@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import subprocess
 import sys
 import threading
@@ -39,11 +40,19 @@ from .run_block import (
 )
 
 
-JELLYFIN_SHOW_TO_SHOW_STARTUP_BRIDGE_SECONDS = 20.0
+BOUNDARY_FILLER_STARTUP_GUARD_SECONDS = 20.0
 
 
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _transition_safe_filler_duration(duration: float) -> float:
+    """Round filler up to complete HLS segment cadence to avoid tiny tail segments."""
+
+    if duration <= 0:
+        raise ValueError("duration must be positive")
+    return math.ceil(duration / HLS_TARGET_SEGMENT_DURATION) * HLS_TARGET_SEGMENT_DURATION
 
 
 @dataclass(frozen=True)
@@ -178,6 +187,7 @@ class HLSBlackSlateFillerRunner:
         output_dir.mkdir(parents=True, exist_ok=True)
         playlist = output_dir / f"{output_name}.m3u8"
         segment_pattern = output_dir / f"{output_name}_%05d.ts"
+        safe_duration = _transition_safe_filler_duration(duration)
         command = [
             self.ffmpeg,
             "-hide_banner",
@@ -193,7 +203,7 @@ class HLSBlackSlateFillerRunner:
             "-i",
             "anullsrc=channel_layout=stereo:sample_rate=48000",
             "-t",
-            _num(duration),
+            _num(safe_duration),
             "-c:v",
             "libx264",
             "-preset",
@@ -243,6 +253,8 @@ class HLSBlackSlateFillerRunner:
             "command": command,
             "hls_start_number": hls_start_number,
             "hls_start_time_offset": hls_start_time_offset,
+            "requested_duration": duration,
+            "duration": safe_duration,
             "hls_next_start_number": hls_next_start_number,
             "hls_segment_duration": segment_duration,
             "hls_next_start_time_offset": (hls_start_time_offset + segment_duration) if hls_start_time_offset is not None else None,
@@ -352,83 +364,6 @@ class LiveController:
                 if remaining_seconds > 0:
                     effective_duration_limit = min(config.duration_limit, remaining_seconds)
 
-            if (
-                ordinal > 0
-                and not simulated_cursor
-                and config.stream_profile == "jellyfin"
-                and config.playout_mode == "ts-primary"
-                and block_end is not None
-                and previous_block_info is not None
-                and _is_show_to_show_boundary(previous_block_info, block_info)
-            ):
-                bridge_duration = min(
-                    JELLYFIN_SHOW_TO_SHOW_STARTUP_BRIDGE_SECONDS,
-                    max(0.0, effective_duration_limit - HLS_TARGET_SEGMENT_DURATION),
-                )
-                if bridge_duration >= HLS_TARGET_SEGMENT_DURATION:
-                    events.append(
-                        {
-                            "event": "block_startup_bridge",
-                            "block_number": ordinal + 1,
-                            "previous_block": previous_block_info,
-                            "block": block_info,
-                            "duration": bridge_duration,
-                            "reason": "jellyfin-show-to-show-ts-primary-startup-starvation-guard",
-                            "hls_start_number": hls_start_number,
-                            "hls_start_time_offset": hls_start_time_offset,
-                        }
-                    )
-                    _emit_live_status(
-                        config,
-                        status="bridging",
-                        channel_output_dir=channel_output_dir,
-                        events=events,
-                        playout_state=playout_state,
-                        schedule_now=config.clock(),
-                        stale_schedule=last_stale_schedule,
-                    )
-                    bridge_diagnostics = dict(
-                        self.filler_runner.run(
-                            output_dir=channel_output_dir,
-                            output_name=FFMpegHLSCommandBuilder._slug(config.channel),
-                            duration=bridge_duration,
-                            hls_start_number=hls_start_number,
-                            hls_start_time_offset=hls_start_time_offset,
-                            hls_append=True,
-                            stream_profile=config.stream_profile,
-                        )
-                    )
-                    bridge_playlist = Path(str(bridge_diagnostics.get("playlist") or ""))
-                    if bridge_playlist.exists():
-                        _normalize_jellyfin_live_playlist(bridge_playlist)
-                        bridge_diagnostics["hls_boundary_starts"] = []
-                        bridge_diagnostics["hls_discontinuity_sequence"] = 0
-                    hls_start_number = int(bridge_diagnostics.get("hls_next_start_number") or hls_start_number)
-                    hls_start_time_offset = _next_hls_start_time_offset(bridge_diagnostics, fallback=hls_start_time_offset)
-                    events[-1].update(
-                        {
-                            "status": bridge_diagnostics.get("status"),
-                            "playlist": bridge_diagnostics.get("playlist"),
-                            "hls_next_start_number": bridge_diagnostics.get("hls_next_start_number"),
-                            "hls_next_start_time_offset": bridge_diagnostics.get("hls_next_start_time_offset"),
-                            "ffmpeg_returncode": _ffmpeg_returncode(bridge_diagnostics),
-                        }
-                    )
-                    bridge_now = config.clock()
-                    run_now = bridge_now
-                    schedule_now_after_bridge = _schedule_now(bridge_now, config.schedule_timezone)
-                    remaining_after_bridge = max(0.0, (block_end - schedule_now_after_bridge).total_seconds())
-                    if remaining_after_bridge > 0:
-                        effective_duration_limit = min(config.duration_limit, remaining_after_bridge)
-                    _emit_live_status(
-                        config,
-                        status="running",
-                        channel_output_dir=channel_output_dir,
-                        events=events,
-                        playout_state=playout_state,
-                        schedule_now=bridge_now,
-                        stale_schedule=last_stale_schedule,
-                    )
             block_hls_append = ordinal > 0
             block_hls_start_number = hls_start_number
             diagnostics = self.block_runner.run(
@@ -591,11 +526,12 @@ class LiveController:
                         schedule_now=config.clock(),
                         stale_schedule=last_stale_schedule,
                     )
+                    filler_duration = wait_seconds + BOUNDARY_FILLER_STARTUP_GUARD_SECONDS
                     filler_diagnostics = dict(
                         self.filler_runner.run(
                             output_dir=channel_output_dir,
                             output_name=FFMpegHLSCommandBuilder._slug(config.channel),
-                            duration=wait_seconds,
+                            duration=filler_duration,
                             hls_start_number=hls_start_number,
                             hls_start_time_offset=hls_start_time_offset if config.stream_profile == "jellyfin" else None,
                             hls_append=True,
@@ -620,7 +556,9 @@ class LiveController:
                             "event": "block_filler",
                             "block_number": ordinal + 1,
                             "block": block_info,
-                            "duration": wait_seconds,
+                            "duration": filler_duration,
+                            "wait_seconds": wait_seconds,
+                            "startup_guard_seconds": BOUNDARY_FILLER_STARTUP_GUARD_SECONDS,
                             "until": block_end.isoformat(),
                             "status": filler_diagnostics.get("status"),
                             "playlist": filler_diagnostics.get("playlist"),
