@@ -15,6 +15,7 @@ from typing import Any, Callable, Mapping, Protocol, Sequence
 from .client import FS42ScheduleClient
 from .ffmpeg import FFMpegHLSCommandBuilder, PlayoutMode, StreamProfile, hls_list_size_for_profile
 from .ffprobe import FFProbe
+from .hls_retention import HLSRetentionConfig, cleanup_hls_retention
 from .paths import PathResolver
 from .planner import BlockPlanner
 from .playout_supervisor import SupervisedPlayout, supervise_schedule_playout
@@ -71,6 +72,8 @@ class LiveControllerConfig:
     stream_profile: StreamProfile = "direct"
     playout_mode: PlayoutMode = "ts-primary"
     shared_schedule_clock: Any | None = None
+    hls_retention_max_age_seconds: float = 6 * 60 * 60
+    hls_retention_max_segments_per_dir: int = 7200
 
 
 class ScheduleClient(Protocol):
@@ -399,6 +402,10 @@ class LiveController:
             hls_start_number = int(diagnostics_dict.get("hls_next_start_number") or hls_start_number)
             hls_start_time_offset = _next_hls_start_time_offset(diagnostics_dict, fallback=hls_start_time_offset)
             events.append(_complete_event(ordinal=ordinal, block=block_info, diagnostics=diagnostics_dict))
+            if not config.dry_run:
+                retention_removed = _run_hls_retention(config)
+                if retention_removed:
+                    events.append({"event": "hls_retention_cleanup", "block_number": ordinal + 1, "removed": [str(path) for path in retention_removed], "removed_count": len(retention_removed)})
             _emit_live_status(
                 config,
                 status="running",
@@ -770,6 +777,18 @@ def _emit_live_status(
     config.status_callback(payload)
 
 
+def _run_hls_retention(config: LiveControllerConfig) -> list[Path]:
+    result = cleanup_hls_retention(
+        HLSRetentionConfig(
+            output_root=config.output_root,
+            channel_slug=FFMpegHLSCommandBuilder._slug(config.channel),
+            max_age_seconds=config.hls_retention_max_age_seconds,
+            max_segments_per_dir=config.hls_retention_max_segments_per_dir,
+        )
+    )
+    return result.removed
+
+
 def clean_hls_outputs(directory: Path) -> list[Path]:
     """Remove stale HLS playlists/segments from a stable channel directory only."""
 
@@ -810,6 +829,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--stream-profile", choices=("direct", "jellyfin"), default="direct", help="HLS packaging profile; jellyfin writes under <channel>/jellyfin")
     parser.add_argument("--playout-mode", choices=("hls-primary", "ts-primary"), default="ts-primary", help="render directly to HLS or render TS first then package HLS")
+    parser.add_argument("--hls-retention-max-age-seconds", type=float, default=6 * 60 * 60, help="rolling HLS segment retention age")
+    parser.add_argument("--hls-retention-max-segments-per-dir", type=int, default=7200, help="maximum HLS .ts segments to keep in each direct/Jellyfin channel directory")
     args = parser.parse_args(argv)
 
     schedule_client = FS42ScheduleClient(args.api_base_url, timeout=args.timeout)
@@ -830,6 +851,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         max_recovery_attempts_per_block=args.max_recovery_attempts_per_block,
         stream_profile=args.stream_profile,
         playout_mode=args.playout_mode,
+        hls_retention_max_age_seconds=args.hls_retention_max_age_seconds,
+        hls_retention_max_segments_per_dir=args.hls_retention_max_segments_per_dir,
     )
     try:
         result = controller.run(config)

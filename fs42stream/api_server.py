@@ -6,7 +6,7 @@ import mimetypes
 import posixpath
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path, PurePosixPath
@@ -15,6 +15,7 @@ from urllib.parse import quote, unquote, urlsplit
 from zoneinfo import ZoneInfo
 
 from .client import FS42ScheduleClient
+from .disk_monitor import DiskThresholds, disk_usage_report
 from .playout_engine import build_block_timeline, playout_snapshot
 
 
@@ -38,6 +39,7 @@ class APIServerConfig:
     status_json: Path | None = None
     schedule_fetcher: ScheduleFetcher | None = None
     schedule_timezone: str | None = DEFAULT_SCHEDULE_TIMEZONE
+    disk_thresholds: DiskThresholds = field(default_factory=DiskThresholds)
 
 
 class FS42APIHTTPServer(ThreadingHTTPServer):
@@ -59,6 +61,7 @@ class FS42APIRequestHandler(BaseHTTPRequestHandler):
         parsed = urlsplit(self.path)
         request_path = parsed.path
         if request_path == "/api/health":
+            disk = _output_root_disk_payload(self._api_server().output_root, thresholds=self._api_server().config.disk_thresholds)
             self._send_json(
                 HTTPStatus.OK,
                 {
@@ -66,6 +69,7 @@ class FS42APIRequestHandler(BaseHTTPRequestHandler):
                     "service": "fs42stream-api",
                     "channel": DEFAULT_CHANNEL_NAME,
                     "output_root": str(self._api_server().output_root),
+                    "disk": {"output_root": disk},
                 },
             )
             return
@@ -182,7 +186,7 @@ class FS42APIRequestHandler(BaseHTTPRequestHandler):
         status_payload = self._read_status_payload()
         if status_payload is None:
             return
-        self._send_json(HTTPStatus.OK, _runtime_payload(status_payload, channel_slug=channel_slug, output_root=self._api_server().output_root))
+        self._send_json(HTTPStatus.OK, _runtime_payload(status_payload, channel_slug=channel_slug, output_root=self._api_server().output_root, disk_thresholds=self._api_server().config.disk_thresholds))
 
     def _handle_channel_health(self, request_path: str) -> None:
         channel_slug = self._validated_channel_slug(request_path, expected_leaf="health")
@@ -191,7 +195,7 @@ class FS42APIRequestHandler(BaseHTTPRequestHandler):
         status_payload = self._read_status_payload()
         if status_payload is None:
             return
-        runtime = _runtime_payload(status_payload, channel_slug=channel_slug, output_root=self._api_server().output_root)
+        runtime = _runtime_payload(status_payload, channel_slug=channel_slug, output_root=self._api_server().output_root, disk_thresholds=self._api_server().config.disk_thresholds)
         self._send_json(HTTPStatus.OK, _health_payload(runtime))
 
     def _handle_channel_events(self, request_path: str) -> None:
@@ -362,7 +366,7 @@ def _channel_id(channel_slug: str) -> str:
     return f"fs42.{normalized}"
 
 
-def _runtime_payload(status_payload: Mapping[str, Any], *, channel_slug: str, output_root: Path) -> dict[str, Any]:
+def _runtime_payload(status_payload: Mapping[str, Any], *, channel_slug: str, output_root: Path, disk_thresholds: DiskThresholds | None = None) -> dict[str, Any]:
     state = _state_contract_view(status_payload)
     channel_name = str(status_payload.get("channel") or DEFAULT_CHANNEL_NAME)
     schedule_now = state.get("schedule_now") or status_payload.get("updated_at")
@@ -405,6 +409,7 @@ def _runtime_payload(status_payload: Mapping[str, Any], *, channel_slug: str, ou
         },
         "ffmpeg": ffmpeg,
         "hls": hls,
+        "disk": {"output_root": _output_root_disk_payload(output_root, thresholds=disk_thresholds)},
     }
 
 
@@ -538,6 +543,9 @@ def _health_payload(runtime: Mapping[str, Any]) -> dict[str, Any]:
     freshness = hls.get("freshness")
     stale_schedule = runtime.get("schedule") if isinstance(runtime.get("schedule"), Mapping) else {}
     stale_active = bool(stale_schedule.get("stale") or stale_schedule.get("active"))
+    disk = runtime.get("disk") if isinstance(runtime.get("disk"), Mapping) else {}
+    output_disk = disk.get("output_root") if isinstance(disk.get("output_root"), Mapping) else {}
+    disk_state = str(output_disk.get("state") or "unknown")
     checks = {
         "service_state": "ok" if service.get("status") in {"running", "recovering", "complete"} else "error",
         "active_block_present": "ok" if block.get("current") else "error",
@@ -546,6 +554,7 @@ def _health_payload(runtime: Mapping[str, Any]) -> dict[str, Any]:
         "playlist_updating": "ok" if freshness == "fresh" else ("degraded" if freshness == "degraded" else "error"),
         "hls_freshness": "ok" if freshness == "fresh" else ("degraded" if freshness == "degraded" else "error"),
         "schedule_freshness": "degraded" if stale_active else "ok",
+        "disk_space": _disk_check_state(disk_state),
     }
     if any(value == "error" for value in checks.values()):
         status = "error"
@@ -557,9 +566,21 @@ def _health_payload(runtime: Mapping[str, Any]) -> dict[str, Any]:
         "channel_id": runtime.get("channel", {}).get("id") if isinstance(runtime.get("channel"), Mapping) else _channel_id(DEFAULT_CHANNEL_SLUG),
         "status": status,
         "checks": checks,
-        "details": {"seconds_since_last_segment": hls.get("seconds_since_last_segment"), "media_sequence": hls.get("media_sequence"), "stale_schedule": stale_schedule},
+        "details": {"seconds_since_last_segment": hls.get("seconds_since_last_segment"), "media_sequence": hls.get("media_sequence"), "stale_schedule": stale_schedule, "disk": disk},
         "updated_at": service.get("updated_at"),
     }
+
+
+def _output_root_disk_payload(output_root: Path, *, thresholds: DiskThresholds | None = None) -> dict[str, object]:
+    return disk_usage_report(output_root, thresholds=thresholds).as_dict()
+
+
+def _disk_check_state(state: str) -> str:
+    if state in {"ok", "warn"}:
+        return "ok"
+    if state == "degraded":
+        return "degraded"
+    return "error"
 
 
 def _epg_payload(status_payload: Mapping[str, Any], *, channel_slug: str = DEFAULT_CHANNEL_SLUG) -> dict[str, Any]:
@@ -894,6 +915,7 @@ def create_server(
     schedule_fetcher: ScheduleFetcher | None = None,
     api_base_url: str | None = None,
     schedule_timezone: str | None = DEFAULT_SCHEDULE_TIMEZONE,
+    disk_thresholds: DiskThresholds | None = None,
 ) -> FS42APIHTTPServer:
     output_root_path = Path(output_root)
     status_json_path = Path(status_json) if status_json is not None else None
@@ -907,6 +929,7 @@ def create_server(
         status_json=status_json_path,
         schedule_fetcher=schedule_fetcher,
         schedule_timezone=schedule_timezone,
+        disk_thresholds=disk_thresholds or DiskThresholds(),
     )
     output_root_path.mkdir(parents=True, exist_ok=True)
     return FS42APIHTTPServer((host, port), FS42APIRequestHandler, config)
@@ -920,6 +943,9 @@ def main(argv: Sequence[str] | None = None, *, server_factory: Callable[..., FS4
     parser.add_argument("--status-json", type=Path, default=None)
     parser.add_argument("--api-base-url", default=DEFAULT_API_BASE_URL)
     parser.add_argument("--schedule-timezone", default=DEFAULT_SCHEDULE_TIMEZONE)
+    parser.add_argument("--disk-warn-percent", type=float, default=80.0)
+    parser.add_argument("--disk-degraded-percent", type=float, default=90.0)
+    parser.add_argument("--disk-critical-percent", type=float, default=95.0)
     args = parser.parse_args(argv)
 
     server = server_factory(
@@ -929,6 +955,7 @@ def main(argv: Sequence[str] | None = None, *, server_factory: Callable[..., FS4
         status_json=args.status_json,
         api_base_url=args.api_base_url,
         schedule_timezone=args.schedule_timezone,
+        disk_thresholds=DiskThresholds(args.disk_warn_percent, args.disk_degraded_percent, args.disk_critical_percent),
     )
     try:
         server.serve_forever()

@@ -1,7 +1,7 @@
 import unittest
 from pathlib import Path
 
-from fs42stream.systemd_service import ServiceConfig, render_environment_file, render_unit_file
+from fs42stream.systemd_service import ServiceConfig, render_cleanup_service_file, render_cleanup_timer_file, render_environment_file, render_unit_file
 
 
 class SystemdServiceTests(unittest.TestCase):
@@ -61,6 +61,21 @@ class SystemdServiceTests(unittest.TestCase):
         self.assertIn("Restart=on-failure", unit)
         self.assertIn("RestartSec=5", unit)
         self.assertIn("WantedBy=multi-user.target", unit)
+
+    def test_renders_hls_cleanup_service_and_timer(self):
+        config = ServiceConfig(output_root=Path("/var/lib/fs42stream/hls"), env_file=Path("/etc/fs42stream/fs42stream.env"))
+
+        service = render_cleanup_service_file(config)
+        timer = render_cleanup_timer_file(config)
+
+        self.assertIn("Description=FS42-Stream HLS retention cleanup", service)
+        self.assertIn("Type=oneshot", service)
+        self.assertIn("EnvironmentFile=/etc/fs42stream/fs42stream.env", service)
+        self.assertIn("ExecStart=/usr/bin/python3 -m fs42stream.hls_retention", service)
+        self.assertIn("--output-root ${FS42STREAM_OUTPUT_ROOT}", service)
+        self.assertIn("--channel-slug Sky_One", service)
+        self.assertIn("OnCalendar=*:0/15", timer)
+        self.assertIn("WantedBy=timers.target", timer)
 
 
 if __name__ == "__main__":

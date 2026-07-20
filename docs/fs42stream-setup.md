@@ -129,6 +129,52 @@ http://192.168.10.139:8088/iptv/jellyfin/channels.m3u
 http://192.168.10.139:8088/iptv/xmltv.xml
 ```
 
+## Storage retention and disk monitoring
+
+FS42-Stream has rolling HLS cleanup plus disk reporting to prevent another silent `No space left on device` failure.
+
+Cleanup CLI:
+
+```bash
+python3 -m fs42stream.hls_retention \
+  --output-root /var/lib/fs42stream/hls \
+  --channel-slug Sky_One \
+  --max-age-seconds 21600 \
+  --max-segments-per-dir 7200 \
+  --dry-run
+```
+
+Retention behaviour:
+
+- scans the direct channel directory and the `jellyfin/` subdirectory;
+- deletes only stale unreferenced `.ts` files;
+- preserves `.m3u8` playlists, playlist-referenced live-window segments, `skyone.png`, and all non-HLS assets;
+- rejects unsafe channel slugs and playlist traversal references.
+
+Production timer:
+
+```bash
+systemctl is-active fs42stream-hls-cleanup.timer
+systemctl list-timers --all fs42stream-hls-cleanup.timer --no-pager
+sudo systemctl start fs42stream-hls-cleanup.service
+```
+
+Disk reporting appears in:
+
+```text
+http://192.168.10.139:8088/api/health
+http://192.168.10.139:8088/api/channels/Sky_One/runtime
+http://192.168.10.139:8088/api/channels/Sky_One/health
+```
+
+The payload includes output-root path, bytes total/used/free, percentage used, thresholds, and state. Default thresholds are:
+
+```text
+warn:     80%
+degraded: 90%
+critical: 95%
+```
+
 ## Direct/Jellyfin verification
 
 When checking playback, verify both profiles separately. API health alone is not enough.

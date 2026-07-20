@@ -110,6 +110,40 @@ python3 -m fs42stream.integrated_runner \
   --playout-mode ts-primary
 ```
 
+## Retention cleanup and disk monitoring
+
+The service has two storage guardrails:
+
+1. Rolling HLS retention cleanup:
+   - module/CLI: `python3 -m fs42stream.hls_retention`
+   - scans `/var/lib/fs42stream/hls/Sky_One` and `/var/lib/fs42stream/hls/Sky_One/jellyfin`
+   - deletes stale unreferenced `.ts` segments only
+   - preserves playlists, currently referenced live-window segments, `skyone.png`, and non-HLS assets
+
+2. Disk utilisation reporting:
+   - `/api/health`
+   - `/api/channels/Sky_One/runtime`
+   - `/api/channels/Sky_One/health`
+   - includes output-root path, bytes total/used/free, percent used, and threshold state
+
+Production also has a systemd timer:
+
+```bash
+systemctl is-active fs42stream-hls-cleanup.timer
+systemctl list-timers --all fs42stream-hls-cleanup.timer --no-pager
+```
+
+Manual dry-run:
+
+```bash
+python3 -m fs42stream.hls_retention \
+  --output-root /var/lib/fs42stream/hls \
+  --channel-slug Sky_One \
+  --max-age-seconds 21600 \
+  --max-segments-per-dir 7200 \
+  --dry-run
+```
+
 ## Tests
 
 Run the targeted service suites:

@@ -64,6 +64,35 @@ WantedBy=multi-user.target
 """
 
 
+def render_cleanup_service_file(config: ServiceConfig) -> str:
+    python = "/usr/bin/python3"
+    return f"""[Unit]
+Description=FS42-Stream HLS retention cleanup
+After=local-fs.target
+
+[Service]
+Type=oneshot
+User={config.user}
+WorkingDirectory={config.install_dir}
+EnvironmentFile={config.env_file}
+ExecStart={python} -m fs42stream.hls_retention --output-root ${{FS42STREAM_OUTPUT_ROOT}} --channel-slug Sky_One
+"""
+
+
+def render_cleanup_timer_file(config: ServiceConfig) -> str:
+    return f"""[Unit]
+Description=Run {config.service_name} HLS retention cleanup periodically
+
+[Timer]
+OnCalendar=*:0/15
+Persistent=true
+Unit={config.service_name}-hls-cleanup.service
+
+[Install]
+WantedBy=timers.target
+"""
+
+
 def _escape_env(value: str) -> str:
     return value.replace("\\", "\\\\").replace('"', '\\"')
 
