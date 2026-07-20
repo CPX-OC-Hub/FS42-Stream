@@ -15,7 +15,6 @@ from typing import Any, Callable, Mapping, Protocol, Sequence
 from .client import FS42ScheduleClient
 from .ffmpeg import FFMpegHLSCommandBuilder, PlayoutMode, StreamProfile, hls_list_size_for_profile
 from .ffprobe import FFProbe
-from .hls_retention import HLSRetentionConfig, cleanup_hls_retention
 from .paths import PathResolver
 from .planner import BlockPlanner
 from .playout_supervisor import SupervisedPlayout, supervise_schedule_playout
@@ -402,10 +401,6 @@ class LiveController:
             hls_start_number = int(diagnostics_dict.get("hls_next_start_number") or hls_start_number)
             hls_start_time_offset = _next_hls_start_time_offset(diagnostics_dict, fallback=hls_start_time_offset)
             events.append(_complete_event(ordinal=ordinal, block=block_info, diagnostics=diagnostics_dict))
-            if not config.dry_run:
-                retention_removed = _run_hls_retention(config)
-                if retention_removed:
-                    events.append({"event": "hls_retention_cleanup", "block_number": ordinal + 1, "removed": [str(path) for path in retention_removed], "removed_count": len(retention_removed)})
             _emit_live_status(
                 config,
                 status="running",
@@ -775,18 +770,6 @@ def _emit_live_status(
         "events": [dict(event) for event in events],
     }
     config.status_callback(payload)
-
-
-def _run_hls_retention(config: LiveControllerConfig) -> list[Path]:
-    result = cleanup_hls_retention(
-        HLSRetentionConfig(
-            output_root=config.output_root,
-            channel_slug=FFMpegHLSCommandBuilder._slug(config.channel),
-            max_age_seconds=config.hls_retention_max_age_seconds,
-            max_segments_per_dir=config.hls_retention_max_segments_per_dir,
-        )
-    )
-    return result.removed
 
 
 def clean_hls_outputs(directory: Path) -> list[Path]:
