@@ -1,10 +1,18 @@
 import unittest
 from pathlib import Path
 
-from fs42stream.systemd_service import ServiceConfig, render_environment_file, render_unit_file
+from fs42stream.systemd_service import ServiceConfig, render_cleanup_service_file, render_cleanup_timer_file, render_environment_file, render_unit_file
 
 
 class SystemdServiceTests(unittest.TestCase):
+    def test_service_default_duration_covers_long_fs42_blocks(self):
+        config = ServiceConfig()
+
+        env = render_environment_file(config)
+
+        self.assertGreaterEqual(config.duration_limit, 5400.0)
+        self.assertIn('FS42STREAM_DURATION_LIMIT="7200"', env)
+
     def test_renders_environment_file_with_service_defaults(self):
         config = ServiceConfig(
             channel="Sky One",
@@ -12,7 +20,7 @@ class SystemdServiceTests(unittest.TestCase):
             port=8088,
             output_root=Path("/var/lib/fs42stream/hls"),
             max_blocks=1000000,
-            duration_limit=1800.0,
+            duration_limit=7200.0,
             video_encoder="h264_vaapi",
             vaapi_device="/dev/dri/renderD128",
         )
@@ -24,9 +32,10 @@ class SystemdServiceTests(unittest.TestCase):
         self.assertIn('FS42STREAM_PORT="8088"', env)
         self.assertIn('FS42STREAM_OUTPUT_ROOT="/var/lib/fs42stream/hls"', env)
         self.assertIn('FS42STREAM_MAX_BLOCKS="1000000"', env)
-        self.assertIn('FS42STREAM_DURATION_LIMIT="1800"', env)
+        self.assertIn('FS42STREAM_DURATION_LIMIT="7200"', env)
         self.assertIn('FS42STREAM_VIDEO_ENCODER="h264_vaapi"', env)
         self.assertIn('FS42STREAM_VAAPI_DEVICE="/dev/dri/renderD128"', env)
+        self.assertIn('FS42STREAM_PLAYOUT_MODE="ts-primary"', env)
 
     def test_renders_systemd_unit_with_env_file_and_restart_policy(self):
         config = ServiceConfig(
@@ -48,9 +57,25 @@ class SystemdServiceTests(unittest.TestCase):
         self.assertIn('--channel "${FS42STREAM_CHANNEL}"', unit)
         self.assertIn("--video-encoder ${FS42STREAM_VIDEO_ENCODER}", unit)
         self.assertIn("--vaapi-device ${FS42STREAM_VAAPI_DEVICE}", unit)
+        self.assertIn("--playout-mode ${FS42STREAM_PLAYOUT_MODE}", unit)
         self.assertIn("Restart=on-failure", unit)
         self.assertIn("RestartSec=5", unit)
         self.assertIn("WantedBy=multi-user.target", unit)
+
+    def test_renders_hls_cleanup_service_and_timer(self):
+        config = ServiceConfig(output_root=Path("/var/lib/fs42stream/hls"), env_file=Path("/etc/fs42stream/fs42stream.env"))
+
+        service = render_cleanup_service_file(config)
+        timer = render_cleanup_timer_file(config)
+
+        self.assertIn("Description=FS42-Stream HLS retention cleanup", service)
+        self.assertIn("Type=oneshot", service)
+        self.assertIn("EnvironmentFile=/etc/fs42stream/fs42stream.env", service)
+        self.assertIn("ExecStart=/usr/bin/python3 -m fs42stream.hls_retention", service)
+        self.assertIn("--output-root ${FS42STREAM_OUTPUT_ROOT}", service)
+        self.assertIn("--channel-slug Sky_One", service)
+        self.assertIn("OnCalendar=*:0/15", timer)
+        self.assertIn("WantedBy=timers.target", timer)
 
 
 if __name__ == "__main__":

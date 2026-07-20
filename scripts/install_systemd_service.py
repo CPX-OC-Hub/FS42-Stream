@@ -24,10 +24,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--port", type=int, default=8088)
     parser.add_argument("--output-root", type=Path, default=Path("/var/lib/fs42stream/hls"))
     parser.add_argument("--max-blocks", type=int, default=1000000)
-    parser.add_argument("--duration-limit", type=float, default=1800.0)
+    parser.add_argument("--duration-limit", type=float, default=7200.0)
     parser.add_argument("--video-encoder", default="h264_vaapi")
     parser.add_argument("--vaapi-device", default="/dev/dri/renderD128")
     parser.add_argument("--schedule-timezone", default="Europe/London")
+    parser.add_argument("--playout-mode", choices=("hls-primary", "ts-primary"), default="ts-primary")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--skip-systemctl", action="store_true", help="write files but do not run systemctl daemon-reload/enable/restart")
     args = parser.parse_args(argv)
@@ -46,6 +47,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         video_encoder=args.video_encoder,
         vaapi_device=args.vaapi_device,
         schedule_timezone=args.schedule_timezone,
+        playout_mode=args.playout_mode,
     )
     env_text = render_environment_file(config)
     unit_text = render_unit_file(config)

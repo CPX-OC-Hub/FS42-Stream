@@ -62,6 +62,23 @@ class BlockPlanner:
 
         return self._plan_block(block)
 
+    def plan_playout_items(
+        self,
+        items: Sequence[Mapping[str, Any]],
+        *,
+        title: str,
+        start_time: str | None,
+        end_time: str | None,
+        source: Mapping[str, Any],
+    ) -> PlannedBlock:
+        return PlannedBlock(
+            title=title,
+            start_time=start_time,
+            end_time=end_time,
+            source=source,
+            items=[self._plan_item(item) for item in items],
+        )
+
     def _plan_block(self, block: Mapping[str, Any]) -> PlannedBlock:
         raw_plan = block.get("plan")
         if not isinstance(raw_plan, list):
@@ -83,7 +100,7 @@ class BlockPlanner:
             raise ValueError("plan item missing path/realpath")
         resolved = self.resolver.resolve(raw_path)
         duration = float(item.get("duration") or 0.0)
-        if not _is_commercial_type(fs42_item_type(item)) and self._is_known_runtime_off_air_slate(item, resolved):
+        if self._is_known_runtime_off_air_slate(item, resolved):
             if self.fallback_slate_video is not None:
                 return PlannedItem(
                     source=item,
@@ -102,17 +119,23 @@ class BlockPlanner:
                 skip=0.0,
                 duration=duration,
                 probe=ProbeResult(duration=duration, width=640, height=480, fps=25.0, audio_sample_rate=0, audio_channels=0),
-                input_kind="lavfi",
-                ffmpeg_input="color=black",
+                input_kind="image_loop",
+                ffmpeg_input=str(resolved),
                 runtime_action="generated_fallback_slate",
                 diagnostic="known runtime/off-air image slate replaced with generated fallback video",
             )
+        skip = float(item.get("skip") or 0.0)
+        probe = self.probe.validate_video(resolved)
+        available_duration = max(0.0, float(probe.duration or 0.0) - skip)
+        effective_duration = duration
+        if available_duration > 0:
+            effective_duration = min(duration, available_duration) if duration > 0 else available_duration
         return PlannedItem(
             source=item,
             resolved_path=resolved,
-            skip=float(item.get("skip") or 0.0),
-            duration=duration,
-            probe=self.probe.validate_video(resolved),
+            skip=skip,
+            duration=effective_duration,
+            probe=probe,
         )
 
     def _is_known_runtime_off_air_slate(self, item: Mapping[str, Any], resolved: Path) -> bool:

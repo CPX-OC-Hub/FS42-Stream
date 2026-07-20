@@ -52,3 +52,17 @@ class FS42ScheduleClient:
         if not isinstance(data, dict):
             raise ValueError("summary response must be a JSON object")
         return data
+
+
+    def fetch_schedule_summary(self, channel: str = "Sky One") -> Mapping[str, Any]:
+        encoded = urllib.parse.quote(channel, safe="")
+        request = urllib.request.Request(
+            f"{self.base_url}/summary/schedules/{encoded}",
+            headers={"Accept": "application/json", "User-Agent": "fs42stream-phase1/0"},
+        )
+        with self._opener(request, timeout=self.timeout) as response:
+            payload = response.read()
+        data = json.loads(payload.decode("utf-8"))
+        if not isinstance(data, dict):
+            raise ValueError("schedule summary response must be a JSON object")
+        return data

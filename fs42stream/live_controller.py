@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import subprocess
 import sys
+import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -11,11 +13,14 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol, Sequence
 
 from .client import FS42ScheduleClient
-from .ffmpeg import FFMpegHLSCommandBuilder
+from .ffmpeg import FFMpegHLSCommandBuilder, PlayoutMode, StreamProfile, hls_list_size_for_profile
 from .ffprobe import FFProbe
 from .paths import PathResolver
 from .planner import BlockPlanner
+from .playout_supervisor import SupervisedPlayout, supervise_schedule_playout
 from .run_block import (
+    _build_stale_placeholder_schedule,
+    _stale_schedule_state,
     DEFAULT_API_BASE_URL,
     DEFAULT_CHANNEL,
     DEFAULT_FFMPEG,
@@ -23,17 +28,31 @@ from .run_block import (
     DEFAULT_FS42_ROOT,
     DEFAULT_SCHEDULE_TIMEZONE,
     DEFAULT_SDTV_ROOT,
+    HLS_TARGET_SEGMENT_DURATION,
     BlockRunConfig,
     BlockRunner,
-    SelectedBlock,
+    _hls_segment_duration_since,
+    _next_hls_start_number,
+    _normalize_jellyfin_live_playlist,
     _parse_datetime,
+    _rewrite_live_playlist_boundaries,
     _schedule_now,
-    select_current_or_next_block,
 )
+
+
+BOUNDARY_FILLER_STARTUP_GUARD_SECONDS = 20.0
 
 
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _transition_safe_filler_duration(duration: float) -> float:
+    """Round filler up to complete HLS segment cadence to avoid tiny tail segments."""
+
+    if duration <= 0:
+        raise ValueError("duration must be positive")
+    return math.ceil(duration / HLS_TARGET_SEGMENT_DURATION) * HLS_TARGET_SEGMENT_DURATION
 
 
 @dataclass(frozen=True)
@@ -46,9 +65,14 @@ class LiveControllerConfig:
     dry_run: bool = False
     status_callback: Callable[[Mapping[str, Any]], None] | None = None
     schedule_timezone: str | None = DEFAULT_SCHEDULE_TIMEZONE
-    max_recovery_attempts_per_block: int = 1
+    max_recovery_attempts_per_block: int = 50
     clock: Callable[[], datetime] = _utc_now
     sleep: Callable[[float], None] = time.sleep
+    stream_profile: StreamProfile = "direct"
+    playout_mode: PlayoutMode = "ts-primary"
+    shared_schedule_clock: Any | None = None
+    hls_retention_max_age_seconds: float = 6 * 60 * 60
+    hls_retention_max_segments_per_dir: int = 7200
 
 
 class ScheduleClient(Protocol):
@@ -60,19 +84,112 @@ class SingleBlockRunner(Protocol):
 
 
 class BoundaryFillerRunner(Protocol):
-    def run(self, *, output_dir: Path, output_name: str, duration: float, hls_start_number: int, hls_append: bool = True) -> Mapping[str, Any]: ...
+    def run(self, *, output_dir: Path, output_name: str, duration: float, hls_start_number: int, hls_start_time_offset: float | None = None, hls_append: bool = True, stream_profile: StreamProfile = "direct") -> Mapping[str, Any]: ...
+
+
+@dataclass(frozen=True)
+class SharedScheduleSelection:
+    schedule: Mapping[str, Any]
+    selection_now: datetime
+    playout_state: SupervisedPlayout
+    stale_schedule: dict[str, Any] | None
+
+
+class SharedScheduleBlockClock:
+    """Barrier-backed schedule/block selector shared by integrated profiles."""
+
+    def __init__(self, *, profile_count: int, timeout: float = 90.0) -> None:
+        if profile_count <= 0:
+            raise ValueError("profile_count must be positive")
+        self.profile_count = profile_count
+        self.timeout = timeout
+        self._condition = threading.Condition()
+        self._states: dict[int, dict[str, Any]] = {}
+
+    def select(
+        self,
+        *,
+        ordinal: int,
+        profile: StreamProfile,
+        config: LiveControllerConfig,
+        schedule_client: ScheduleClient,
+        cursor: datetime | None,
+        simulated_cursor: bool,
+        minimum_index: int,
+    ) -> SharedScheduleSelection:
+        with self._condition:
+            state = self._states.setdefault(ordinal, {"arrivals": set(), "released": 0, "selection": None})
+            arrivals = state["arrivals"]
+            if not isinstance(arrivals, set):
+                raise RuntimeError("shared schedule clock state is corrupt")
+            arrivals.add(profile)
+            if state.get("selection") is None:
+                state["selection"] = _select_shared_schedule_block(
+                    config=config,
+                    schedule_client=schedule_client,
+                    cursor=cursor,
+                    simulated_cursor=simulated_cursor,
+                    minimum_index=minimum_index,
+                )
+            self._condition.notify_all()
+            if not self._condition.wait_for(lambda: len(arrivals) >= self.profile_count, timeout=self.timeout):
+                missing = self.profile_count - len(arrivals)
+                raise RuntimeError(f"shared schedule clock timed out at block {ordinal + 1}; {missing} profile(s) did not reach the boundary")
+            selection = state.get("selection")
+            if not isinstance(selection, SharedScheduleSelection):
+                raise RuntimeError("shared schedule clock did not produce a selection")
+            state["released"] = int(state.get("released") or 0) + 1
+            if state["released"] >= self.profile_count:
+                self._states.pop(ordinal - 1, None)
+            return selection
+
+
+def _select_shared_schedule_block(
+    *,
+    config: LiveControllerConfig,
+    schedule_client: ScheduleClient,
+    cursor: datetime | None,
+    simulated_cursor: bool,
+    minimum_index: int,
+) -> SharedScheduleSelection:
+    schedule = schedule_client.fetch_schedule(config.channel, expected_blocks=None)
+    selection_now = cursor if simulated_cursor and cursor is not None else config.clock()
+    summary = None
+    if hasattr(schedule_client, "fetch_schedule_summary"):
+        try:
+            summary = schedule_client.fetch_schedule_summary(config.channel)  # type: ignore[attr-defined]
+        except Exception:
+            summary = None
+    stale_schedule = _stale_schedule_state(summary, channel=config.channel, now=selection_now, schedule_timezone=config.schedule_timezone)
+    if stale_schedule and stale_schedule.get("active"):
+        schedule = _build_stale_placeholder_schedule(config.channel, now=selection_now, duration_limit=config.duration_limit, schedule_timezone=config.schedule_timezone)
+    playout_state = supervise_schedule_playout(
+        schedule,
+        now=selection_now,
+        schedule_timezone=config.schedule_timezone,
+        minimum_index=minimum_index,
+    )
+    return SharedScheduleSelection(
+        schedule=schedule,
+        selection_now=selection_now,
+        playout_state=playout_state,
+        stale_schedule=dict(stale_schedule) if isinstance(stale_schedule, Mapping) else None,
+    )
 
 
 class HLSBlackSlateFillerRunner:
     def __init__(self, ffmpeg: str = DEFAULT_FFMPEG) -> None:
         self.ffmpeg = ffmpeg
 
-    def run(self, *, output_dir: Path, output_name: str, duration: float, hls_start_number: int, hls_append: bool = True) -> Mapping[str, Any]:
+    def run(self, *, output_dir: Path, output_name: str, duration: float, hls_start_number: int, hls_start_time_offset: float | None = None, hls_append: bool = True, stream_profile: StreamProfile = "direct") -> Mapping[str, Any]:
         if duration <= 0:
             raise ValueError("duration must be positive")
+        if hls_start_time_offset is not None and hls_start_time_offset < 0:
+            raise ValueError("hls_start_time_offset must be non-negative")
         output_dir.mkdir(parents=True, exist_ok=True)
         playlist = output_dir / f"{output_name}.m3u8"
         segment_pattern = output_dir / f"{output_name}_%05d.ts"
+        safe_duration = _transition_safe_filler_duration(duration)
         command = [
             self.ffmpeg,
             "-hide_banner",
@@ -88,13 +205,19 @@ class HLSBlackSlateFillerRunner:
             "-i",
             "anullsrc=channel_layout=stereo:sample_rate=48000",
             "-t",
-            _num(duration),
+            _num(safe_duration),
             "-c:v",
             "libx264",
             "-preset",
             "veryfast",
             "-crf",
             "23",
+            "-g",
+            "50",
+            "-keyint_min",
+            "50",
+            "-sc_threshold",
+            "0",
             "-c:a",
             "aac",
             "-ar",
@@ -104,22 +227,40 @@ class HLSBlackSlateFillerRunner:
             "-f",
             "hls",
             "-hls_time",
-            "6",
-            "-start_number",
-            str(hls_start_number),
+            "2",
+            "-hls_list_size",
+            str(hls_list_size_for_profile(stream_profile)),
         ]
+        if stream_profile != "jellyfin" or not hls_append:
+            command.extend([
+                "-start_number",
+                str(hls_start_number),
+            ])
+        if stream_profile == "jellyfin" and hls_start_time_offset is not None:
+            command.extend(["-output_ts_offset", _num(hls_start_time_offset)])
         if hls_append:
-            command.extend(["-hls_flags", "append_list+discont_start"])
+            hls_flags = "omit_endlist+append_list" if stream_profile == "jellyfin" else "omit_endlist+append_list+discont_start"
+            command.extend(["-hls_flags", hls_flags])
+        else:
+            command.extend(["-hls_flags", "omit_endlist"])
         command.extend(["-hls_segment_filename", str(segment_pattern), str(playlist)])
         completed = subprocess.run(command, check=False, shell=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        segment_count = _count_hls_segments_from(playlist, start_number=hls_start_number)
+        if stream_profile == "jellyfin" and playlist.exists():
+            _normalize_jellyfin_live_playlist(playlist)
+        hls_next_start_number = _next_hls_start_number(playlist, fallback=hls_start_number)
+        segment_duration = _hls_segment_duration_since(playlist, start_number=hls_start_number)
         return {
             "status": "ok" if completed.returncode == 0 else "ffmpeg-error",
             "playlist": str(playlist),
             "command": command,
             "hls_start_number": hls_start_number,
-            "hls_next_start_number": hls_start_number + segment_count,
-            "hls": {"playlist": str(playlist), "segment_count": segment_count},
+            "hls_start_time_offset": hls_start_time_offset,
+            "requested_duration": duration,
+            "duration": safe_duration,
+            "hls_next_start_number": hls_next_start_number,
+            "hls_segment_duration": segment_duration,
+            "hls_next_start_time_offset": (hls_start_time_offset + segment_duration) if hls_start_time_offset is not None else None,
+            "hls": {"playlist": str(playlist), "segment_count": max(0, hls_next_start_number - hls_start_number)},
             "ffmpeg": {"returncode": completed.returncode, "stdout": completed.stdout, "stderr": completed.stderr},
         }
 
@@ -137,27 +278,71 @@ class LiveController:
             raise ValueError("max_blocks must be positive")
         if config.duration_limit <= 0:
             raise ValueError("duration_limit must be positive")
+        if config.stream_profile not in {"direct", "jellyfin"}:
+            raise ValueError("stream_profile must be 'direct' or 'jellyfin'")
+        if config.playout_mode not in {"hls-primary", "ts-primary"}:
+            raise ValueError("playout_mode must be 'hls-primary' or 'ts-primary'")
 
         channel_output_dir = config.output_root / FFMpegHLSCommandBuilder._slug(config.channel)
+        if config.stream_profile == "jellyfin":
+            channel_output_dir = channel_output_dir / "jellyfin"
         channel_output_dir.mkdir(parents=True, exist_ok=True)
 
         events: list[dict[str, Any]] = []
         cursor = config.now
         simulated_cursor = config.now is not None
         last_index = -1
+        last_playout_state: SupervisedPlayout | None = None
+        last_schedule_now: datetime | None = None
+        last_stale_schedule: dict[str, Any] | None = None
+        previous_block_info: dict[str, Any] | None = None
 
         hls_start_number = 0
+        hls_start_time_offset = 0.0
+        hls_boundary_starts: list[int] = []
         for ordinal in range(config.max_blocks):
-            schedule = self.schedule_client.fetch_schedule(config.channel, expected_blocks=None)
-            selection_now = cursor if simulated_cursor else config.clock()
-            selected = _select_not_before(schedule, now=selection_now, minimum_index=last_index + 1, schedule_timezone=config.schedule_timezone) if simulated_cursor else select_current_or_next_block(schedule, now=selection_now, schedule_timezone=config.schedule_timezone)
-            block_info = _block_info(selected)
+            minimum_index = last_index + 1 if simulated_cursor else 0
+            if config.shared_schedule_clock is not None:
+                shared_selection = config.shared_schedule_clock.select(
+                    ordinal=ordinal,
+                    profile=config.stream_profile,
+                    config=config,
+                    schedule_client=self.schedule_client,
+                    cursor=cursor,
+                    simulated_cursor=simulated_cursor,
+                    minimum_index=minimum_index,
+                )
+                schedule = shared_selection.schedule
+                selection_now = shared_selection.selection_now
+                playout_state = shared_selection.playout_state
+                stale_schedule = shared_selection.stale_schedule
+            else:
+                shared_selection = _select_shared_schedule_block(
+                    config=config,
+                    schedule_client=self.schedule_client,
+                    cursor=cursor,
+                    simulated_cursor=simulated_cursor,
+                    minimum_index=minimum_index,
+                )
+                schedule = shared_selection.schedule
+                selection_now = shared_selection.selection_now
+                playout_state = shared_selection.playout_state
+                stale_schedule = shared_selection.stale_schedule
+            selected = playout_state.selected
+            playout = playout_state.decision
+            last_playout_state = playout_state
+            last_schedule_now = selection_now
+            last_stale_schedule = dict(stale_schedule) if isinstance(stale_schedule, Mapping) else None
+            block_info = dict(playout_state.active_block or {})
             cleanup = clean_hls_outputs(channel_output_dir) if ordinal == 0 else []
             events.append(
                 {
                     "event": "block_start",
                     "block_number": ordinal + 1,
                     "block": block_info,
+                    "current_item": playout_state.current_item,
+                    "next_item": playout_state.next_item,
+                    "playout": playout_state.projection_dict(),
                     "channel_output_dir": str(channel_output_dir),
                     "cleaned_stale_outputs": [str(path) for path in cleanup],
                 }
@@ -167,12 +352,12 @@ class LiveController:
                 status="running",
                 channel_output_dir=channel_output_dir,
                 events=events,
-                schedule=schedule,
-                selected=selected,
+                playout_state=playout_state,
                 schedule_now=selection_now,
+                stale_schedule=last_stale_schedule,
             )
-            block_start = _parse_datetime(selected.block.get("start_time"))
-            block_end = _parse_datetime(selected.block.get("end_time"))
+            block_start = _parse_datetime(playout.render_state.start_time)
+            block_end = _parse_datetime(playout.render_state.end_time)
             run_now = selection_now if not simulated_cursor else (block_start or cursor)
             effective_duration_limit = config.duration_limit
             if not simulated_cursor and block_end is not None:
@@ -180,6 +365,7 @@ class LiveController:
                 remaining_seconds = max(0.0, (block_end - schedule_now).total_seconds())
                 if remaining_seconds > 0:
                     effective_duration_limit = min(config.duration_limit, remaining_seconds)
+
             block_hls_append = ordinal > 0
             block_hls_start_number = hls_start_number
             diagnostics = self.block_runner.run(
@@ -191,21 +377,38 @@ class LiveController:
                     dry_run=config.dry_run,
                     output_name=FFMpegHLSCommandBuilder._slug(config.channel),
                     hls_start_number=block_hls_start_number,
+                    hls_start_time_offset=hls_start_time_offset if config.stream_profile == "jellyfin" else None,
                     hls_append=block_hls_append,
+                    hls_boundary_starts=tuple(hls_boundary_starts),
                     schedule_timezone=config.schedule_timezone,
+                    stream_profile=config.stream_profile,
+                    playout_mode=config.playout_mode,
+                    schedule=schedule,
+                    selected_block_index=selected.index,
+                    selected_block_reason=selected.reason,
                 )
             )
-            diagnostics_dict = dict(diagnostics)
+            diagnostics_dict = _finalize_block_run_diagnostics(
+                diagnostics,
+                simulated_cursor=simulated_cursor,
+                run_started_at=selection_now,
+                clock=config.clock,
+                duration_limit=effective_duration_limit,
+                schedule_timezone=config.schedule_timezone,
+            )
+            if isinstance(diagnostics_dict.get("hls_boundary_starts"), list):
+                hls_boundary_starts = [int(number) for number in diagnostics_dict["hls_boundary_starts"]]
             hls_start_number = int(diagnostics_dict.get("hls_next_start_number") or hls_start_number)
+            hls_start_time_offset = _next_hls_start_time_offset(diagnostics_dict, fallback=hls_start_time_offset)
             events.append(_complete_event(ordinal=ordinal, block=block_info, diagnostics=diagnostics_dict))
             _emit_live_status(
                 config,
                 status="running",
                 channel_output_dir=channel_output_dir,
                 events=events,
-                schedule=schedule,
-                selected=selected,
+                playout_state=playout_state,
                 schedule_now=selection_now,
+                stale_schedule=last_stale_schedule,
             )
 
             if not simulated_cursor and _block_run_failed(diagnostics_dict):
@@ -216,10 +419,17 @@ class LiveController:
                     schedule_now = _schedule_now(recovery_now, config.schedule_timezone)
                     if schedule_now >= block_end:
                         break
-                    recovery_selected = select_current_or_next_block(schedule, now=recovery_now, schedule_timezone=config.schedule_timezone)
+                    recovery_playout_state = supervise_schedule_playout(
+                        schedule,
+                        now=recovery_now,
+                        schedule_timezone=config.schedule_timezone,
+                        minimum_index=selected.index,
+                    )
+                    recovery_selected = recovery_playout_state.selected
                     if recovery_selected.index != selected.index:
                         break
-                    recovery_block_info = _block_info(recovery_selected)
+                    recovery_playout = recovery_playout_state.decision
+                    recovery_block_info = dict(recovery_playout_state.active_block or {})
                     events.append(
                         {
                             "event": "block_recovery",
@@ -227,6 +437,9 @@ class LiveController:
                             "attempt": recovery_attempt,
                             "reason": str(diagnostics_dict.get("status") or "ffmpeg-error"),
                             "block": recovery_block_info,
+                            "current_item": recovery_playout_state.current_item,
+                            "next_item": recovery_playout_state.next_item,
+                            "playout": recovery_playout_state.projection_dict(),
                             "recover_at": schedule_now.isoformat(),
                             "previous_status": diagnostics_dict.get("status"),
                             "previous_ffmpeg_returncode": _ffmpeg_returncode(diagnostics_dict),
@@ -237,12 +450,12 @@ class LiveController:
                         status="recovering",
                         channel_output_dir=channel_output_dir,
                         events=events,
-                        schedule=schedule,
-                        selected=recovery_selected,
+                        playout_state=recovery_playout_state,
                         schedule_now=recovery_now,
+                        stale_schedule=last_stale_schedule,
                     )
                     recovery_duration_limit = min(config.duration_limit, max(0.0, (block_end - schedule_now).total_seconds()))
-                    diagnostics_dict = dict(
+                    diagnostics_dict = _finalize_block_run_diagnostics(
                         self.block_runner.run(
                             BlockRunConfig(
                                 channel=config.channel,
@@ -252,25 +465,44 @@ class LiveController:
                                 dry_run=config.dry_run,
                                 output_name=FFMpegHLSCommandBuilder._slug(config.channel),
                                 hls_start_number=hls_start_number,
+                                hls_start_time_offset=hls_start_time_offset if config.stream_profile == "jellyfin" else None,
                                 hls_append=True,
+                                hls_boundary_starts=tuple(hls_boundary_starts),
                                 schedule_timezone=config.schedule_timezone,
+                                stream_profile=config.stream_profile,
+                                playout_mode=config.playout_mode,
+                                schedule=schedule,
+                                selected_block_index=recovery_selected.index,
+                                selected_block_reason=recovery_selected.reason,
                             )
-                        )
+                        ),
+                        simulated_cursor=simulated_cursor,
+                        run_started_at=recovery_now,
+                        clock=config.clock,
+                        duration_limit=recovery_duration_limit,
+                        schedule_timezone=config.schedule_timezone,
                     )
+                    if isinstance(diagnostics_dict.get("hls_boundary_starts"), list):
+                        hls_boundary_starts = [int(number) for number in diagnostics_dict["hls_boundary_starts"]]
                     hls_start_number = int(diagnostics_dict.get("hls_next_start_number") or hls_start_number)
+                    hls_start_time_offset = _next_hls_start_time_offset(diagnostics_dict, fallback=hls_start_time_offset)
                     events.append(_complete_event(ordinal=ordinal, block=recovery_block_info, diagnostics=diagnostics_dict))
                     _emit_live_status(
                         config,
                         status="running",
                         channel_output_dir=channel_output_dir,
                         events=events,
-                        schedule=schedule,
-                        selected=recovery_selected,
+                        playout_state=recovery_playout_state,
                         schedule_now=recovery_now,
+                        stale_schedule=last_stale_schedule,
                     )
                     if not _block_run_failed(diagnostics_dict):
                         selected = recovery_selected
+                        playout = recovery_playout
                         block_info = recovery_block_info
+                        playout_state = recovery_playout_state
+                        last_playout_state = recovery_playout_state
+                        last_schedule_now = recovery_now
                         break
 
             last_index = selected.index
@@ -292,46 +524,69 @@ class LiveController:
                         status="running",
                         channel_output_dir=channel_output_dir,
                         events=events,
-                        schedule=schedule,
-                        selected=selected,
+                        playout_state=playout_state,
                         schedule_now=config.clock(),
+                        stale_schedule=last_stale_schedule,
                     )
+                    filler_duration = wait_seconds + BOUNDARY_FILLER_STARTUP_GUARD_SECONDS
                     filler_diagnostics = dict(
                         self.filler_runner.run(
                             output_dir=channel_output_dir,
                             output_name=FFMpegHLSCommandBuilder._slug(config.channel),
-                            duration=wait_seconds,
+                            duration=filler_duration,
                             hls_start_number=hls_start_number,
+                            hls_start_time_offset=hls_start_time_offset if config.stream_profile == "jellyfin" else None,
                             hls_append=True,
+                            stream_profile=config.stream_profile,
                         )
                     )
+                    filler_playlist = Path(str(filler_diagnostics.get("playlist") or ""))
+                    if filler_playlist.exists():
+                        if config.stream_profile == "jellyfin":
+                            _normalize_jellyfin_live_playlist(filler_playlist)
+                            filler_diagnostics["hls_boundary_starts"] = []
+                            filler_diagnostics["hls_discontinuity_sequence"] = 0
+                        else:
+                            if hls_start_number not in hls_boundary_starts:
+                                hls_boundary_starts.append(hls_start_number)
+                                hls_boundary_starts.sort()
+                            filler_state = _rewrite_live_playlist_boundaries(filler_playlist, boundary_starts=hls_boundary_starts)
+                            filler_diagnostics["hls_boundary_starts"] = list(hls_boundary_starts)
+                            filler_diagnostics["hls_discontinuity_sequence"] = filler_state.get("discontinuity_sequence")
                     events.append(
                         {
                             "event": "block_filler",
                             "block_number": ordinal + 1,
                             "block": block_info,
-                            "duration": wait_seconds,
+                            "duration": filler_duration,
+                            "wait_seconds": wait_seconds,
+                            "startup_guard_seconds": BOUNDARY_FILLER_STARTUP_GUARD_SECONDS,
                             "until": block_end.isoformat(),
                             "status": filler_diagnostics.get("status"),
                             "playlist": filler_diagnostics.get("playlist"),
                             "hls_start_number": hls_start_number,
+                            "hls_start_time_offset": hls_start_time_offset if config.stream_profile == "jellyfin" else None,
                             "hls_next_start_number": filler_diagnostics.get("hls_next_start_number"),
+                            "hls_next_start_time_offset": filler_diagnostics.get("hls_next_start_time_offset"),
                             "ffmpeg_returncode": _ffmpeg_returncode(filler_diagnostics),
                         }
                     )
                     hls_start_number = int(filler_diagnostics.get("hls_next_start_number") or hls_start_number)
+                    hls_start_time_offset = _next_hls_start_time_offset(filler_diagnostics, fallback=hls_start_time_offset)
                     _emit_live_status(
                         config,
                         status="running",
                         channel_output_dir=channel_output_dir,
                         events=events,
-                        schedule=schedule,
-                        selected=selected,
+                        playout_state=playout_state,
                         schedule_now=config.clock(),
+                        stale_schedule=last_stale_schedule,
                     )
             cursor = block_end or run_now or cursor
+            previous_block_info = block_info
 
         summary = _events_plan_summary(events)
+        result_schedule_now = _schedule_now(last_schedule_now, config.schedule_timezone) if last_schedule_now is not None else None
         result = {
             "status": "complete",
             "channel": config.channel,
@@ -340,8 +595,20 @@ class LiveController:
             "max_blocks": config.max_blocks,
             "blocks_completed": config.max_blocks,
             "duration_limit": config.duration_limit,
+            "stream_profile": config.stream_profile,
+            "playout_mode": config.playout_mode,
+            "schedule_timezone": config.schedule_timezone,
+            "schedule_now": result_schedule_now.isoformat() if result_schedule_now is not None else None,
             **summary,
             "events": events,
+            "stale_schedule": dict(last_stale_schedule or {}),
+        }
+        if last_playout_state is not None:
+            result.update(last_playout_state.status_fields(schedule_now=result_schedule_now))
+        result["hls"] = {
+            "playlist": str(channel_output_dir / f"{FFMpegHLSCommandBuilder._slug(config.channel)}.m3u8"),
+            "channel_output_dir": str(channel_output_dir),
+            "output_root": str(config.output_root),
         }
         if config.status_callback is not None:
             config.status_callback(result)
@@ -382,24 +649,105 @@ def _ffmpeg_returncode(diagnostics: Mapping[str, Any]) -> Any:
     return None
 
 
+def _finalize_block_run_diagnostics(
+    diagnostics: Mapping[str, Any],
+    *,
+    simulated_cursor: bool,
+    run_started_at: datetime,
+    clock: Callable[[], datetime],
+    duration_limit: float,
+    schedule_timezone: str | None,
+) -> dict[str, Any]:
+    diagnostics_dict = dict(diagnostics)
+    if simulated_cursor or _block_run_failed(diagnostics_dict):
+        return diagnostics_dict
+    if _block_run_completed_prematurely(
+        diagnostics_dict,
+        run_started_at=run_started_at,
+        run_finished_at=clock(),
+        duration_limit=duration_limit,
+        schedule_timezone=schedule_timezone,
+    ):
+        diagnostics_dict["status"] = "premature-complete"
+    return diagnostics_dict
+
+
+def _block_run_completed_prematurely(
+    diagnostics: Mapping[str, Any],
+    *,
+    run_started_at: datetime,
+    run_finished_at: datetime,
+    duration_limit: float,
+    schedule_timezone: str | None,
+) -> bool:
+    if _block_run_failed(diagnostics):
+        return False
+    expected = max(0.0, duration_limit)
+    tolerance = min(30.0, max(10.0, expected * 0.1))
+    emitted = diagnostics.get("emitted_media_duration")
+    if isinstance(emitted, (int, float)) and expected > 0 and emitted > 0 and emitted + tolerance >= expected:
+        return False
+    started = _schedule_now(run_started_at, schedule_timezone)
+    finished = _schedule_now(run_finished_at, schedule_timezone)
+    elapsed = max(0.0, (finished - started).total_seconds())
+    return expected > 0 and elapsed > 0 and elapsed + tolerance < expected
+
+
+def _next_hls_start_time_offset(diagnostics: Mapping[str, Any], *, fallback: float) -> float:
+    raw_offset = diagnostics.get("hls_next_start_time_offset")
+    if isinstance(raw_offset, (int, float)):
+        return float(raw_offset)
+    return fallback
+
+
+def _is_show_to_show_boundary(previous_block: Mapping[str, Any], next_block: Mapping[str, Any]) -> bool:
+    previous_type = _last_content_type(previous_block)
+    next_type = _first_content_type(next_block)
+    return _is_show_content(previous_type) and _is_show_content(next_type)
+
+
+def _first_content_type(block: Mapping[str, Any]) -> str | None:
+    plan = block.get("plan")
+    if not isinstance(plan, list):
+        return None
+    for item in plan:
+        if isinstance(item, Mapping):
+            return _item_content_type(item)
+    return None
+
+
+def _last_content_type(block: Mapping[str, Any]) -> str | None:
+    plan = block.get("plan")
+    if not isinstance(plan, list):
+        return None
+    for item in reversed(plan):
+        if isinstance(item, Mapping):
+            return _item_content_type(item)
+    return None
+
+
+def _item_content_type(item: Mapping[str, Any]) -> str | None:
+    value = item.get("content_type") or item.get("type") or item.get("fs42_type")
+    return str(value).lower() if value is not None else None
+
+
+def _is_show_content(content_type: str | None) -> bool:
+    return content_type in {"feature", "show", "episode", "program", "programme"}
+
+
 def _emit_live_status(
     config: LiveControllerConfig,
     *,
     status: str,
     channel_output_dir: Path,
     events: Sequence[Mapping[str, Any]],
-    schedule: Mapping[str, Any],
-    selected: SelectedBlock,
+    playout_state: SupervisedPlayout,
     schedule_now: datetime | None,
+    stale_schedule: Mapping[str, Any] | None = None,
 ) -> None:
     if config.status_callback is None:
         return
-    active_block = _block_info(selected)
-    raw_plan = selected.block.get("plan")
-    if isinstance(raw_plan, list):
-        active_block["plan"] = [dict(item) for item in raw_plan if isinstance(item, Mapping)]
     local_schedule_now = _schedule_now(schedule_now, config.schedule_timezone) if schedule_now is not None else None
-    upcoming_blocks = _upcoming_blocks(schedule, after_index=selected.index)
     payload = {
         "status": status,
         "channel": config.channel,
@@ -408,9 +756,12 @@ def _emit_live_status(
         "max_blocks": config.max_blocks,
         "duration_limit": config.duration_limit,
         "schedule_timezone": config.schedule_timezone,
+        "stream_profile": config.stream_profile,
+        "playout_mode": config.playout_mode,
         "schedule_now": local_schedule_now.isoformat() if local_schedule_now is not None else None,
-        "active_block": active_block,
-        "upcoming_blocks": upcoming_blocks,
+        **playout_state.status_fields(schedule_now=local_schedule_now),
+        "stale_schedule": dict(stale_schedule or {}),
+        "stale_schedule": dict(stale_schedule or {}),
         "hls": {
             "playlist": str(channel_output_dir / f"{FFMpegHLSCommandBuilder._slug(config.channel)}.m3u8"),
             "channel_output_dir": str(channel_output_dir),
@@ -419,28 +770,6 @@ def _emit_live_status(
         "events": [dict(event) for event in events],
     }
     config.status_callback(payload)
-
-
-def _upcoming_blocks(schedule: Mapping[str, Any], *, after_index: int, limit: int = 5) -> list[dict[str, Any]]:
-    blocks = schedule.get("schedule_blocks")
-    if not isinstance(blocks, list):
-        return []
-    upcoming: list[dict[str, Any]] = []
-    for index, block in enumerate(blocks):
-        if index <= after_index or not isinstance(block, Mapping):
-            continue
-        upcoming.append(
-            {
-                "index": index,
-                "selection_reason": "upcoming",
-                "title": str(block.get("title") or "untitled"),
-                "start_time": block.get("start_time"),
-                "end_time": block.get("end_time"),
-            }
-        )
-        if len(upcoming) >= limit:
-            break
-    return upcoming
 
 
 def clean_hls_outputs(directory: Path) -> list[Path]:
@@ -476,11 +805,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--video-encoder", default="libx264", help="video encoder, e.g. libx264 or h264_vaapi")
     parser.add_argument("--vaapi-device", help="VAAPI device path, e.g. /dev/dri/renderD128")
     parser.add_argument("--schedule-timezone", default=DEFAULT_SCHEDULE_TIMEZONE, help="timezone for naive FS42 schedule timestamps, e.g. Europe/London")
-    parser.add_argument("--max-recovery-attempts-per-block", type=int, default=1, help="bounded ffmpeg failure recovery attempts within a schedule block")
+    parser.add_argument("--max-recovery-attempts-per-block", type=int, default=3, help="bounded ffmpeg failure recovery attempts within a schedule block")
     parser.add_argument("--fallback-slate-video", type=Path)
     parser.add_argument("--timeout", type=float, default=10.0)
     parser.add_argument("--now", help="override current time for deterministic tests, e.g. 2026-06-17T10:05:00")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--stream-profile", choices=("direct", "jellyfin"), default="direct", help="HLS packaging profile; jellyfin writes under <channel>/jellyfin")
+    parser.add_argument("--playout-mode", choices=("hls-primary", "ts-primary"), default="ts-primary", help="render directly to HLS or render TS first then package HLS")
+    parser.add_argument("--hls-retention-max-age-seconds", type=float, default=6 * 60 * 60, help="rolling HLS segment retention age")
+    parser.add_argument("--hls-retention-max-segments-per-dir", type=int, default=7200, help="maximum HLS .ts segments to keep in each direct/Jellyfin channel directory")
     args = parser.parse_args(argv)
 
     schedule_client = FS42ScheduleClient(args.api_base_url, timeout=args.timeout)
@@ -499,6 +832,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         dry_run=args.dry_run,
         schedule_timezone=args.schedule_timezone,
         max_recovery_attempts_per_block=args.max_recovery_attempts_per_block,
+        stream_profile=args.stream_profile,
+        playout_mode=args.playout_mode,
+        hls_retention_max_age_seconds=args.hls_retention_max_age_seconds,
+        hls_retention_max_segments_per_dir=args.hls_retention_max_segments_per_dir,
     )
     try:
         result = controller.run(config)
@@ -507,31 +844,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 1
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0
-
-
-def _select_not_before(schedule: Mapping[str, Any], *, now: datetime | None, minimum_index: int, schedule_timezone: str | None = DEFAULT_SCHEDULE_TIMEZONE) -> SelectedBlock:
-    selected = select_current_or_next_block(schedule, now=now, schedule_timezone=schedule_timezone)
-    if selected.index >= minimum_index:
-        return selected
-    blocks = schedule.get("schedule_blocks")
-    if not isinstance(blocks, list):
-        raise ValueError("schedule contains no schedule_blocks")
-    for index in range(minimum_index, len(blocks)):
-        block = blocks[index]
-        if not isinstance(block, Mapping):
-            raise ValueError(f"schedule block {index} is not a JSON object")
-        return SelectedBlock(index=index, reason="next", block=block)
-    return selected
-
-
-def _block_info(selected: SelectedBlock) -> dict[str, Any]:
-    return {
-        "index": selected.index,
-        "selection_reason": selected.reason,
-        "title": str(selected.block.get("title") or "untitled"),
-        "start_time": selected.block.get("start_time"),
-        "end_time": selected.block.get("end_time"),
-    }
 
 
 def _complete_event(*, ordinal: int, block: Mapping[str, Any], diagnostics: Mapping[str, Any]) -> dict[str, Any]:
