@@ -295,6 +295,7 @@ class LiveController:
         last_playout_state: SupervisedPlayout | None = None
         last_schedule_now: datetime | None = None
         last_stale_schedule: dict[str, Any] | None = None
+        last_ffmpeg_status: dict[str, Any] | None = None
         previous_block_info: dict[str, Any] | None = None
 
         hls_start_number = 0
@@ -368,6 +369,22 @@ class LiveController:
 
             block_hls_append = ordinal > 0
             block_hls_start_number = hls_start_number
+            def emit_ffmpeg_status(raw_status: Mapping[str, Any]) -> None:
+                nonlocal last_ffmpeg_status
+                ffmpeg_status = dict(raw_status)
+                ffmpeg_status.setdefault("profile", config.stream_profile)
+                last_ffmpeg_status = ffmpeg_status
+                _emit_live_status(
+                    config,
+                    status="running",
+                    channel_output_dir=channel_output_dir,
+                    events=events,
+                    playout_state=playout_state,
+                    schedule_now=selection_now,
+                    stale_schedule=last_stale_schedule,
+                    ffmpeg=ffmpeg_status,
+                )
+
             diagnostics = self.block_runner.run(
                 BlockRunConfig(
                     channel=config.channel,
@@ -386,6 +403,7 @@ class LiveController:
                     schedule=schedule,
                     selected_block_index=selected.index,
                     selected_block_reason=selected.reason,
+                    ffmpeg_status_callback=emit_ffmpeg_status,
                 )
             )
             diagnostics_dict = _finalize_block_run_diagnostics(
@@ -409,6 +427,7 @@ class LiveController:
                 playout_state=playout_state,
                 schedule_now=selection_now,
                 stale_schedule=last_stale_schedule,
+                ffmpeg=last_ffmpeg_status,
             )
 
             if not simulated_cursor and _block_run_failed(diagnostics_dict):
@@ -430,6 +449,22 @@ class LiveController:
                         break
                     recovery_playout = recovery_playout_state.decision
                     recovery_block_info = dict(recovery_playout_state.active_block or {})
+                    def emit_recovery_ffmpeg_status(raw_status: Mapping[str, Any]) -> None:
+                        nonlocal last_ffmpeg_status
+                        ffmpeg_status = dict(raw_status)
+                        ffmpeg_status.setdefault("profile", config.stream_profile)
+                        last_ffmpeg_status = ffmpeg_status
+                        _emit_live_status(
+                            config,
+                            status="recovering",
+                            channel_output_dir=channel_output_dir,
+                            events=events,
+                            playout_state=recovery_playout_state,
+                            schedule_now=recovery_now,
+                            stale_schedule=last_stale_schedule,
+                            ffmpeg=ffmpeg_status,
+                        )
+
                     events.append(
                         {
                             "event": "block_recovery",
@@ -453,6 +488,7 @@ class LiveController:
                         playout_state=recovery_playout_state,
                         schedule_now=recovery_now,
                         stale_schedule=last_stale_schedule,
+                        ffmpeg=last_ffmpeg_status,
                     )
                     recovery_duration_limit = min(config.duration_limit, max(0.0, (block_end - schedule_now).total_seconds()))
                     diagnostics_dict = _finalize_block_run_diagnostics(
@@ -474,6 +510,7 @@ class LiveController:
                                 schedule=schedule,
                                 selected_block_index=recovery_selected.index,
                                 selected_block_reason=recovery_selected.reason,
+                                ffmpeg_status_callback=emit_recovery_ffmpeg_status,
                             )
                         ),
                         simulated_cursor=simulated_cursor,
@@ -495,6 +532,7 @@ class LiveController:
                         playout_state=recovery_playout_state,
                         schedule_now=recovery_now,
                         stale_schedule=last_stale_schedule,
+                        ffmpeg=last_ffmpeg_status,
                     )
                     if not _block_run_failed(diagnostics_dict):
                         selected = recovery_selected
@@ -527,6 +565,7 @@ class LiveController:
                         playout_state=playout_state,
                         schedule_now=config.clock(),
                         stale_schedule=last_stale_schedule,
+                        ffmpeg=last_ffmpeg_status,
                     )
                     filler_duration = wait_seconds + BOUNDARY_FILLER_STARTUP_GUARD_SECONDS
                     filler_diagnostics = dict(
@@ -581,6 +620,7 @@ class LiveController:
                         playout_state=playout_state,
                         schedule_now=config.clock(),
                         stale_schedule=last_stale_schedule,
+                        ffmpeg=last_ffmpeg_status,
                     )
             cursor = block_end or run_now or cursor
             previous_block_info = block_info
@@ -610,6 +650,8 @@ class LiveController:
             "channel_output_dir": str(channel_output_dir),
             "output_root": str(config.output_root),
         }
+        if last_ffmpeg_status is not None:
+            result["ffmpeg"] = dict(last_ffmpeg_status)
         if config.status_callback is not None:
             config.status_callback(result)
         return result
@@ -744,6 +786,7 @@ def _emit_live_status(
     playout_state: SupervisedPlayout,
     schedule_now: datetime | None,
     stale_schedule: Mapping[str, Any] | None = None,
+    ffmpeg: Mapping[str, Any] | None = None,
 ) -> None:
     if config.status_callback is None:
         return
@@ -769,6 +812,8 @@ def _emit_live_status(
         },
         "events": [dict(event) for event in events],
     }
+    if ffmpeg is not None:
+        payload["ffmpeg"] = dict(ffmpeg)
     config.status_callback(payload)
 
 
