@@ -60,6 +60,10 @@ class FakeBlockRunner:
         segment = config.output_dir / f"fake-{index}_00000.ts"
         playlist.write_text(f"#EXTM3U\n{segment.name}\n#EXT-X-ENDLIST\n")
         segment.write_text("segment")
+        callback = getattr(config, "ffmpeg_status_callback", None)
+        if callback is not None:
+            callback({"state": "running", "pid": 4321, "started_at": "2026-06-17T10:00:05+00:00"})
+            callback({"state": "exited", "pid": None, "started_at": "2026-06-17T10:00:05+00:00", "last_exit_code": 0})
         return {
             "status": "ok",
             "playlist": str(playlist),
@@ -257,6 +261,36 @@ class LiveControllerTests(unittest.TestCase):
         self.assertEqual(runner.calls[0].playout_mode, "ts-primary")
         self.assertEqual(updates[0]["playout_mode"], "ts-primary")
         self.assertEqual(result["playout_mode"], "ts-primary")
+
+    def test_live_status_publishes_current_ffmpeg_process_while_rendering(self):
+        updates = []
+        runner = FakeBlockRunner()
+        controller = LiveController(schedule_client=FakeScheduleClient(), block_runner=runner)
+
+        controller.run(
+            LiveControllerConfig(
+                channel="Example Channel",
+                output_root=Path(datetime.now().strftime("/tmp/fs42-live-ffmpeg-%Y%m%d%H%M%S")),
+                max_blocks=1,
+                duration_limit=10,
+                now=datetime(2026, 6, 17, 10, 5, 0),
+                dry_run=True,
+                status_callback=updates.append,
+                stream_profile="direct",
+            )
+        )
+
+        running_updates = [update for update in updates if update.get("ffmpeg", {}).get("state") == "running"]
+        self.assertTrue(running_updates)
+        self.assertEqual(running_updates[-1]["ffmpeg"]["pid"], 4321)
+        self.assertEqual(running_updates[-1]["ffmpeg"]["profile"], "direct")
+        self.assertEqual(running_updates[-1]["ffmpeg"]["started_at"], "2026-06-17T10:00:05+00:00")
+        exited_updates = [update for update in updates if update.get("ffmpeg", {}).get("state") == "exited"]
+        self.assertTrue(exited_updates)
+        self.assertEqual(exited_updates[-1]["ffmpeg"]["last_exit_code"], 0)
+        self.assertEqual(updates[-1]["status"], "complete")
+        self.assertEqual(updates[-1]["ffmpeg"]["state"], "exited")
+        self.assertEqual(updates[-1]["ffmpeg"]["last_exit_code"], 0)
 
     def test_shared_schedule_clock_forces_profiles_to_use_same_schedule_snapshot(self):
         def schedule(title):

@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 from .client import DEFAULT_SCHEDULE_BASE_PATH, DEFAULT_SCHEDULE_HOST, DEFAULT_SCHEDULE_PORT, DEFAULT_SCHEDULE_SCHEME, FS42ScheduleClient, build_schedule_api_base_url
 from .ffmpeg import FFMpegHLSCommandBuilder, PlayoutMode, StreamProfile
@@ -56,6 +56,7 @@ class BlockRunConfig:
     schedule: Mapping[str, Any] | None = None
     selected_block_index: int | None = None
     selected_block_reason: str | None = None
+    ffmpeg_status_callback: Callable[[Mapping[str, Any]], None] | None = None
 
 
 def select_current_or_next_block(schedule: Mapping[str, Any], *, now: datetime | None = None, schedule_timezone: str | None = DEFAULT_SCHEDULE_TIMEZONE) -> SelectedBlock:
@@ -323,7 +324,7 @@ class BlockRunner:
                     stream_profile=config.stream_profile,
                 )
                 executed_commands.append(command)
-                completed = _run_ffmpeg_command(command, playlist=playlist, normalize_jellyfin=config.stream_profile == "jellyfin" and config.playout_mode == "ts-primary")
+                completed = _run_ffmpeg_command(command, playlist=playlist, normalize_jellyfin=config.stream_profile == "jellyfin" and config.playout_mode == "ts-primary", status_callback=config.ffmpeg_status_callback)
                 ffmpeg_runs.append(
                     {
                         "index": run_index,
@@ -377,7 +378,7 @@ class BlockRunner:
                 )
                 run_boundary_start = command_hls_start_number if appended_run and config.stream_profile != "jellyfin" else None
                 executed_commands.append(command)
-                completed = _run_ffmpeg_command(command, playlist=playlist, normalize_jellyfin=config.stream_profile == "jellyfin" and config.playout_mode == "ts-primary")
+                completed = _run_ffmpeg_command(command, playlist=playlist, normalize_jellyfin=config.stream_profile == "jellyfin" and config.playout_mode == "ts-primary", status_callback=config.ffmpeg_status_callback)
                 run_info = {
                     "index": run_index,
                     "returncode": completed.returncode,
@@ -510,9 +511,16 @@ def _single_item_block(block: PlannedBlock, item: Any, *, item_index: int) -> Pl
     )
 
 
-def _run_ffmpeg_command(command: Sequence[str], *, playlist: Path, normalize_jellyfin: bool) -> subprocess.CompletedProcess[str]:
+def _run_ffmpeg_command(command: Sequence[str], *, playlist: Path, normalize_jellyfin: bool, status_callback: Callable[[Mapping[str, Any]], None] | None = None) -> subprocess.CompletedProcess[str]:
+    started_at = datetime.now(timezone.utc).isoformat()
     if not normalize_jellyfin:
-        return subprocess.run(command, check=False, shell=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        if status_callback is None:
+            return subprocess.run(command, check=False, shell=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        process = subprocess.Popen(command, shell=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        _notify_ffmpeg_status(status_callback, state="running", pid=process.pid, started_at=started_at)
+        stdout, stderr = process.communicate()
+        _notify_ffmpeg_status(status_callback, state="exited" if process.returncode == 0 else "error", pid=None, started_at=started_at, returncode=process.returncode, error=stderr if process.returncode != 0 else None)
+        return subprocess.CompletedProcess(command, process.returncode, stdout=stdout, stderr=stderr)
 
     # Do not leave ffmpeg stdout/stderr connected to PIPE while we poll for
     # live Jellyfin playlist normalization. FFmpeg writes progress/log output
@@ -520,6 +528,7 @@ def _run_ffmpeg_command(command: Sequence[str], *, playlist: Path, normalize_jel
     # pipe_write and freeze the live profile indefinitely.
     with tempfile.TemporaryFile(mode="w+t") as stdout_file, tempfile.TemporaryFile(mode="w+t") as stderr_file:
         process = subprocess.Popen(command, shell=False, stdout=stdout_file, stderr=stderr_file, text=True)
+        _notify_ffmpeg_status(status_callback, state="running", pid=process.pid, started_at=started_at)
         while process.poll() is None:
             if playlist.exists():
                 _normalize_jellyfin_live_playlist(playlist)
@@ -529,7 +538,22 @@ def _run_ffmpeg_command(command: Sequence[str], *, playlist: Path, normalize_jel
             _normalize_jellyfin_live_playlist(playlist)
         stdout_file.seek(0)
         stderr_file.seek(0)
-        return subprocess.CompletedProcess(command, returncode, stdout=stdout_file.read(), stderr=stderr_file.read())
+        stdout = stdout_file.read()
+        stderr = stderr_file.read()
+        _notify_ffmpeg_status(status_callback, state="exited" if returncode == 0 else "error", pid=None, started_at=started_at, returncode=returncode, error=stderr if returncode != 0 else None)
+        return subprocess.CompletedProcess(command, returncode, stdout=stdout, stderr=stderr)
+
+
+def _notify_ffmpeg_status(status_callback: Callable[[Mapping[str, Any]], None] | None, *, state: str, pid: int | None, started_at: str, returncode: int | None = None, error: str | None = None) -> None:
+    if status_callback is None:
+        return
+    status_callback({
+        "state": state,
+        "pid": pid,
+        "started_at": started_at,
+        "last_exit_code": returncode,
+        "last_error": error,
+    })
 
 
 def _next_hls_start_number(playlist: Path, *, fallback: int) -> int:
