@@ -6,22 +6,22 @@ FS42-Stream is channel-agnostic: channel name, URL/filesystem slug, upstream sch
 
 ## Configuration
 
-The persistent-service installer writes `/etc/fs42stream/fs42stream.env`. Important variables are:
+The persistent-service installer writes `/etc/fs42stream/fs42stream.env`. Prioritize the values you usually set first; keep the more installation-specific defaults lower in the file.
 
-| Variable | Purpose | Portable default |
-| --- | --- | --- |
-| `FS42STREAM_CHANNEL` | Schedule network name and display name | `Example Channel` |
-| `FS42STREAM_CHANNEL_SLUG` | Safe HLS/API/filesystem identifier | `Example_Channel` |
-| `FS42STREAM_SCHEDULE_SCHEME` | FieldStation42 schedule API scheme | `http` |
-| `FS42STREAM_SCHEDULE_HOST` | FieldStation42 schedule API hostname/IP | `127.0.0.1` |
-| `FS42STREAM_SCHEDULE_PORT` | FieldStation42 schedule API port | `4242` |
-| `FS42STREAM_SCHEDULE_BASE_PATH` | Optional schedule API base path | blank |
-| `FS42STREAM_API_BASE_URL` | Deprecated full schedule API URL override; leave blank unless migrating old config | blank |
-| `FS42STREAM_PUBLIC_BASE_URL` | External base URL placed in M3U/XMLTV metadata; blank derives it from the HTTP `Host` header | blank |
-| `FS42STREAM_LOGO_FILENAME` | Logo file beneath `<output-root>/<channel-slug>/` | `logo.png` |
-| `FS42STREAM_HOST` / `FS42STREAM_PORT` | API/HLS listen address and port | `0.0.0.0` / `8088` |
-| `FS42STREAM_OUTPUT_ROOT` | HLS output root | `/var/lib/fs42stream/hls` |
-| `FS42STREAM_SCHEDULE_TIMEZONE` | Timezone for naive schedule timestamps | `Europe/London` |
+| Priority | Variable | Purpose | Portable default |
+| --- | --- | --- | --- |
+| Common | `FS42STREAM_CHANNEL` | Schedule network name and display name | `Example Channel` |
+| Common | `FS42STREAM_CHANNEL_SLUG` | Safe HLS/API/filesystem identifier | `Example_Channel` |
+| Common | `FS42STREAM_SCHEDULE_SCHEME` | FieldStation42 schedule API scheme | `http` |
+| Common | `FS42STREAM_SCHEDULE_HOST` | FieldStation42 schedule API hostname/IP | `127.0.0.1` |
+| Common | `FS42STREAM_SCHEDULE_PORT` | FieldStation42 schedule API port | `4242` |
+| Common | `FS42STREAM_PUBLIC_BASE_URL` | External base URL placed in M3U/XMLTV metadata; blank derives it from the HTTP `Host` header | blank |
+| Common | `FS42STREAM_LOGO_FILENAME` | Logo file beneath `<output-root>/<channel-slug>/` | `logo.png` |
+| Usually default | `FS42STREAM_SCHEDULE_BASE_PATH` | Optional schedule API base path | blank |
+| Usually default | `FS42STREAM_HOST` / `FS42STREAM_PORT` | API/HLS listen address and port | `0.0.0.0` / `8088` |
+| Usually default | `FS42STREAM_OUTPUT_ROOT` | HLS output root | `/var/lib/fs42stream/hls` |
+| Usually default | `FS42STREAM_SCHEDULE_TIMEZONE` | Timezone for naive schedule timestamps | `Europe/London` |
+| Advanced | `FS42STREAM_API_BASE_URL` | Deprecated full schedule API URL override; leave blank unless migrating old config | blank |
 
 `FS42STREAM_PUBLIC_BASE_URL` is recommended behind a reverse proxy, NAT, TLS terminator, or when IPTV/Jellyfin clients cannot use the service's bind address. It must include scheme and any externally visible port, for example `https://stream.example.net`.
 

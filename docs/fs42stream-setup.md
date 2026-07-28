@@ -4,7 +4,7 @@ This guide is installation-neutral. Do not copy private IP addresses, hostnames,
 
 ## Preflight configuration
 
-Set these values in the environment file used by the systemd unit:
+Set these values in the environment file used by the systemd unit. The common deployment values are listed first so a fresh install can be configured quickly:
 
 ```bash
 FS42STREAM_CHANNEL="Your Channel"
@@ -13,13 +13,13 @@ FS42STREAM_SCHEDULE_SCHEME="http"
 FS42STREAM_SCHEDULE_HOST="fieldstation42.example.net"
 FS42STREAM_SCHEDULE_PORT="4242"
 FS42STREAM_SCHEDULE_BASE_PATH=""
-FS42STREAM_API_BASE_URL=""
 FS42STREAM_PUBLIC_BASE_URL="https://stream.example.net"
 FS42STREAM_LOGO_FILENAME="logo.png"
 FS42STREAM_HOST="0.0.0.0"
 FS42STREAM_PORT="8088"
 FS42STREAM_OUTPUT_ROOT="/var/lib/fs42stream/hls"
 FS42STREAM_SCHEDULE_TIMEZONE="Europe/London"
+FS42STREAM_API_BASE_URL=""
 ```
 
 Configure the other existing variables (`FS42STREAM_VIDEO_ENCODER`, `FS42STREAM_VAAPI_DEVICE`, block limits, and media roots supplied as CLI options) for the host's available hardware and media layout.
