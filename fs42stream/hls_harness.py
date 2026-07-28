@@ -79,16 +79,16 @@ def create_fixture_clips(
     return clips
 
 
-def fixture_schedule(clips: Sequence[Path], *, duration: float = 1.0) -> dict[str, Any]:
-    """Build a minimal Sky One schedule whose plan references fixture realpaths."""
+def fixture_schedule(clips: Sequence[Path], *, duration: float = 1.0, channel_name: str = "Example Channel") -> dict[str, Any]:
+    """Build a portable test fixture whose plan references fixture realpaths."""
 
     if not clips:
         raise ValueError("at least one fixture clip is required")
     return {
-        "network_name": "Sky One",
+        "network_name": channel_name,
         "schedule_blocks": [
             {
-                "title": "Sky One HLS Harness",
+                "title": f"{channel_name} HLS Harness",
                 "start_time": "2026-06-17T00:00:00",
                 "end_time": "2026-06-17T00:00:03",
                 "plan": [
@@ -160,10 +160,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--dry-run", action="store_true", help="print ffmpeg HLS argv without running it")
     parser.add_argument("--ffmpeg", default=DEFAULT_FFMPEG)
     parser.add_argument("--ffprobe", default=DEFAULT_FFPROBE)
+    parser.add_argument("--channel", default="Example Channel", help="fixture channel name used for generated schedule metadata")
     args = parser.parse_args(argv)
 
     clips = create_fixture_clips(args.work_dir / "fixtures", count=args.count, duration=args.duration, ffmpeg=args.ffmpeg)
-    schedule = fixture_schedule(clips, duration=args.duration)
+    schedule = fixture_schedule(clips, duration=args.duration, channel_name=args.channel)
     harness = HLSHarness(
         planner=BlockPlanner(PathResolver(fs42_root=args.work_dir, sdtv_root=args.work_dir), FFProbe(args.ffprobe)),
         builder=FFMpegHLSCommandBuilder(args.ffmpeg),
@@ -172,7 +173,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     command = harness.run(schedule, output_dir=output_dir, dry_run=args.dry_run)
     print(" ".join(command))
     if not args.dry_run:
-        inspection = inspect_hls_output(output_dir / "Sky_One_HLS_Harness.m3u8")
+        playlist_name = f"{_slug(args.channel)}_HLS_Harness.m3u8"
+        inspection = inspect_hls_output(output_dir / playlist_name)
         print(f"playlist={inspection.playlist}")
         print(f"segments={len(inspection.segments)}")
         print(f"endlist={inspection.has_endlist}")
@@ -181,6 +183,10 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 def _num(value: float) -> str:
     return (f"{value:.6f}").rstrip("0").rstrip(".")
+
+
+def _slug(value: str) -> str:
+    return "_".join(part for part in value.split() if part) or "Example_Channel"
 
 
 if __name__ == "__main__":

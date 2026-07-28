@@ -13,7 +13,7 @@ from zoneinfo import ZoneInfo
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-from .client import FS42ScheduleClient
+from .client import DEFAULT_SCHEDULE_BASE_PATH, DEFAULT_SCHEDULE_HOST, DEFAULT_SCHEDULE_PORT, DEFAULT_SCHEDULE_SCHEME, FS42ScheduleClient, build_schedule_api_base_url
 from .ffmpeg import FFMpegHLSCommandBuilder, PlayoutMode, StreamProfile
 from .ffprobe import FFProbe
 from .hls_harness import inspect_hls_output
@@ -21,8 +21,8 @@ from .paths import PathResolver
 from .planner import BlockPlanner, PlannedBlock, plan_item_type_summary
 from .playout_engine import resolve_block_playout
 
-DEFAULT_API_BASE_URL = "http://192.168.10.252:4242"
-DEFAULT_CHANNEL = "Sky One"
+DEFAULT_API_BASE_URL = "http://127.0.0.1:4242"
+DEFAULT_CHANNEL = "Example Channel"
 DEFAULT_FS42_ROOT = "/mnt/fs42"
 DEFAULT_SDTV_ROOT = "/mnt/media/SDTV"
 DEFAULT_FFMPEG = "/usr/bin/ffmpeg"
@@ -453,7 +453,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--channel", default=DEFAULT_CHANNEL)
     parser.add_argument("--duration-limit", type=float, default=120.0, help="maximum output duration in seconds")
     parser.add_argument("--output-dir", type=Path, default=Path("/tmp/fs42stream-hls"))
-    parser.add_argument("--api-base-url", default=DEFAULT_API_BASE_URL)
+    parser.add_argument("--schedule-scheme", default=DEFAULT_SCHEDULE_SCHEME)
+    parser.add_argument("--schedule-host", default=DEFAULT_SCHEDULE_HOST)
+    parser.add_argument("--schedule-port", type=int, default=DEFAULT_SCHEDULE_PORT)
+    parser.add_argument("--schedule-base-path", default=DEFAULT_SCHEDULE_BASE_PATH)
+    parser.add_argument("--api-base-url", default="", help="deprecated full schedule API URL override; prefer --schedule-* options")
     parser.add_argument("--fs42-root", type=Path, default=Path(DEFAULT_FS42_ROOT))
     parser.add_argument("--sdtv-root", type=Path, default=Path(DEFAULT_SDTV_ROOT))
     parser.add_argument("--ffmpeg", default=DEFAULT_FFMPEG)
@@ -464,14 +468,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--fallback-slate-video", type=Path, help="optional prebuilt video used instead of generated black slate for runtime/off-air image entries")
     parser.add_argument("--timeout", type=float, default=10.0, help="FS42 API timeout in seconds")
     parser.add_argument("--now", help="override current time for deterministic tests, e.g. 2026-06-17T10:05:00")
-    parser.add_argument("--output-name", help="stable HLS playlist/segment prefix, e.g. Sky_One")
+    parser.add_argument("--output-name", help="stable HLS playlist/segment prefix, e.g. Your_Channel")
     parser.add_argument("--dry-run", action="store_true", help="validate and print command without running ffmpeg")
     parser.add_argument("--stream-profile", choices=("direct", "jellyfin"), default="direct", help="HLS packaging profile; jellyfin avoids discontinuity tags and offsets timestamps")
     parser.add_argument("--playout-mode", choices=("hls-primary", "ts-primary"), default="ts-primary", help="render directly to HLS or render TS first then package HLS")
     args = parser.parse_args(argv)
 
     runner = BlockRunner(
-        client=FS42ScheduleClient(args.api_base_url, timeout=args.timeout),
+        client=FS42ScheduleClient(args.api_base_url or build_schedule_api_base_url(scheme=args.schedule_scheme, host=args.schedule_host, port=args.schedule_port, base_path=args.schedule_base_path), timeout=args.timeout),
         planner=BlockPlanner(PathResolver(fs42_root=args.fs42_root, sdtv_root=args.sdtv_root), FFProbe(args.ffprobe), fallback_slate_video=args.fallback_slate_video),
         builder=FFMpegHLSCommandBuilder(args.ffmpeg, video_encoder=args.video_encoder, vaapi_device=args.vaapi_device),
     )

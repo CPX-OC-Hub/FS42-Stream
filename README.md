@@ -1,214 +1,119 @@
 # FS42-Stream
 
-Headless FieldStation42 schedule-following HLS streaming backend for Sky One.
+A headless, schedule-following HLS streaming backend. FS42-Stream reads a FieldStation42-compatible schedule API, follows the active wall-clock block, and publishes direct-player and Jellyfin HLS profiles.
 
-FS42-Stream reads the FieldStation42 schedule API, follows the current wall-clock block, preserves the upstream `schedule_blocks[*].plan[*]` order, and publishes live HLS outputs for direct players and Jellyfin.
+FS42-Stream is channel-agnostic: channel name, URL/filesystem slug, upstream schedule API, published URL, logo filename, media roots, encoder, and service paths are installation configuration.
 
-## Current production shape
+## Configuration
 
-- Source schedule API: `http://192.168.10.252:4242`
-- Streaming host: `fs42stream` / `192.168.10.139`
-- Service port: `8088`
-- Channel: `Sky One`
-- Channel slug: `Sky_One`
-- Output root: `/var/lib/fs42stream/hls`
-- Service user: `hermes-admin`
-- Service unit: `fs42stream.service`
-- Current playout mode: `ts-primary`
-- Schedule timezone: `Europe/London`
+The persistent-service installer writes `/etc/fs42stream/fs42stream.env`. Important variables are:
 
-## Public endpoints
+| Variable | Purpose | Portable default |
+| --- | --- | --- |
+| `FS42STREAM_CHANNEL` | Schedule network name and display name | `Example Channel` |
+| `FS42STREAM_CHANNEL_SLUG` | Safe HLS/API/filesystem identifier | `Example_Channel` |
+| `FS42STREAM_SCHEDULE_SCHEME` | FieldStation42 schedule API scheme | `http` |
+| `FS42STREAM_SCHEDULE_HOST` | FieldStation42 schedule API hostname/IP | `127.0.0.1` |
+| `FS42STREAM_SCHEDULE_PORT` | FieldStation42 schedule API port | `4242` |
+| `FS42STREAM_SCHEDULE_BASE_PATH` | Optional schedule API base path | blank |
+| `FS42STREAM_API_BASE_URL` | Deprecated full schedule API URL override; leave blank unless migrating old config | blank |
+| `FS42STREAM_PUBLIC_BASE_URL` | External base URL placed in M3U/XMLTV metadata; blank derives it from the HTTP `Host` header | blank |
+| `FS42STREAM_LOGO_FILENAME` | Logo file beneath `<output-root>/<channel-slug>/` | `logo.png` |
+| `FS42STREAM_HOST` / `FS42STREAM_PORT` | API/HLS listen address and port | `0.0.0.0` / `8088` |
+| `FS42STREAM_OUTPUT_ROOT` | HLS output root | `/var/lib/fs42stream/hls` |
+| `FS42STREAM_SCHEDULE_TIMEZONE` | Timezone for naive schedule timestamps | `Europe/London` |
 
-Use the full URLs below when testing from clients on the LAN.
+`FS42STREAM_PUBLIC_BASE_URL` is recommended behind a reverse proxy, NAT, TLS terminator, or when IPTV/Jellyfin clients cannot use the service's bind address. It must include scheme and any externally visible port, for example `https://stream.example.net`.
 
-| Purpose | URL |
-| --- | --- |
-| Health | `http://192.168.10.139:8088/api/health` |
-| Channel list | `http://192.168.10.139:8088/api/channels` |
-| Live status | `http://192.168.10.139:8088/api/channels/Sky_One/status` |
-| Derived schedule | `http://192.168.10.139:8088/api/channels/Sky_One/schedule` |
-| Runtime diagnostics | `http://192.168.10.139:8088/api/channels/Sky_One/runtime` |
-| Recent events | `http://192.168.10.139:8088/api/channels/Sky_One/events` |
-| Direct HLS playlist | `http://192.168.10.139:8088/hls/Sky_One/Sky_One.m3u8` |
-| Jellyfin HLS playlist | `http://192.168.10.139:8088/hls/Sky_One/jellyfin/Sky_One.m3u8` |
-| Direct IPTV M3U | `http://192.168.10.139:8088/iptv/channels.m3u` |
-| Jellyfin IPTV M3U | `http://192.168.10.139:8088/iptv/jellyfin/channels.m3u` |
-| XMLTV | `http://192.168.10.139:8088/iptv/xmltv.xml` |
-| Sky One logo | `http://192.168.10.139:8088/hls/Sky_One/skyone.png` |
+## Install or generate service files
 
-The IPTV and XMLTV outputs should reference the local FS42-Stream logo URL above, not the upstream `.252` schedule/source host.
-
-## Architecture notes
-
-### Wall-clock schedule following
-
-The service treats the FS42 schedule as authoritative. It selects the active block using schedule-local wall-clock time, then derives the current plan item and media offset from cumulative plan durations inside that block.
-
-This is important for restarts and mid-block joins:
-
-- elapsed plan items are dropped;
-- the current item is seeked to the correct offset;
-- resumed feature items preserve their existing `skip` values;
-- commercials, bumps, and idents remain in the original upstream order.
-
-### Direct and Jellyfin outputs
-
-The integrated runner publishes two live profiles:
-
-- `direct` → `/hls/Sky_One/Sky_One.m3u8`
-- `jellyfin` → `/hls/Sky_One/jellyfin/Sky_One.m3u8`
-
-Both profiles share one schedule/block lifecycle clock so they cannot silently drift onto different blocks. If one profile stalls, that is a service fault to investigate; do not trust the direct/primary status alone.
-
-### `ts-primary` playout
-
-`ts-primary` is the current production path. It renders planned items into MPEG-TS/HLS with per-item tee commands, appending to the same public playlist while preserving dense segment numbering.
-
-Important live HLS rules:
-
-- public playlists must not contain `#EXT-X-ENDLIST` while live;
-- Jellyfin playlists should not expose persistent `#EXT-X-DISCONTINUITY` tags;
-- segment numbers must advance monotonically;
-- HLS commands must be rebuilt from emitted playlist state before appended item runs;
-- ffmpeg output pipes must not be left undrained, or ffmpeg can block in `pipe_write` and freeze playback.
-
-## Running locally
-
-Run the bounded block runner without installing a persistent service:
+Review generated files before installing them. This command does not contact a scheduler or start a service:
 
 ```bash
-python3 -m fs42stream.run_block \
-  --channel "Sky One" \
-  --duration-limit 120 \
-  --output-dir /tmp/fs42stream-hls \
-  --playout-mode ts-primary
+python3 scripts/install_systemd_service.py \
+  --dry-run \
+  --channel "Retro Movies" \
+  --channel-slug Retro_Movies \
+  --schedule-scheme https \
+  --schedule-host scheduler.example.net \
+  --schedule-port 443 \
+  --schedule-base-path "" \
+  --public-base-url "https://stream.example.net" \
+  --logo-filename retro-movies.png
 ```
 
-Run the foreground API/status/HLS server:
+The generated systemd service runs the integrated API/HLS server and controller. The controller preserves the existing wall-clock schedule-following and direct/Jellyfin dual-profile behavior.
 
-```bash
-python3 -m fs42stream.api_server \
-  --host 127.0.0.1 \
-  --port 8088 \
-  --output-root /tmp/fs42stream-live \
-  --status-json /tmp/fs42stream-live/status.json
-```
-
-Run the integrated foreground server + live controller:
+## Run locally
 
 ```bash
 python3 -m fs42stream.integrated_runner \
-  --channel "Sky One" \
-  --host 0.0.0.0 \
+  --channel "Retro Movies" \
+  --channel-slug Retro_Movies \
+  --schedule-scheme http \
+  --schedule-host 127.0.0.1 \
+  --schedule-port 4242 \
+  --schedule-base-path "" \
+  --host 127.0.0.1 \
   --port 8088 \
-  --output-root /var/lib/fs42stream/hls \
-  --max-blocks 1000000 \
-  --duration-limit 7200 \
-  --video-encoder h264_vaapi \
-  --vaapi-device /dev/dri/renderD128 \
-  --schedule-timezone Europe/London \
+  --output-root /tmp/fs42stream-hls \
+  --max-blocks 1 \
+  --duration-limit 120 \
   --playout-mode ts-primary
 ```
 
-## Retention cleanup and disk monitoring
+`--channel-slug` is optional: if omitted, the runner converts the channel name to a safe underscore-separated slug. Set it explicitly to preserve a pre-existing HLS URL or directory name.
 
-The service has two storage guardrails:
+## Published endpoints
 
-1. Rolling HLS retention cleanup:
-   - module/CLI: `python3 -m fs42stream.hls_retention`
-   - scans `/var/lib/fs42stream/hls/Sky_One` and `/var/lib/fs42stream/hls/Sky_One/jellyfin`
-   - deletes stale unreferenced `.ts` segments only
-   - preserves playlists, currently referenced live-window segments, `skyone.png`, and non-HLS assets
+For channel slug `<slug>`, the service publishes:
 
-2. Disk utilisation reporting:
-   - `/api/health`
-   - `/api/channels/Sky_One/runtime`
-   - `/api/channels/Sky_One/health`
-   - includes output-root path, bytes total/used/free, percent used, and threshold state
+- `/api/channels/<slug>/status`, `/schedule`, `/runtime`, `/health`, `/events`, and `/epg`
+- `/hls/<slug>/<slug>.m3u8` (direct)
+- `/hls/<slug>/jellyfin/<slug>.m3u8` (Jellyfin)
+- `/iptv/channels.m3u`, `/iptv/jellyfin/channels.m3u`, and `/iptv/xmltv.xml`
 
-Production also has a systemd timer:
+The M3U and XMLTV logo URLs use `FS42STREAM_PUBLIC_BASE_URL`, or the incoming HTTP `Host` header when it is blank. Place the configured logo asset at `<output-root>/<slug>/<logo-filename>`.
+
+## Existing installation migration
+
+Before replacing a unit file generated by an older release, add these values to its environment file (use your existing channel and endpoints):
 
 ```bash
-systemctl is-active fs42stream-hls-cleanup.timer
-systemctl list-timers --all fs42stream-hls-cleanup.timer --no-pager
+FS42STREAM_CHANNEL="Your Channel"
+FS42STREAM_CHANNEL_SLUG="Your_Channel"
+FS42STREAM_SCHEDULE_SCHEME="http"
+FS42STREAM_SCHEDULE_HOST="fieldstation42.example.net"
+FS42STREAM_SCHEDULE_PORT="4242"
+FS42STREAM_SCHEDULE_BASE_PATH=""
+FS42STREAM_API_BASE_URL=""
+FS42STREAM_PUBLIC_BASE_URL="https://stream.example.net"
+FS42STREAM_LOGO_FILENAME="logo.png"
 ```
 
-Manual dry-run:
+Keep the existing `FS42STREAM_*` media-root, encoder, timezone, bind, and output-root values. A deliberate review/restart and direct/Jellyfin playback verification are required for any deployment; this repository change does not deploy or restart services.
+
+## Retention cleanup
+
+Run cleanup against the configured output root and slug:
 
 ```bash
 python3 -m fs42stream.hls_retention \
   --output-root /var/lib/fs42stream/hls \
-  --channel-slug Sky_One \
+  --channel-slug Your_Channel \
   --max-age-seconds 21600 \
   --max-segments-per-dir 7200 \
   --dry-run
 ```
 
+It only deletes stale, unreferenced `.ts` segments and preserves playlists and non-HLS assets.
+
 ## Tests
-
-Run the targeted service suites:
-
-```bash
-python3 -m unittest \
-  tests.test_api_server \
-  tests.test_run_block \
-  tests.test_live_controller \
-  tests.test_integrated_runner \
-  tests.test_systemd_service
-```
-
-Run the full test suite:
 
 ```bash
 python3 -m unittest discover -s tests
 ```
 
-## Deployment notes
+### Clearly labelled legacy example
 
-Production service files live under `/opt/fs42stream` on `192.168.10.139`.
-
-Typical service checks:
-
-```bash
-systemctl is-active fs42stream.service
-systemctl show -p MainPID --value fs42stream.service
-systemctl show -p ExecMainStartTimestamp --value fs42stream.service
-```
-
-Restart only after tests pass:
-
-```bash
-sudo systemctl restart fs42stream.service
-```
-
-After restart, verify both direct and Jellyfin playlists advance and remain live-clean:
-
-```bash
-python3 - <<'PY'
-import re, time, urllib.request
-urls = [
-    ('direct', 'http://192.168.10.139:8088/hls/Sky_One/Sky_One.m3u8'),
-    ('jellyfin', 'http://192.168.10.139:8088/hls/Sky_One/jellyfin/Sky_One.m3u8'),
-]
-last = {}
-for i in range(3):
-    print('SAMPLE', i)
-    for label, url in urls:
-        text = urllib.request.urlopen(url, timeout=15).read().decode('utf-8', 'replace')
-        segs = re.findall(r'([^\n]+\.ts)', text)
-        tail = int(re.search(r'_(\d+)\.ts$', segs[-1]).group(1)) if segs else None
-        print(label, 'tail', tail, 'delta', None if label not in last else tail - last[label], 'endlist', '#EXT-X-ENDLIST' in text, 'discont', text.count('#EXT-X-DISCONTINUITY'))
-        if tail is not None:
-            last[label] = tail
-    time.sleep(4)
-PY
-```
-
-## Current known future work
-
-- GitHub issue `#56`: optimise FS42-Stream service performance and reliability.
-- GitHub issue `#57`: remove hardcoded IP addresses and configure public base URLs.
-
-## Historical notes
-
-`README-phase1-prototype.md` documents the original phase-1 prototype and is retained for historical context only. The active service behavior is described in this README and `docs/fs42stream-setup.md`.
+Historical tests and `README-phase1-prototype.md` may use `Sky One`/`Sky_One` as fixture data. They are not runtime defaults or installation instructions.

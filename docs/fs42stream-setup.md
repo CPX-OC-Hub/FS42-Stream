@@ -1,256 +1,99 @@
-# fs42stream Setup and Operations Notes
+# FS42-Stream Setup and Operations
 
-These notes describe the current `fs42stream` deployment on `192.168.10.139`.
+This guide is installation-neutral. Do not copy private IP addresses, hostnames, usernames, channel names, or media paths from another deployment.
 
-## Host and service
+## Preflight configuration
 
-```text
-Host:        fs42stream / 192.168.10.139
-SSH user:    hermes-admin
-Install dir: /opt/fs42stream
-Output root: /var/lib/fs42stream/hls
-Service:     fs42stream.service
-Channel:     Sky One
-Mode:        ts-primary
-Timezone:    Europe/London
-```
-
-The service runs the integrated API/HLS server and live controller:
+Set these values in the environment file used by the systemd unit:
 
 ```bash
-/usr/bin/python3 -m fs42stream.integrated_runner \
-  --channel "Sky One" \
-  --host 0.0.0.0 \
-  --port 8088 \
-  --output-root /var/lib/fs42stream/hls \
-  --max-blocks 1000000 \
-  --duration-limit 7200 \
-  --video-encoder h264_vaapi \
-  --vaapi-device /dev/dri/renderD128 \
-  --schedule-timezone Europe/London \
-  --playout-mode ts-primary
+FS42STREAM_CHANNEL="Your Channel"
+FS42STREAM_CHANNEL_SLUG="Your_Channel"
+FS42STREAM_SCHEDULE_SCHEME="http"
+FS42STREAM_SCHEDULE_HOST="fieldstation42.example.net"
+FS42STREAM_SCHEDULE_PORT="4242"
+FS42STREAM_SCHEDULE_BASE_PATH=""
+FS42STREAM_API_BASE_URL=""
+FS42STREAM_PUBLIC_BASE_URL="https://stream.example.net"
+FS42STREAM_LOGO_FILENAME="logo.png"
+FS42STREAM_HOST="0.0.0.0"
+FS42STREAM_PORT="8088"
+FS42STREAM_OUTPUT_ROOT="/var/lib/fs42stream/hls"
+FS42STREAM_SCHEDULE_TIMEZONE="Europe/London"
 ```
 
-## FFmpeg / FFprobe
+Configure the other existing variables (`FS42STREAM_VIDEO_ENCODER`, `FS42STREAM_VAAPI_DEVICE`, block limits, and media roots supplied as CLI options) for the host's available hardware and media layout.
 
-Passwordless sudo is enabled for `hermes-admin`. The system packages are installed and should be preferred:
+`FS42STREAM_SCHEDULE_*` identifies the FieldStation42 schedule-source endpoint. `FS42STREAM_API_BASE_URL` remains as a deprecated full-URL override for older deployments; leave it blank for new installs. `FS42STREAM_PUBLIC_BASE_URL` is the URL that IPTV/XMLTV clients receive. They intentionally need not be the same address. Leave the public value blank only when clients can use the request `Host` header directly.
+
+The logo must exist at:
 
 ```text
-/usr/bin/ffmpeg
-/usr/bin/ffprobe
+<FS42STREAM_OUTPUT_ROOT>/<FS42STREAM_CHANNEL_SLUG>/<FS42STREAM_LOGO_FILENAME>
 ```
 
-The older user-local static build may still exist under `/home/hermes-admin/.local/bin`, but it is not the normal production path.
+## Generate service files safely
 
-## Media paths
-
-Canonical roots on `fs42stream`:
-
-```text
-FS42 catalog root: /mnt/fs42
-Media/show root:   /mnt/media/SDTV
-```
-
-The streamer must not depend on uppercase `/mnt/FS42`.
-
-## Source schedule API
-
-The upstream FieldStation42 schedule API is currently:
-
-```text
-http://192.168.10.252:4242
-```
-
-The local stream service is separate and publishes its own playback/API/IPTV/XMLTV endpoints from:
-
-```text
-http://192.168.10.139:8088
-```
-
-Do not use the `.252` source host for local stream/icon/XMLTV links. Future issue `#57` tracks replacing hardcoded IPs with configurable public base URLs.
-
-## Local logo asset
-
-The Sky One logo is served locally from the HLS tree:
-
-```text
-/var/lib/fs42stream/hls/Sky_One/skyone.png
-http://192.168.10.139:8088/hls/Sky_One/skyone.png
-```
-
-The file was copied from the upstream source host and should be present on the stream server. IPTV M3U and XMLTV should reference the `.139:8088` URL.
-
-## Systemd checks
-
-Check service state:
+Use a dry run first and inspect the output:
 
 ```bash
-systemctl is-active fs42stream.service
-systemctl show -p MainPID --value fs42stream.service
-systemctl show -p ExecMainStartTimestamp --value fs42stream.service
+python3 scripts/install_systemd_service.py \
+  --dry-run \
+  --channel "$FS42STREAM_CHANNEL" \
+  --channel-slug "$FS42STREAM_CHANNEL_SLUG" \
+  --schedule-scheme "$FS42STREAM_SCHEDULE_SCHEME" \
+  --schedule-host "$FS42STREAM_SCHEDULE_HOST" \
+  --schedule-port "$FS42STREAM_SCHEDULE_PORT" \
+  --schedule-base-path "$FS42STREAM_SCHEDULE_BASE_PATH" \
+  --public-base-url "$FS42STREAM_PUBLIC_BASE_URL" \
+  --logo-filename "$FS42STREAM_LOGO_FILENAME"
 ```
 
-Restart after tests pass:
+The installer can write files and can call `systemctl` unless `--skip-systemctl` is specified. Treat deployment/restart as an approval-gated operational action.
 
-```bash
-sudo systemctl restart fs42stream.service
-```
+## Endpoints and playback verification
 
-If approval-gated tooling blocks `systemctl restart`, stop and request approval instead of using a workaround unless explicitly directed.
-
-## Health checks
-
-Core endpoints:
+Given public base `<public-base>` and channel slug `<slug>`, inspect both profiles independently:
 
 ```text
-http://192.168.10.139:8088/api/health
-http://192.168.10.139:8088/api/channels/Sky_One/status
-http://192.168.10.139:8088/api/channels/Sky_One/runtime
-http://192.168.10.139:8088/api/channels/Sky_One/events
+<public-base>/hls/<slug>/<slug>.m3u8
+<public-base>/hls/<slug>/jellyfin/<slug>.m3u8
 ```
 
-Direct playback:
+A healthy live service has fresh segments for both, advancing playlist tails, no `#EXT-X-ENDLIST`, and no persistent Jellyfin discontinuities. API health is not a substitute for direct-source playback verification.
+
+The API/IPTV/XMLTV endpoints are:
 
 ```text
-http://192.168.10.139:8088/hls/Sky_One/Sky_One.m3u8
+/api/health
+/api/channels
+/api/channels/<slug>/status
+/api/channels/<slug>/runtime
+/api/channels/<slug>/health
+/iptv/channels.m3u
+/iptv/jellyfin/channels.m3u
+/iptv/xmltv.xml
 ```
 
-Jellyfin playback:
+## HLS retention
 
-```text
-http://192.168.10.139:8088/hls/Sky_One/jellyfin/Sky_One.m3u8
-```
-
-IPTV/XMLTV:
-
-```text
-http://192.168.10.139:8088/iptv/channels.m3u
-http://192.168.10.139:8088/iptv/jellyfin/channels.m3u
-http://192.168.10.139:8088/iptv/xmltv.xml
-```
-
-## Storage retention and disk monitoring
-
-FS42-Stream has rolling HLS cleanup plus disk reporting to prevent another silent `No space left on device` failure.
-
-Cleanup CLI:
+Run the cleanup only with the configured output root and slug:
 
 ```bash
 python3 -m fs42stream.hls_retention \
-  --output-root /var/lib/fs42stream/hls \
-  --channel-slug Sky_One \
-  --max-age-seconds 21600 \
-  --max-segments-per-dir 7200 \
+  --output-root "$FS42STREAM_OUTPUT_ROOT" \
+  --channel-slug "$FS42STREAM_CHANNEL_SLUG" \
   --dry-run
 ```
 
-Retention behaviour:
+Cleanup preserves playlists, referenced live-window segments, the logo, and all non-HLS assets.
 
-- scans the direct channel directory and the `jellyfin/` subdirectory;
-- deletes only stale unreferenced `.ts` files;
-- preserves `.m3u8` playlists, playlist-referenced live-window segments, `skyone.png`, and all non-HLS assets;
-- rejects unsafe channel slugs and playlist traversal references.
-
-Production timer:
-
-```bash
-systemctl is-active fs42stream-hls-cleanup.timer
-systemctl list-timers --all fs42stream-hls-cleanup.timer --no-pager
-sudo systemctl start fs42stream-hls-cleanup.service
-```
-
-Disk reporting appears in:
-
-```text
-http://192.168.10.139:8088/api/health
-http://192.168.10.139:8088/api/channels/Sky_One/runtime
-http://192.168.10.139:8088/api/channels/Sky_One/health
-```
-
-The payload includes output-root path, bytes total/used/free, percentage used, thresholds, and state. Default thresholds are:
-
-```text
-warn:     80%
-degraded: 90%
-critical: 95%
-```
-
-## Direct/Jellyfin verification
-
-When checking playback, verify both profiles separately. API health alone is not enough.
-
-A healthy live state should show:
-
-- direct and Jellyfin ffmpeg processes on the same active block/media;
-- fresh segment mtimes for both profile directories;
-- playlist media sequence/tail advancing for both profiles;
-- no `#EXT-X-ENDLIST` in either playlist;
-- no persistent `#EXT-X-DISCONTINUITY` in Jellyfin;
-- no active `color=c=black` or `runtime/brb.png` process unless expected filler/slate is intentionally active.
-
-Quick playlist freshness check:
-
-```bash
-python3 - <<'PY'
-import re, time, urllib.request
-urls = [
-    ('direct', 'http://192.168.10.139:8088/hls/Sky_One/Sky_One.m3u8'),
-    ('jellyfin', 'http://192.168.10.139:8088/hls/Sky_One/jellyfin/Sky_One.m3u8'),
-]
-last = {}
-for i in range(3):
-    print('SAMPLE', i)
-    for label, url in urls:
-        text = urllib.request.urlopen(url, timeout=15).read().decode('utf-8', 'replace')
-        seq = re.search(r'#EXT-X-MEDIA-SEQUENCE:(\d+)', text)
-        segs = re.findall(r'([^\n]+\.ts)', text)
-        tail = int(re.search(r'_(\d+)\.ts$', segs[-1]).group(1)) if segs else None
-        print(label, 'seq', seq.group(1) if seq else None, 'tail', tail, 'delta', None if label not in last else tail - last[label], 'count', len(segs), 'endlist', '#EXT-X-ENDLIST' in text, 'discont', text.count('#EXT-X-DISCONTINUITY'))
-        if tail is not None:
-            last[label] = tail
-    time.sleep(4)
-PY
-```
-
-## Known failure modes and checks
-
-### Profile drift
-
-Symptom: direct continues while Jellyfin shows old frames or stops.
-
-Check process inputs and segment mtimes for both profile directories. The integrated runner now uses a shared schedule/block lifecycle to prevent silent direct/Jellyfin drift.
-
-### Pipe deadlock
-
-Symptom: Jellyfin ffmpeg is still running but playlist tail stops advancing.
-
-Check `/proc/<pid>/wchan`; if it is `pipe_write`, ffmpeg output is blocked. The live normalization path should write ffmpeg stdout/stderr to temp files rather than undrained pipes.
-
-### Black filler
-
-Symptom: both direct and Jellyfin decode but show black.
-
-Check whether ffmpeg is using `-f lavfi -i color=c=black`. If yes, determine whether this is expected boundary filler or a premature block completion/filler regression.
-
-### Stale schedule
-
-The service should prefer explicit placeholder/BRB behavior with degraded health when the upstream schedule is stale. It should not silently render the wrong old block indefinitely.
-
-## Test commands
-
-Targeted suites used for recent service work:
-
-```bash
-python3 -m unittest \
-  tests.test_api_server \
-  tests.test_run_block \
-  tests.test_live_controller \
-  tests.test_integrated_runner \
-  tests.test_systemd_service
-```
-
-Full suite:
+## Tests
 
 ```bash
 python3 -m unittest discover -s tests
 ```
+
+### Legacy fixture note
+
+Sky One naming may appear in explicitly named tests and historical prototype documentation only. It is not a required channel or runtime default.

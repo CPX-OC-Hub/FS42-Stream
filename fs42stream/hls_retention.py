@@ -12,7 +12,7 @@ from urllib.parse import unquote
 @dataclass(frozen=True)
 class HLSRetentionConfig:
     output_root: Path
-    channel_slug: str = "Sky_One"
+    channel_slug: str = "Example_Channel"
     max_age_seconds: float = 6 * 60 * 60
     max_segments_per_dir: int = 7200
     dry_run: bool = False
@@ -155,7 +155,7 @@ def _newest_segments(segments: Sequence[Path], *, limit: int) -> list[Path]:
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Prune stale FS42-Stream HLS segments while preserving active playlist windows.")
     parser.add_argument("--output-root", type=Path, default=Path("/var/lib/fs42stream/hls"))
-    parser.add_argument("--channel-slug", default="Sky_One")
+    parser.add_argument("--channel-slug", default="Example_Channel")
     parser.add_argument("--max-age-seconds", type=float, default=6 * 60 * 60)
     parser.add_argument("--max-segments-per-dir", type=int, default=7200)
     parser.add_argument("--dry-run", action="store_true")

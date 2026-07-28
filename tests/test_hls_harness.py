@@ -22,11 +22,18 @@ class HLSHarnessUnitTests(unittest.TestCase):
         clips = [Path("/tmp/fixtures/clip_00.mp4"), Path("/tmp/fixtures/clip_01.mp4")]
         schedule = fixture_schedule(clips, duration=0.75)
 
-        self.assertEqual(schedule["network_name"], "Sky One")
+        self.assertEqual(schedule["network_name"], "Example Channel")
         block = schedule["schedule_blocks"][0]
-        self.assertEqual(block["title"], "Sky One HLS Harness")
+        self.assertEqual(block["title"], "Example Channel HLS Harness")
         self.assertEqual([entry["realpath"] for entry in block["plan"]], [str(path) for path in clips])
         self.assertTrue(all(entry["is_stream"] is False for entry in block["plan"]))
+
+    def test_fixture_schedule_accepts_non_sky_channel_name(self):
+        clips = [Path("/tmp/fixtures/clip_00.mp4")]
+        schedule = fixture_schedule(clips, duration=0.75, channel_name="Retro Movies")
+
+        self.assertEqual(schedule["network_name"], "Retro Movies")
+        self.assertEqual(schedule["schedule_blocks"][0]["title"], "Retro Movies HLS Harness")
 
     def test_dry_run_returns_argv_and_does_not_execute_ffmpeg(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -81,7 +88,7 @@ class HLSHarnessIntegrationTests(unittest.TestCase):
                 builder=FFMpegHLSCommandBuilder("/usr/bin/ffmpeg"),
             )
             command = harness.run(schedule, output_dir=output_dir, dry_run=False)
-            inspection = inspect_hls_output(output_dir / "Sky_One_HLS_Harness.m3u8")
+            inspection = inspect_hls_output(output_dir / "Example_Channel_HLS_Harness.m3u8")
 
             self.assertEqual(command[0], "/usr/bin/ffmpeg")
             self.assertFalse(inspection.has_endlist)

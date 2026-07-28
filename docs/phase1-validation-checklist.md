@@ -1,12 +1,8 @@
 # FS42-Stream validation checklist
 
-Use this checklist after changes to the live HLS renderer, controller, API server, IPTV/XMLTV generation, or systemd service wiring.
+Use this checklist after changes to the live renderer, controller, API server, IPTV/XMLTV generation, or service wiring. It is installation-neutral: substitute values from the active environment file; do not use another installation's host, channel, media roots, or credentials.
 
-For the original phase-1 prototype-only harness notes, see `README-phase1-prototype.md`.
-
-## Automated tests
-
-Run the targeted suites used for current service work:
+## Automated verification
 
 ```bash
 python3 -m unittest \
@@ -15,180 +11,89 @@ python3 -m unittest \
   tests.test_live_controller \
   tests.test_integrated_runner \
   tests.test_systemd_service
-```
 
-Run the full suite before opening/merging broader changes:
-
-```bash
 python3 -m unittest discover -s tests
 ```
 
-Optional historical phase-1 harness:
+## Record the active configuration
 
-```bash
-python3 scripts/phase1_validate.py \
-  --work-dir /tmp/fs42-phase1-validation \
-  --evidence-json /tmp/fs42-phase1-validation-evidence.json
-```
-
-To include the live FieldStation42 schedule API gate:
-
-```bash
-python3 scripts/phase1_validate.py \
-  --live-schedule \
-  --api-timeout 10 \
-  --work-dir /tmp/fs42-phase1-validation \
-  --evidence-json /tmp/fs42-phase1-validation-evidence.json
-```
-
-## Production defaults to verify
+Before live verification, record the reviewed values of:
 
 ```text
-Source FS42 API: http://192.168.10.252:4242
-Stream host:     http://192.168.10.139:8088
-Channel:         Sky One
-Channel slug:    Sky_One
-Catalog root:    /mnt/fs42
-Media root:      /mnt/media/SDTV
-ffmpeg:          /usr/bin/ffmpeg
-ffprobe:         /usr/bin/ffprobe
-Service:         fs42stream.service
-Playout mode:    ts-primary
-Timezone:        Europe/London
+FS42STREAM_CHANNEL
+FS42STREAM_CHANNEL_SLUG
+FS42STREAM_SCHEDULE_SCHEME
+FS42STREAM_SCHEDULE_HOST
+FS42STREAM_SCHEDULE_PORT
+FS42STREAM_SCHEDULE_BASE_PATH
+FS42STREAM_API_BASE_URL
+FS42STREAM_PUBLIC_BASE_URL
+FS42STREAM_LOGO_FILENAME
+FS42STREAM_OUTPUT_ROOT
+FS42STREAM_SCHEDULE_TIMEZONE
+FS42STREAM_PLAYOUT_MODE
 ```
 
-## API and metadata checks
-
-Verify these endpoints return HTTP 200:
+For public base `<public-base>` and slug `<slug>`, check API and generated metadata:
 
 ```text
-http://192.168.10.139:8088/api/health
-http://192.168.10.139:8088/api/channels
-http://192.168.10.139:8088/api/channels/Sky_One/status
-http://192.168.10.139:8088/api/channels/Sky_One/schedule
-http://192.168.10.139:8088/api/channels/Sky_One/runtime
-http://192.168.10.139:8088/api/channels/Sky_One/events
-http://192.168.10.139:8088/iptv/channels.m3u
-http://192.168.10.139:8088/iptv/jellyfin/channels.m3u
-http://192.168.10.139:8088/iptv/xmltv.xml
-http://192.168.10.139:8088/hls/Sky_One/skyone.png
+<public-base>/api/health
+<public-base>/api/channels
+<public-base>/api/channels/<slug>/status
+<public-base>/api/channels/<slug>/runtime
+<public-base>/api/channels/<slug>/health
+<public-base>/iptv/channels.m3u
+<public-base>/iptv/jellyfin/channels.m3u
+<public-base>/iptv/xmltv.xml
 ```
 
-Metadata expectations:
+Confirm that M3U/XMLTV use the configured public base and logo location, never the schedule-source endpoint.
 
-- channel ID is stable: `fs42.sky_one`;
-- channel name is `Sky One`;
-- logo URL is local to the stream server: `http://192.168.10.139:8088/hls/Sky_One/skyone.png`;
-- IPTV M3U and XMLTV do not reference `192.168.10.252:8080/hls/skyone.png`;
-- XMLTV contains programme rows from the full upstream schedule when the schedule fetch succeeds.
+## Direct and Jellyfin playback checks
 
-## Live HLS checks
-
-Direct playlist:
+Verify both profiles independently:
 
 ```text
-http://192.168.10.139:8088/hls/Sky_One/Sky_One.m3u8
+<public-base>/hls/<slug>/<slug>.m3u8
+<public-base>/hls/<slug>/jellyfin/<slug>.m3u8
 ```
 
-Jellyfin playlist:
+Required properties:
 
-```text
-http://192.168.10.139:8088/hls/Sky_One/jellyfin/Sky_One.m3u8
-```
-
-Required live properties:
-
-- both playlists return HTTP 200;
-- neither playlist contains `#EXT-X-ENDLIST`;
+- both playlists return HTTP 200 and advance over repeated samples;
+- neither live playlist contains `#EXT-X-ENDLIST`;
 - Jellyfin has no persistent `#EXT-X-DISCONTINUITY`;
-- segment numbers are dense and increasing;
-- both direct and Jellyfin tails advance over repeated samples;
-- both profiles are on the same active block/media;
 - segment files exist and have fresh mtimes;
-- frames decode successfully from both endpoints.
+- both profiles represent the same active schedule block;
+- a frame decodes from both sources.
 
-Quick segment-tail sampler:
+Use this portable sampler by setting `PUBLIC_BASE_URL` and `CHANNEL_SLUG`:
 
 ```bash
+PUBLIC_BASE_URL="https://stream.example.net"
+CHANNEL_SLUG="Your_Channel"
 python3 - <<'PY'
-import re, time, urllib.request
-urls = [
-    ('direct', 'http://192.168.10.139:8088/hls/Sky_One/Sky_One.m3u8'),
-    ('jellyfin', 'http://192.168.10.139:8088/hls/Sky_One/jellyfin/Sky_One.m3u8'),
-]
+import os, re, time, urllib.request
+base = os.environ['PUBLIC_BASE_URL'].rstrip('/')
+slug = os.environ['CHANNEL_SLUG']
+urls = [('direct', f'{base}/hls/{slug}/{slug}.m3u8'), ('jellyfin', f'{base}/hls/{slug}/jellyfin/{slug}.m3u8')]
 last = {}
 for i in range(3):
     print('SAMPLE', i)
     for label, url in urls:
         text = urllib.request.urlopen(url, timeout=15).read().decode('utf-8', 'replace')
-        seq = re.search(r'#EXT-X-MEDIA-SEQUENCE:(\d+)', text)
-        segs = re.findall(r'([^\n]+\.ts)', text)
-        tail = int(re.search(r'_(\d+)\.ts$', segs[-1]).group(1)) if segs else None
-        print(label, 'seq', seq.group(1) if seq else None, 'tail', tail, 'delta', None if label not in last else tail - last[label], 'count', len(segs), 'endlist', '#EXT-X-ENDLIST' in text, 'discont', text.count('#EXT-X-DISCONTINUITY'))
-        if tail is not None:
-            last[label] = tail
+        segments = re.findall(r'([^\n]+\.ts)', text)
+        tail = int(re.search(r'_(\d+)\.ts$', segments[-1]).group(1)) if segments else None
+        print(label, 'tail', tail, 'endlist', '#EXT-X-ENDLIST' in text, 'discont', text.count('#EXT-X-DISCONTINUITY'))
+        last[label] = tail
     time.sleep(4)
 PY
 ```
 
-Quick frame decode:
+## Evidence and release gate
 
-```bash
-mkdir -p /tmp/fs42-verify
-ffmpeg -y -loglevel error \
-  -i 'http://192.168.10.139:8088/hls/Sky_One/Sky_One.m3u8' \
-  -frames:v 1 /tmp/fs42-verify/direct.jpg
-ffmpeg -y -loglevel error \
-  -i 'http://192.168.10.139:8088/hls/Sky_One/jellyfin/Sky_One.m3u8' \
-  -frames:v 1 /tmp/fs42-verify/jelly.jpg
-```
+For any later deployment, retain test output, reviewed configuration, status payloads, direct/Jellyfin playlist samples, and frame-decode evidence. Do not treat API health as a replacement for direct-source playback verification.
 
-## Process checks
+### Historical fixture note
 
-On the stream host:
-
-```bash
-systemctl is-active fs42stream.service
-systemctl show -p MainPID --value fs42stream.service
-ps -eo pid,ppid,stat,lstart,wchan,args | grep -E 'fs42stream|ffmpeg' | grep -v grep
-```
-
-Healthy process expectations:
-
-- one integrated runner process under `fs42stream.service`;
-- direct and Jellyfin ffmpeg child processes when active;
-- direct and Jellyfin child commands should reference the same current programme/item around the same wall-clock time;
-- no long-lived ffmpeg process stuck in `pipe_write`;
-- no active `color=c=black` or `runtime/brb.png` process unless boundary filler/slate is expected.
-
-## Schedule and path checks
-
-- `/api/channels/Sky_One/status` exposes the active block, current plan item, timeline, catch-up information, and recent events.
-- The active block should match the upstream FS42 schedule for `Europe/London` local time.
-- Plan item paths should resolve under `/mnt/fs42` or `/mnt/media/SDTV`.
-- The service must not depend on uppercase `/mnt/FS42`.
-- Known runtime/off-air image slate entries should be replaced with generated or configured video; normal media should still fail loudly if missing.
-
-## Boundary checks
-
-For renderer/controller changes, do not stop after immediate startup validation. Hold through at least one relevant boundary and confirm:
-
-- direct and Jellyfin stay on the same block lifecycle;
-- neither profile silently drifts to stale content;
-- both playlists keep advancing;
-- no `#EXT-X-ENDLIST` appears;
-- Jellyfin does not freeze at show-to-show transitions;
-- filler is only used intentionally and clears after the boundary.
-
-## Evidence to record
-
-For any claimed production fix, capture:
-
-- commit SHA and branch;
-- local and remote test output;
-- service PID/start timestamp after restart;
-- active block/status payload summary;
-- direct/Jellyfin playlist samples before and after the fix;
-- process table snippets showing current ffmpeg inputs;
-- frame decode success from both endpoints;
-- any GitHub issue/PR links.
+The phase-1 prototype documentation may contain Sky One fixture data. It is historical test evidence, not a runtime default or deployment instruction.

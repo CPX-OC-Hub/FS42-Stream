@@ -4,6 +4,7 @@ import argparse
 import json
 import mimetypes
 import posixpath
+import re
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 from dataclasses import dataclass, field
@@ -14,7 +15,7 @@ from typing import Any, Callable, Mapping, Sequence, cast
 from urllib.parse import quote, unquote, urlsplit
 from zoneinfo import ZoneInfo
 
-from .client import FS42ScheduleClient
+from .client import DEFAULT_SCHEDULE_BASE_PATH, DEFAULT_SCHEDULE_HOST, DEFAULT_SCHEDULE_PORT, DEFAULT_SCHEDULE_SCHEME, FS42ScheduleClient, build_schedule_api_base_url
 from .disk_monitor import DiskThresholds, disk_usage_report
 from .playout_engine import build_block_timeline, playout_snapshot
 
@@ -22,10 +23,10 @@ from .playout_engine import build_block_timeline, playout_snapshot
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8088
 DEFAULT_OUTPUT_ROOT = Path("/tmp/fs42stream-live")
-DEFAULT_CHANNEL_NAME = "Sky One"
-DEFAULT_CHANNEL_SLUG = "Sky_One"
-DEFAULT_CHANNEL_LOGO_URL = "http://192.168.10.139:8088/hls/Sky_One/skyone.png"
-DEFAULT_API_BASE_URL = "http://192.168.10.252:4242"
+DEFAULT_CHANNEL_NAME = "Example Channel"
+DEFAULT_CHANNEL_SLUG = "Example_Channel"
+DEFAULT_LOGO_FILENAME = "logo.png"
+DEFAULT_API_BASE_URL = "http://127.0.0.1:4242"
 DEFAULT_SCHEDULE_TIMEZONE = "Europe/London"
 
 ScheduleFetcher = Callable[[str], Mapping[str, Any]]
@@ -40,6 +41,10 @@ class APIServerConfig:
     schedule_fetcher: ScheduleFetcher | None = None
     schedule_timezone: str | None = DEFAULT_SCHEDULE_TIMEZONE
     disk_thresholds: DiskThresholds = field(default_factory=DiskThresholds)
+    channel_name: str = DEFAULT_CHANNEL_NAME
+    channel_slug: str = DEFAULT_CHANNEL_SLUG
+    public_base_url: str | None = None
+    logo_filename: str = DEFAULT_LOGO_FILENAME
 
 
 class FS42APIHTTPServer(ThreadingHTTPServer):
@@ -51,6 +56,12 @@ class FS42APIHTTPServer(ThreadingHTTPServer):
         self.config = config
         self.output_root = config.output_root.resolve(strict=False)
         self.status_json = (config.status_json or (config.output_root / "status.json")).resolve(strict=False)
+
+    def channel_metadata(self, *, request_base_url: str | None = None) -> dict[str, str]:
+        base_url = (self.config.public_base_url or request_base_url or "").rstrip("/")
+        logo_path = f"/hls/{quote(self.config.channel_slug, safe='')}/{quote(self.config.logo_filename, safe='')}"
+        logo_url = f"{base_url}{logo_path}" if base_url else logo_path
+        return _channel_metadata(channel_slug=self.config.channel_slug, name=self.config.channel_name, logo_url=logo_url)
 
 
 class FS42APIRequestHandler(BaseHTTPRequestHandler):
@@ -67,7 +78,7 @@ class FS42APIRequestHandler(BaseHTTPRequestHandler):
                 {
                     "status": "ok",
                     "service": "fs42stream-api",
-                    "channel": DEFAULT_CHANNEL_NAME,
+                    "channel": self._api_server().config.channel_name,
                     "output_root": str(self._api_server().output_root),
                     "disk": {"output_root": disk},
                 },
@@ -75,22 +86,22 @@ class FS42APIRequestHandler(BaseHTTPRequestHandler):
             return
 
         if request_path == "/api/channels":
-            channel = _channel_metadata()
+            channel = self._api_server().channel_metadata(request_base_url=self._request_base_url())
             self._send_json(
                 HTTPStatus.OK,
                 {
                     "channels": [
                         {
                             **channel,
-                            "status_url": f"/api/channels/{DEFAULT_CHANNEL_SLUG}/status",
-                            "schedule_url": f"/api/channels/{DEFAULT_CHANNEL_SLUG}/schedule",
-                            "runtime_url": f"/api/channels/{DEFAULT_CHANNEL_SLUG}/runtime",
-                            "health_url": f"/api/channels/{DEFAULT_CHANNEL_SLUG}/health",
-                            "events_url": f"/api/channels/{DEFAULT_CHANNEL_SLUG}/events",
-                            "epg_url": f"/api/channels/{DEFAULT_CHANNEL_SLUG}/epg",
-                            "hls_url": f"/hls/{DEFAULT_CHANNEL_SLUG}/",
-                            "hls_playlist_url": f"/hls/{DEFAULT_CHANNEL_SLUG}/{DEFAULT_CHANNEL_SLUG}.m3u8",
-                            "jellyfin_hls_playlist_url": f"/hls/{DEFAULT_CHANNEL_SLUG}/jellyfin/{DEFAULT_CHANNEL_SLUG}.m3u8",
+                            "status_url": f"/api/channels/{channel['slug']}/status",
+                            "schedule_url": f"/api/channels/{channel['slug']}/schedule",
+                            "runtime_url": f"/api/channels/{channel['slug']}/runtime",
+                            "health_url": f"/api/channels/{channel['slug']}/health",
+                            "events_url": f"/api/channels/{channel['slug']}/events",
+                            "epg_url": f"/api/channels/{channel['slug']}/epg",
+                            "hls_url": f"/hls/{channel['slug']}/",
+                            "hls_playlist_url": f"/hls/{channel['slug']}/{channel['slug']}.m3u8",
+                            "jellyfin_hls_playlist_url": f"/hls/{channel['slug']}/jellyfin/{channel['slug']}.m3u8",
                             "jellyfin_iptv_url": "/iptv/jellyfin/channels.m3u",
                         }
                     ]
@@ -186,7 +197,8 @@ class FS42APIRequestHandler(BaseHTTPRequestHandler):
         status_payload = self._read_status_payload()
         if status_payload is None:
             return
-        self._send_json(HTTPStatus.OK, _runtime_payload(status_payload, channel_slug=channel_slug, output_root=self._api_server().output_root, disk_thresholds=self._api_server().config.disk_thresholds))
+        channel = self._api_server().channel_metadata(request_base_url=self._request_base_url())
+        self._send_json(HTTPStatus.OK, _runtime_payload(status_payload, channel_slug=channel_slug, output_root=self._api_server().output_root, disk_thresholds=self._api_server().config.disk_thresholds, channel_name=channel["name"], logo_url=channel["logo_url"]))
 
     def _handle_channel_health(self, request_path: str) -> None:
         channel_slug = self._validated_channel_slug(request_path, expected_leaf="health")
@@ -195,7 +207,8 @@ class FS42APIRequestHandler(BaseHTTPRequestHandler):
         status_payload = self._read_status_payload()
         if status_payload is None:
             return
-        runtime = _runtime_payload(status_payload, channel_slug=channel_slug, output_root=self._api_server().output_root, disk_thresholds=self._api_server().config.disk_thresholds)
+        channel = self._api_server().channel_metadata(request_base_url=self._request_base_url())
+        runtime = _runtime_payload(status_payload, channel_slug=channel_slug, output_root=self._api_server().output_root, disk_thresholds=self._api_server().config.disk_thresholds, channel_name=channel["name"], logo_url=channel["logo_url"])
         self._send_json(HTTPStatus.OK, _health_payload(runtime))
 
     def _handle_channel_events(self, request_path: str) -> None:
@@ -206,7 +219,7 @@ class FS42APIRequestHandler(BaseHTTPRequestHandler):
         if status_payload is None:
             return
         events = _event_list(status_payload)[-10:]
-        self._send_json(HTTPStatus.OK, {"channel": _channel_metadata(channel_slug=channel_slug), "events": events})
+        self._send_json(HTTPStatus.OK, {"channel": self._api_server().channel_metadata(request_base_url=self._request_base_url()), "events": events})
 
     def _handle_channel_epg(self, request_path: str) -> None:
         channel_slug = self._validated_channel_slug(request_path, expected_leaf="epg")
@@ -215,13 +228,13 @@ class FS42APIRequestHandler(BaseHTTPRequestHandler):
         status_payload = self._read_status_payload()
         if status_payload is None:
             return
-        self._send_json(HTTPStatus.OK, _epg_payload(status_payload, channel_slug=channel_slug))
+        self._send_json(HTTPStatus.OK, _epg_payload(status_payload, channel=self._api_server().channel_metadata(request_base_url=self._request_base_url())))
 
     def _handle_iptv_channels_m3u(self, *, single_slug: str | None = None, stream_profile: str = "direct") -> None:
-        if single_slug is not None and single_slug != DEFAULT_CHANNEL_SLUG:
+        if single_slug is not None and single_slug != self._api_server().config.channel_slug:
             self._send_error(HTTPStatus.NOT_FOUND, "channel_not_found", f"unknown channel: {single_slug}")
             return
-        body = _m3u_payload(base_url=self._request_base_url(), stream_profile=stream_profile).encode("utf-8")
+        body = _m3u_payload(channel=self._api_server().channel_metadata(request_base_url=self._request_base_url()), base_url=self._api_server().config.public_base_url or self._request_base_url(), stream_profile=stream_profile).encode("utf-8")
         self._send_bytes(HTTPStatus.OK, body, "application/vnd.apple.mpegurl")
 
     def _handle_iptv_xmltv(self) -> None:
@@ -232,11 +245,12 @@ class FS42APIRequestHandler(BaseHTTPRequestHandler):
         schedule_fetcher = self._api_server().config.schedule_fetcher
         if schedule_fetcher is not None:
             try:
-                schedule_payload = schedule_fetcher(str(status_payload.get("channel") or DEFAULT_CHANNEL_NAME))
+                schedule_payload = schedule_fetcher(str(status_payload.get("channel") or self._api_server().config.channel_name))
             except Exception:
                 schedule_payload = None
         body = _xmltv_payload(
             status_payload,
+            channel=self._api_server().channel_metadata(request_base_url=self._request_base_url()),
             schedule_payload=schedule_payload,
             schedule_timezone=self._api_server().config.schedule_timezone,
         ).encode("utf-8")
@@ -255,7 +269,7 @@ class FS42APIRequestHandler(BaseHTTPRequestHandler):
             self._send_error(HTTPStatus.NOT_FOUND, "not_found", f"no route for {request_path}")
             return None
         channel_slug = unquote(parts[2])
-        if channel_slug != DEFAULT_CHANNEL_SLUG:
+        if channel_slug != self._api_server().config.channel_slug:
             self._send_error(HTTPStatus.NOT_FOUND, "channel_not_found", f"unknown channel: {channel_slug}")
             return None
         return channel_slug
@@ -279,8 +293,9 @@ class FS42APIRequestHandler(BaseHTTPRequestHandler):
         return payload
 
     def _handle_hls(self, request_path: str) -> None:
-        prefix = f"/hls/{DEFAULT_CHANNEL_SLUG}/"
-        if request_path == f"/hls/{DEFAULT_CHANNEL_SLUG}":
+        channel_slug = self._api_server().config.channel_slug
+        prefix = f"/hls/{channel_slug}/"
+        if request_path == f"/hls/{channel_slug}":
             self._send_error(HTTPStatus.BAD_REQUEST, "unsafe_hls_path", "HLS file path is required")
             return
         if not request_path.startswith(prefix):
@@ -294,7 +309,7 @@ class FS42APIRequestHandler(BaseHTTPRequestHandler):
             self._send_error(HTTPStatus.BAD_REQUEST, "unsafe_hls_path", "HLS path must stay under the channel output directory")
             return
 
-        channel_root = (self._api_server().output_root / DEFAULT_CHANNEL_SLUG).resolve(strict=False)
+        channel_root = (self._api_server().output_root / channel_slug).resolve(strict=False)
         candidate = (channel_root / safe_relative).resolve(strict=False)
         try:
             candidate.relative_to(channel_root)
@@ -356,8 +371,8 @@ def _safe_hls_relative_path(raw_relative: str) -> Path | None:
     return Path(*pure.parts)
 
 
-def _channel_metadata(*, channel_slug: str = DEFAULT_CHANNEL_SLUG, name: str = DEFAULT_CHANNEL_NAME) -> dict[str, str]:
-    return {"id": _channel_id(channel_slug), "slug": channel_slug, "name": name, "logo_url": DEFAULT_CHANNEL_LOGO_URL}
+def _channel_metadata(*, channel_slug: str, name: str, logo_url: str) -> dict[str, str]:
+    return {"id": _channel_id(channel_slug), "slug": channel_slug, "name": name, "logo_url": logo_url}
 
 
 def _channel_id(channel_slug: str) -> str:
@@ -366,9 +381,16 @@ def _channel_id(channel_slug: str) -> str:
     return f"fs42.{normalized}"
 
 
-def _runtime_payload(status_payload: Mapping[str, Any], *, channel_slug: str, output_root: Path, disk_thresholds: DiskThresholds | None = None) -> dict[str, Any]:
+def channel_slug_for_name(channel_name: str) -> str:
+    """Build the stable filesystem/URL slug used when no explicit slug is supplied."""
+    slug = re.sub(r"[^A-Za-z0-9]+", "_", channel_name.strip()).strip("_")
+    return slug or DEFAULT_CHANNEL_SLUG
+
+
+def _runtime_payload(status_payload: Mapping[str, Any], *, channel_slug: str, output_root: Path, disk_thresholds: DiskThresholds | None = None, channel_name: str = DEFAULT_CHANNEL_NAME, logo_url: str | None = None) -> dict[str, Any]:
     state = _state_contract_view(status_payload)
-    channel_name = str(status_payload.get("channel") or DEFAULT_CHANNEL_NAME)
+    channel_name = str(status_payload.get("channel") or channel_name)
+    channel = _channel_metadata(channel_slug=channel_slug, name=channel_name, logo_url=logo_url or f"/hls/{quote(channel_slug, safe='')}/{DEFAULT_LOGO_FILENAME}")
     schedule_now = state.get("schedule_now") or status_payload.get("updated_at")
     now_dt = _parse_iso_datetime(schedule_now)
     active_block = state.get("active_block") if isinstance(state.get("active_block"), Mapping) else None
@@ -392,7 +414,7 @@ def _runtime_payload(status_payload: Mapping[str, Any], *, channel_slug: str, ou
     )
     stale_schedule = status_payload.get("stale_schedule") if isinstance(status_payload.get("stale_schedule"), Mapping) else {}
     return {
-        "channel": _channel_metadata(channel_slug=channel_slug, name=channel_name),
+        "channel": channel,
         "service": {
             "status": status_payload.get("status"),
             "updated_at": status_payload.get("updated_at"),
@@ -583,8 +605,9 @@ def _disk_check_state(state: str) -> str:
     return "error"
 
 
-def _epg_payload(status_payload: Mapping[str, Any], *, channel_slug: str = DEFAULT_CHANNEL_SLUG) -> dict[str, Any]:
-    channel = _channel_metadata(channel_slug=channel_slug, name=str(status_payload.get("channel") or DEFAULT_CHANNEL_NAME))
+def _epg_payload(status_payload: Mapping[str, Any], *, channel: Mapping[str, str] | None = None) -> dict[str, Any]:
+    channel = dict(channel or _channel_metadata(channel_slug=DEFAULT_CHANNEL_SLUG, name=DEFAULT_CHANNEL_NAME, logo_url=f"/hls/{DEFAULT_CHANNEL_SLUG}/{DEFAULT_LOGO_FILENAME}"))
+    channel["name"] = str(status_payload.get("channel") or channel["name"])
     return {"channel": channel, "programmes": _programme_rows(status_payload, channel_id=channel["id"])}
 
 
@@ -613,8 +636,8 @@ def _programme_rows(status_payload: Mapping[str, Any], *, channel_id: str) -> li
     return rows
 
 
-def _m3u_payload(*, base_url: str, stream_profile: str = "direct") -> str:
-    channel = _channel_metadata()
+def _m3u_payload(*, channel: Mapping[str, str] | None = None, base_url: str, stream_profile: str = "direct") -> str:
+    channel = channel or _channel_metadata(channel_slug=DEFAULT_CHANNEL_SLUG, name=DEFAULT_CHANNEL_NAME, logo_url=f"{base_url.rstrip('/')}/hls/{DEFAULT_CHANNEL_SLUG}/{DEFAULT_LOGO_FILENAME}")
     display_name = channel["name"]
     if stream_profile == "jellyfin":
         display_name = f"{channel['name']} (Jellyfin)"
@@ -632,10 +655,12 @@ def _m3u_payload(*, base_url: str, stream_profile: str = "direct") -> str:
 def _xmltv_payload(
     status_payload: Mapping[str, Any],
     *,
+    channel: Mapping[str, str] | None = None,
     schedule_payload: Mapping[str, Any] | None = None,
     schedule_timezone: str | None = DEFAULT_SCHEDULE_TIMEZONE,
 ) -> str:
-    channel = _channel_metadata(name=str(status_payload.get("channel") or DEFAULT_CHANNEL_NAME))
+    channel = dict(channel or _channel_metadata(channel_slug=DEFAULT_CHANNEL_SLUG, name=DEFAULT_CHANNEL_NAME, logo_url=f"/hls/{DEFAULT_CHANNEL_SLUG}/{DEFAULT_LOGO_FILENAME}"))
+    channel["name"] = str(status_payload.get("channel") or channel["name"])
     tv = ET.Element("tv", {"generator-info-name": "fs42stream"})
     channel_element = ET.SubElement(tv, "channel", {"id": channel["id"]})
     ET.SubElement(channel_element, "display-name").text = channel["name"]
@@ -916,6 +941,10 @@ def create_server(
     api_base_url: str | None = None,
     schedule_timezone: str | None = DEFAULT_SCHEDULE_TIMEZONE,
     disk_thresholds: DiskThresholds | None = None,
+    channel_name: str = DEFAULT_CHANNEL_NAME,
+    channel_slug: str | None = None,
+    public_base_url: str | None = None,
+    logo_filename: str = DEFAULT_LOGO_FILENAME,
 ) -> FS42APIHTTPServer:
     output_root_path = Path(output_root)
     status_json_path = Path(status_json) if status_json is not None else None
@@ -930,6 +959,10 @@ def create_server(
         schedule_fetcher=schedule_fetcher,
         schedule_timezone=schedule_timezone,
         disk_thresholds=disk_thresholds or DiskThresholds(),
+        channel_name=channel_name,
+        channel_slug=channel_slug or channel_slug_for_name(channel_name),
+        public_base_url=public_base_url,
+        logo_filename=logo_filename,
     )
     output_root_path.mkdir(parents=True, exist_ok=True)
     return FS42APIHTTPServer((host, port), FS42APIRequestHandler, config)
@@ -941,7 +974,15 @@ def main(argv: Sequence[str] | None = None, *, server_factory: Callable[..., FS4
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
     parser.add_argument("--output-root", type=Path, default=DEFAULT_OUTPUT_ROOT)
     parser.add_argument("--status-json", type=Path, default=None)
-    parser.add_argument("--api-base-url", default=DEFAULT_API_BASE_URL)
+    parser.add_argument("--schedule-scheme", default=DEFAULT_SCHEDULE_SCHEME)
+    parser.add_argument("--schedule-host", default=DEFAULT_SCHEDULE_HOST)
+    parser.add_argument("--schedule-port", type=int, default=DEFAULT_SCHEDULE_PORT)
+    parser.add_argument("--schedule-base-path", default=DEFAULT_SCHEDULE_BASE_PATH)
+    parser.add_argument("--api-base-url", default="", help="deprecated full schedule API URL override; prefer --schedule-* options")
+    parser.add_argument("--channel", default=DEFAULT_CHANNEL_NAME)
+    parser.add_argument("--channel-slug", default=None)
+    parser.add_argument("--public-base-url", default=None, help="public base URL for IPTV/XMLTV metadata; defaults to the request Host")
+    parser.add_argument("--logo-filename", default=DEFAULT_LOGO_FILENAME)
     parser.add_argument("--schedule-timezone", default=DEFAULT_SCHEDULE_TIMEZONE)
     parser.add_argument("--disk-warn-percent", type=float, default=80.0)
     parser.add_argument("--disk-degraded-percent", type=float, default=90.0)
@@ -953,9 +994,13 @@ def main(argv: Sequence[str] | None = None, *, server_factory: Callable[..., FS4
         port=args.port,
         output_root=args.output_root,
         status_json=args.status_json,
-        api_base_url=args.api_base_url,
+        api_base_url=args.api_base_url or build_schedule_api_base_url(scheme=args.schedule_scheme, host=args.schedule_host, port=args.schedule_port, base_path=args.schedule_base_path),
         schedule_timezone=args.schedule_timezone,
         disk_thresholds=DiskThresholds(args.disk_warn_percent, args.disk_degraded_percent, args.disk_critical_percent),
+        channel_name=args.channel,
+        channel_slug=args.channel_slug,
+        public_base_url=args.public_base_url,
+        logo_filename=args.logo_filename,
     )
     try:
         server.serve_forever()

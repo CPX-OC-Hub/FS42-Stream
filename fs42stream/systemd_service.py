@@ -4,14 +4,17 @@ import shlex
 from dataclasses import dataclass
 from pathlib import Path
 
+from .client import DEFAULT_SCHEDULE_BASE_PATH, DEFAULT_SCHEDULE_HOST, DEFAULT_SCHEDULE_PORT, DEFAULT_SCHEDULE_SCHEME
+
 
 @dataclass(frozen=True)
 class ServiceConfig:
     service_name: str = "fs42stream"
-    user: str = "hermes-admin"
+    user: str = "fs42stream"
     install_dir: Path = Path("/opt/fs42stream")
     env_file: Path = Path("/etc/fs42stream/fs42stream.env")
-    channel: str = "Sky One"
+    channel: str = "Example Channel"
+    channel_slug: str = "Example_Channel"
     host: str = "0.0.0.0"
     port: int = 8088
     output_root: Path = Path("/var/lib/fs42stream/hls")
@@ -21,11 +24,19 @@ class ServiceConfig:
     vaapi_device: str = "/dev/dri/renderD128"
     schedule_timezone: str = "Europe/London"
     playout_mode: str = "ts-primary"
+    schedule_scheme: str = DEFAULT_SCHEDULE_SCHEME
+    schedule_host: str = DEFAULT_SCHEDULE_HOST
+    schedule_port: int = DEFAULT_SCHEDULE_PORT
+    schedule_base_path: str = DEFAULT_SCHEDULE_BASE_PATH
+    api_base_url: str = ""
+    public_base_url: str = ""
+    logo_filename: str = "logo.png"
 
 
 def render_environment_file(config: ServiceConfig) -> str:
     values = {
         "FS42STREAM_CHANNEL": config.channel,
+        "FS42STREAM_CHANNEL_SLUG": config.channel_slug,
         "FS42STREAM_HOST": config.host,
         "FS42STREAM_PORT": str(config.port),
         "FS42STREAM_OUTPUT_ROOT": str(config.output_root),
@@ -35,6 +46,13 @@ def render_environment_file(config: ServiceConfig) -> str:
         "FS42STREAM_VAAPI_DEVICE": config.vaapi_device,
         "FS42STREAM_SCHEDULE_TIMEZONE": config.schedule_timezone,
         "FS42STREAM_PLAYOUT_MODE": config.playout_mode,
+        "FS42STREAM_SCHEDULE_SCHEME": config.schedule_scheme,
+        "FS42STREAM_SCHEDULE_HOST": config.schedule_host,
+        "FS42STREAM_SCHEDULE_PORT": str(config.schedule_port),
+        "FS42STREAM_SCHEDULE_BASE_PATH": config.schedule_base_path,
+        "FS42STREAM_API_BASE_URL": config.api_base_url,
+        "FS42STREAM_PUBLIC_BASE_URL": config.public_base_url,
+        "FS42STREAM_LOGO_FILENAME": config.logo_filename,
     }
     lines = ["# Managed by FS42-Stream installer", "# Edit values here, then run: sudo systemctl restart fs42stream", ""]
     lines.extend(f'{key}="{_escape_env(value)}"' for key, value in values.items())
@@ -53,7 +71,7 @@ Type=simple
 User={config.user}
 WorkingDirectory={config.install_dir}
 EnvironmentFile={config.env_file}
-ExecStart={python} -m fs42stream.integrated_runner --channel "${{FS42STREAM_CHANNEL}}" --host ${{FS42STREAM_HOST}} --port ${{FS42STREAM_PORT}} --output-root ${{FS42STREAM_OUTPUT_ROOT}} --max-blocks ${{FS42STREAM_MAX_BLOCKS}} --duration-limit ${{FS42STREAM_DURATION_LIMIT}} --video-encoder ${{FS42STREAM_VIDEO_ENCODER}} --vaapi-device ${{FS42STREAM_VAAPI_DEVICE}} --schedule-timezone ${{FS42STREAM_SCHEDULE_TIMEZONE}} --playout-mode ${{FS42STREAM_PLAYOUT_MODE}}
+ExecStart={python} -m fs42stream.integrated_runner --channel "${{FS42STREAM_CHANNEL}}" --channel-slug ${{FS42STREAM_CHANNEL_SLUG}} --host ${{FS42STREAM_HOST}} --port ${{FS42STREAM_PORT}} --output-root ${{FS42STREAM_OUTPUT_ROOT}} --max-blocks ${{FS42STREAM_MAX_BLOCKS}} --duration-limit ${{FS42STREAM_DURATION_LIMIT}} --schedule-scheme ${{FS42STREAM_SCHEDULE_SCHEME}} --schedule-host ${{FS42STREAM_SCHEDULE_HOST}} --schedule-port ${{FS42STREAM_SCHEDULE_PORT}} --schedule-base-path "${{FS42STREAM_SCHEDULE_BASE_PATH}}" --api-base-url "${{FS42STREAM_API_BASE_URL}}" --public-base-url "${{FS42STREAM_PUBLIC_BASE_URL}}" --logo-filename ${{FS42STREAM_LOGO_FILENAME}} --video-encoder ${{FS42STREAM_VIDEO_ENCODER}} --vaapi-device ${{FS42STREAM_VAAPI_DEVICE}} --schedule-timezone ${{FS42STREAM_SCHEDULE_TIMEZONE}} --playout-mode ${{FS42STREAM_PLAYOUT_MODE}}
 Restart=on-failure
 RestartSec=5
 KillSignal=SIGTERM
@@ -75,7 +93,7 @@ Type=oneshot
 User={config.user}
 WorkingDirectory={config.install_dir}
 EnvironmentFile={config.env_file}
-ExecStart={python} -m fs42stream.hls_retention --output-root ${{FS42STREAM_OUTPUT_ROOT}} --channel-slug Sky_One
+ExecStart={python} -m fs42stream.hls_retention --output-root ${{FS42STREAM_OUTPUT_ROOT}} --channel-slug ${{FS42STREAM_CHANNEL_SLUG}}
 """
 
 

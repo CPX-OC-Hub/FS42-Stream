@@ -15,11 +15,12 @@ from fs42stream.systemd_service import ServiceConfig, render_environment_file, r
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Install the FS42-Stream systemd service files.")
     parser.add_argument("--service-name", default="fs42stream")
-    parser.add_argument("--user", default="hermes-admin")
+    parser.add_argument("--user", default="fs42stream")
     parser.add_argument("--install-dir", type=Path, default=Path("/opt/fs42stream"))
     parser.add_argument("--env-file", type=Path, default=Path("/etc/fs42stream/fs42stream.env"))
     parser.add_argument("--unit-file", type=Path, default=Path("/etc/systemd/system/fs42stream.service"))
-    parser.add_argument("--channel", default="Sky One")
+    parser.add_argument("--channel", default="Example Channel")
+    parser.add_argument("--channel-slug", default="Example_Channel")
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8088)
     parser.add_argument("--output-root", type=Path, default=Path("/var/lib/fs42stream/hls"))
@@ -29,6 +30,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--vaapi-device", default="/dev/dri/renderD128")
     parser.add_argument("--schedule-timezone", default="Europe/London")
     parser.add_argument("--playout-mode", choices=("hls-primary", "ts-primary"), default="ts-primary")
+    parser.add_argument("--schedule-scheme", default="http")
+    parser.add_argument("--schedule-host", default="127.0.0.1")
+    parser.add_argument("--schedule-port", type=int, default=4242)
+    parser.add_argument("--schedule-base-path", default="")
+    parser.add_argument("--api-base-url", default="", help="deprecated full schedule API URL override; prefer split schedule variables")
+    parser.add_argument("--public-base-url", default="")
+    parser.add_argument("--logo-filename", default="logo.png")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--skip-systemctl", action="store_true", help="write files but do not run systemctl daemon-reload/enable/restart")
     args = parser.parse_args(argv)
@@ -39,6 +47,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         install_dir=args.install_dir,
         env_file=args.env_file,
         channel=args.channel,
+        channel_slug=args.channel_slug,
         host=args.host,
         port=args.port,
         output_root=args.output_root,
@@ -48,6 +57,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         vaapi_device=args.vaapi_device,
         schedule_timezone=args.schedule_timezone,
         playout_mode=args.playout_mode,
+        schedule_scheme=args.schedule_scheme,
+        schedule_host=args.schedule_host,
+        schedule_port=args.schedule_port,
+        schedule_base_path=args.schedule_base_path,
+        api_base_url=args.api_base_url,
+        public_base_url=args.public_base_url,
+        logo_filename=args.logo_filename,
     )
     env_text = render_environment_file(config)
     unit_text = render_unit_file(config)

@@ -8,10 +8,27 @@ from pathlib import Path
 
 from fs42stream.api_server import create_server, main
 
+SKY_ONE_TEST_CHANNEL = "Sky One"
+SKY_ONE_TEST_SLUG = "Sky_One"
+SKY_ONE_TEST_LOGO = "skyone.png"
+
 
 class APIServerTests(unittest.TestCase):
-    def _start_server(self, output_root, status_json=None, schedule_fetcher=None):
-        server = create_server(host="127.0.0.1", port=0, output_root=output_root, status_json=status_json, schedule_fetcher=schedule_fetcher)
+    def _start_server(self, output_root, status_json=None, schedule_fetcher=None, **kwargs):
+        options = {
+            "channel_name": SKY_ONE_TEST_CHANNEL,
+            "channel_slug": SKY_ONE_TEST_SLUG,
+            "logo_filename": SKY_ONE_TEST_LOGO,
+            **kwargs,
+        }
+        server = create_server(
+            host="127.0.0.1",
+            port=0,
+            output_root=output_root,
+            status_json=status_json,
+            schedule_fetcher=schedule_fetcher,
+            **options,
+        )
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         self.addCleanup(server.server_close)
@@ -49,7 +66,33 @@ class APIServerTests(unittest.TestCase):
             self.assertEqual(payload["channels"][0]["hls_url"], "/hls/Sky_One/")
             self.assertEqual(payload["channels"][0]["jellyfin_hls_playlist_url"], "/hls/Sky_One/jellyfin/Sky_One.m3u8")
             self.assertEqual(payload["channels"][0]["jellyfin_iptv_url"], "/iptv/jellyfin/channels.m3u")
-            self.assertEqual(payload["channels"][0]["logo_url"], "http://192.168.10.139:8088/hls/Sky_One/skyone.png")
+            self.assertEqual(payload["channels"][0]["logo_url"], f"http://127.0.0.1:{server.server_address[1]}/hls/Sky_One/skyone.png")
+
+    def test_channel_metadata_and_iptv_urls_use_configured_non_sky_channel(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            server = self._start_server(
+                root,
+                channel_name="Retro Movies",
+                channel_slug="Retro_Movies",
+                public_base_url="https://stream.example.test",
+                logo_filename="retro-movies.png",
+            )
+
+            status, _headers, body = self._request(server, "/api/channels")
+            self.assertEqual(status, 200)
+            channel = json.loads(body)["channels"][0]
+            self.assertEqual(channel["name"], "Retro Movies")
+            self.assertEqual(channel["slug"], "Retro_Movies")
+            self.assertEqual(channel["logo_url"], "https://stream.example.test/hls/Retro_Movies/retro-movies.png")
+            self.assertEqual(channel["hls_playlist_url"], "/hls/Retro_Movies/Retro_Movies.m3u8")
+
+            status, _headers, body = self._request(server, "/iptv/channels.m3u")
+            self.assertEqual(status, 200)
+            m3u = body.decode("utf-8")
+            self.assertIn('tvg-name="Retro Movies"', m3u)
+            self.assertIn('tvg-logo="https://stream.example.test/hls/Retro_Movies/retro-movies.png"', m3u)
+            self.assertIn("https://stream.example.test/hls/Retro_Movies/Retro_Movies.m3u8", m3u)
 
     def test_channel_status_exposes_latest_status_json_when_present(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -373,7 +416,7 @@ class APIServerTests(unittest.TestCase):
             self.assertEqual(status, 200)
             self.assertEqual(headers["content-type"], "application/json")
             payload = json.loads(body)
-            self.assertEqual(payload["channel"], {"id": "fs42.sky_one", "slug": "Sky_One", "name": "Sky One", "logo_url": "http://192.168.10.139:8088/hls/Sky_One/skyone.png"})
+            self.assertEqual(payload["channel"], {"id": "fs42.sky_one", "slug": "Sky_One", "name": "Sky One", "logo_url": f"http://127.0.0.1:{server.server_address[1]}/hls/Sky_One/skyone.png"})
             self.assertEqual(payload["block"]["current"]["title"], "Star Trek The Next Generation")
             self.assertEqual(payload["block"]["current"]["seconds_remaining"], 3085.0)
             self.assertEqual(payload["block"]["next"]["title"], "The Simpsons")
@@ -644,7 +687,7 @@ class APIServerTests(unittest.TestCase):
             self.assertEqual(status, 200)
             self.assertEqual(headers["content-type"], "application/vnd.apple.mpegurl")
             m3u = body.decode("utf-8")
-            self.assertIn('#EXTINF:-1 tvg-id="fs42.sky_one" tvg-name="Sky One" tvg-logo="http://192.168.10.139:8088/hls/Sky_One/skyone.png" group-title="FS42",Sky One', m3u)
+            self.assertIn(f'#EXTINF:-1 tvg-id="fs42.sky_one" tvg-name="Sky One" tvg-logo="http://127.0.0.1:{port}/hls/Sky_One/skyone.png" group-title="FS42",Sky One', m3u)
             self.assertIn(f"http://127.0.0.1:{port}/hls/Sky_One/Sky_One.m3u8", m3u)
 
             status, headers, body = self._request(server, "/iptv/xmltv.xml")
@@ -654,7 +697,7 @@ class APIServerTests(unittest.TestCase):
             channel = root_xml.find("channel")
             self.assertIsNotNone(channel)
             self.assertEqual(channel.attrib["id"], "fs42.sky_one")
-            self.assertEqual(channel.find("icon").attrib["src"], "http://192.168.10.139:8088/hls/Sky_One/skyone.png")
+            self.assertEqual(channel.find("icon").attrib["src"], f"http://127.0.0.1:{port}/hls/Sky_One/skyone.png")
             programmes = root_xml.findall("programme")
             self.assertEqual([programme.attrib["channel"] for programme in programmes], ["fs42.sky_one", "fs42.sky_one"])
             self.assertEqual(programmes[0].findtext("title"), "Show A")
@@ -664,7 +707,7 @@ class APIServerTests(unittest.TestCase):
             self.assertEqual(status, 200)
             self.assertEqual(headers["content-type"], "application/vnd.apple.mpegurl")
             jellyfin_m3u = body.decode("utf-8")
-            self.assertIn('#EXTINF:-1 tvg-id="fs42.sky_one" tvg-name="Sky One (Jellyfin)" tvg-logo="http://192.168.10.139:8088/hls/Sky_One/skyone.png" group-title="FS42",Sky One (Jellyfin)', jellyfin_m3u)
+            self.assertIn(f'#EXTINF:-1 tvg-id="fs42.sky_one" tvg-name="Sky One (Jellyfin)" tvg-logo="http://127.0.0.1:{port}/hls/Sky_One/skyone.png" group-title="FS42",Sky One (Jellyfin)', jellyfin_m3u)
             self.assertIn(f"http://127.0.0.1:{port}/hls/Sky_One/jellyfin/Sky_One.m3u8", jellyfin_m3u)
 
             status, headers, body = self._request(server, "/api/channels/Sky_One/epg")

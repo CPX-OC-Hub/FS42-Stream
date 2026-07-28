@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol, Sequence
 
-from .client import FS42ScheduleClient
+from .client import DEFAULT_SCHEDULE_BASE_PATH, DEFAULT_SCHEDULE_HOST, DEFAULT_SCHEDULE_PORT, DEFAULT_SCHEDULE_SCHEME, FS42ScheduleClient, build_schedule_api_base_url
 from .ffmpeg import FFMpegHLSCommandBuilder, PlayoutMode, StreamProfile, hls_list_size_for_profile
 from .ffprobe import FFProbe
 from .paths import PathResolver
@@ -797,7 +797,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--output-root", type=Path, default=Path("/tmp/fs42stream-live"))
     parser.add_argument("--max-blocks", type=int, default=2)
     parser.add_argument("--duration-limit", type=float, default=10.0)
-    parser.add_argument("--api-base-url", default=DEFAULT_API_BASE_URL)
+    parser.add_argument("--schedule-scheme", default=DEFAULT_SCHEDULE_SCHEME)
+    parser.add_argument("--schedule-host", default=DEFAULT_SCHEDULE_HOST)
+    parser.add_argument("--schedule-port", type=int, default=DEFAULT_SCHEDULE_PORT)
+    parser.add_argument("--schedule-base-path", default=DEFAULT_SCHEDULE_BASE_PATH)
+    parser.add_argument("--api-base-url", default="", help="deprecated full schedule API URL override; prefer --schedule-* options")
     parser.add_argument("--fs42-root", type=Path, default=Path(DEFAULT_FS42_ROOT))
     parser.add_argument("--sdtv-root", type=Path, default=Path(DEFAULT_SDTV_ROOT))
     parser.add_argument("--ffmpeg", default=DEFAULT_FFMPEG)
@@ -816,9 +820,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--hls-retention-max-segments-per-dir", type=int, default=7200, help="maximum HLS .ts segments to keep in each direct/Jellyfin channel directory")
     args = parser.parse_args(argv)
 
-    schedule_client = FS42ScheduleClient(args.api_base_url, timeout=args.timeout)
+    schedule_api_url = args.api_base_url or build_schedule_api_base_url(scheme=args.schedule_scheme, host=args.schedule_host, port=args.schedule_port, base_path=args.schedule_base_path)
+    schedule_client = FS42ScheduleClient(schedule_api_url, timeout=args.timeout)
     block_runner = BlockRunner(
-        client=FS42ScheduleClient(args.api_base_url, timeout=args.timeout),
+        client=FS42ScheduleClient(schedule_api_url, timeout=args.timeout),
         planner=BlockPlanner(PathResolver(fs42_root=args.fs42_root, sdtv_root=args.sdtv_root), FFProbe(args.ffprobe), fallback_slate_video=args.fallback_slate_video),
         builder=FFMpegHLSCommandBuilder(args.ffmpeg, video_encoder=args.video_encoder, vaapi_device=args.vaapi_device),
     )

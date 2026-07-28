@@ -12,7 +12,16 @@ from fs42stream.disk_monitor import DiskThresholds, DiskUsage
 
 class DiskMonitoringAPITests(unittest.TestCase):
     def _start_server(self, output_root, status_json=None):
-        server = create_server(host="127.0.0.1", port=0, output_root=output_root, status_json=status_json)
+        # Legacy Sky One fixture: production configuration is channel-agnostic.
+        server = create_server(
+            host="127.0.0.1",
+            port=0,
+            output_root=output_root,
+            status_json=status_json,
+            channel_name="Sky One",
+            channel_slug="Sky_One",
+            logo_filename="skyone.png",
+        )
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         self.addCleanup(server.server_close)

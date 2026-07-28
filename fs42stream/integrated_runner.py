@@ -9,8 +9,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol, Sequence, cast
 
-from .api_server import DEFAULT_HOST, DEFAULT_OUTPUT_ROOT, DEFAULT_PORT, create_server
-from .client import FS42ScheduleClient
+from .api_server import DEFAULT_HOST, DEFAULT_LOGO_FILENAME, DEFAULT_OUTPUT_ROOT, DEFAULT_PORT, channel_slug_for_name, create_server
+from .client import DEFAULT_SCHEDULE_BASE_PATH, DEFAULT_SCHEDULE_HOST, DEFAULT_SCHEDULE_PORT, DEFAULT_SCHEDULE_SCHEME, FS42ScheduleClient, build_schedule_api_base_url
 from .ffmpeg import FFMpegHLSCommandBuilder, PlayoutMode, StreamProfile
 from .ffprobe import FFProbe
 from .live_controller import LiveController, LiveControllerConfig, SharedScheduleBlockClock
@@ -33,7 +33,14 @@ class IntegratedRunnerConfig:
     max_blocks: int = DEFAULT_MAX_BLOCKS
     duration_limit: float = DEFAULT_DURATION_LIMIT
     dry_run: bool = False
-    api_base_url: str = DEFAULT_API_BASE_URL
+    schedule_scheme: str = DEFAULT_SCHEDULE_SCHEME
+    schedule_host: str = DEFAULT_SCHEDULE_HOST
+    schedule_port: int = DEFAULT_SCHEDULE_PORT
+    schedule_base_path: str = DEFAULT_SCHEDULE_BASE_PATH
+    api_base_url: str = ""
+    channel_slug: str | None = None
+    public_base_url: str | None = None
+    logo_filename: str = DEFAULT_LOGO_FILENAME
     fs42_root: Path = Path(DEFAULT_FS42_ROOT)
     sdtv_root: Path = Path(DEFAULT_SDTV_ROOT)
     ffmpeg: str = DEFAULT_FFMPEG
@@ -101,12 +108,17 @@ def run_integrated(
         },
     )
 
+    channel_slug = config.channel_slug or channel_slug_for_name(config.channel)
     server = server_factory(
         host=config.host,
         port=config.port,
         output_root=output_root,
         status_json=status_json,
-        api_base_url=config.api_base_url,
+        api_base_url=_schedule_api_url(config),
+        channel_name=config.channel,
+        channel_slug=channel_slug,
+        public_base_url=config.public_base_url,
+        logo_filename=config.logo_filename,
         schedule_timezone=config.schedule_timezone,
     )
     thread = threading.Thread(target=server.serve_forever, name="fs42stream-api", daemon=True)
@@ -121,7 +133,7 @@ def run_integrated(
         "api_host": actual_host,
         "api_port": actual_port,
         "api_base_url": f"http://{actual_host}:{actual_port}",
-        **_api_urls(actual_host, actual_port),
+        **_api_urls(actual_host, actual_port, channel_slug=channel_slug),
         "max_blocks": config.max_blocks,
         "blocks_completed": 0,
         "duration_limit": config.duration_limit,
@@ -216,7 +228,14 @@ def main(
     parser.add_argument("--output-root", type=Path, default=DEFAULT_OUTPUT_ROOT)
     parser.add_argument("--max-blocks", type=int, default=DEFAULT_MAX_BLOCKS)
     parser.add_argument("--duration-limit", type=float, default=DEFAULT_DURATION_LIMIT)
-    parser.add_argument("--api-base-url", default=DEFAULT_API_BASE_URL)
+    parser.add_argument("--schedule-scheme", default=DEFAULT_SCHEDULE_SCHEME)
+    parser.add_argument("--schedule-host", default=DEFAULT_SCHEDULE_HOST)
+    parser.add_argument("--schedule-port", type=int, default=DEFAULT_SCHEDULE_PORT)
+    parser.add_argument("--schedule-base-path", default=DEFAULT_SCHEDULE_BASE_PATH)
+    parser.add_argument("--api-base-url", default="", help="deprecated full schedule API URL override; prefer --schedule-* options")
+    parser.add_argument("--channel-slug", default=None)
+    parser.add_argument("--public-base-url", default=None, help="public base URL for IPTV/XMLTV metadata; defaults to the request Host")
+    parser.add_argument("--logo-filename", default=DEFAULT_LOGO_FILENAME)
     parser.add_argument("--fs42-root", type=Path, default=Path(DEFAULT_FS42_ROOT))
     parser.add_argument("--sdtv-root", type=Path, default=Path(DEFAULT_SDTV_ROOT))
     parser.add_argument("--ffmpeg", default=DEFAULT_FFMPEG)
@@ -236,7 +255,14 @@ def main(
         max_blocks=args.max_blocks,
         duration_limit=args.duration_limit,
         dry_run=args.dry_run,
+        schedule_scheme=args.schedule_scheme,
+        schedule_host=args.schedule_host,
+        schedule_port=args.schedule_port,
+        schedule_base_path=args.schedule_base_path,
         api_base_url=args.api_base_url,
+        channel_slug=args.channel_slug,
+        public_base_url=args.public_base_url,
+        logo_filename=args.logo_filename,
         fs42_root=args.fs42_root,
         sdtv_root=args.sdtv_root,
         ffmpeg=args.ffmpeg,
@@ -259,9 +285,10 @@ def main(
 
 
 def _create_controller(config: IntegratedRunnerConfig) -> LiveController:
-    schedule_client = FS42ScheduleClient(config.api_base_url)
+    schedule_api_url = _schedule_api_url(config)
+    schedule_client = FS42ScheduleClient(schedule_api_url)
     block_runner = BlockRunner(
-        client=FS42ScheduleClient(config.api_base_url),
+        client=FS42ScheduleClient(schedule_api_url),
         planner=BlockPlanner(
             PathResolver(fs42_root=config.fs42_root, sdtv_root=config.sdtv_root),
             FFProbe(config.ffprobe),
@@ -273,6 +300,17 @@ def _create_controller(config: IntegratedRunnerConfig) -> LiveController:
         ),
     )
     return LiveController(schedule_client=schedule_client, block_runner=block_runner)
+
+
+def _schedule_api_url(config: IntegratedRunnerConfig) -> str:
+    if config.api_base_url:
+        return config.api_base_url
+    return build_schedule_api_base_url(
+        scheme=config.schedule_scheme,
+        host=config.schedule_host,
+        port=config.schedule_port,
+        base_path=config.schedule_base_path,
+    )
 
 
 def _normalize_live_status_update(update: Mapping[str, Any]) -> dict[str, Any]:
@@ -297,18 +335,18 @@ def _normalize_live_status_update(update: Mapping[str, Any]) -> dict[str, Any]:
     return normalized
 
 
-def _api_urls(host: str, port: int) -> dict[str, str]:
+def _api_urls(host: str, port: int, *, channel_slug: str) -> dict[str, str]:
     base_url = f"http://{host}:{port}"
     return {
-        "status_url": f"{base_url}/api/channels/Sky_One/status",
-        "schedule_url": f"{base_url}/api/channels/Sky_One/schedule",
-        "runtime_url": f"{base_url}/api/channels/Sky_One/runtime",
-        "health_url": f"{base_url}/api/channels/Sky_One/health",
-        "events_url": f"{base_url}/api/channels/Sky_One/events",
-        "epg_url": f"{base_url}/api/channels/Sky_One/epg",
-        "hls_url": f"{base_url}/hls/Sky_One/",
-        "hls_playlist_url": f"{base_url}/hls/Sky_One/Sky_One.m3u8",
-        "jellyfin_hls_playlist_url": f"{base_url}/hls/Sky_One/jellyfin/Sky_One.m3u8",
+        "status_url": f"{base_url}/api/channels/{channel_slug}/status",
+        "schedule_url": f"{base_url}/api/channels/{channel_slug}/schedule",
+        "runtime_url": f"{base_url}/api/channels/{channel_slug}/runtime",
+        "health_url": f"{base_url}/api/channels/{channel_slug}/health",
+        "events_url": f"{base_url}/api/channels/{channel_slug}/events",
+        "epg_url": f"{base_url}/api/channels/{channel_slug}/epg",
+        "hls_url": f"{base_url}/hls/{channel_slug}/",
+        "hls_playlist_url": f"{base_url}/hls/{channel_slug}/{channel_slug}.m3u8",
+        "jellyfin_hls_playlist_url": f"{base_url}/hls/{channel_slug}/jellyfin/{channel_slug}.m3u8",
         "iptv_url": f"{base_url}/iptv/channels.m3u",
         "jellyfin_iptv_url": f"{base_url}/iptv/jellyfin/channels.m3u",
         "xmltv_url": f"{base_url}/iptv/xmltv.xml",
