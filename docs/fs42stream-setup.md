@@ -1,52 +1,99 @@
-# fs42stream Setup Notes
+# FS42-Stream Setup and Operations
 
-## FFmpeg / FFprobe
+This guide is installation-neutral. Do not copy private IP addresses, hostnames, usernames, channel names, or media paths from another deployment.
 
-`hermes-admin` does not currently have passwordless sudo, so system package installation with `apt-get install ffmpeg` is blocked. A user-local static FFmpeg build has been installed instead.
+## Preflight configuration
 
-Installed binaries:
+Set these values in the environment file used by the systemd unit. The common deployment values are listed first so a fresh install can be configured quickly:
 
-```text
-/home/hermes-admin/.local/bin/ffmpeg
-/home/hermes-admin/.local/bin/ffprobe
+```bash
+FS42STREAM_CHANNEL="Your Channel"
+FS42STREAM_CHANNEL_SLUG="Your_Channel"
+FS42STREAM_SCHEDULE_SCHEME="http"
+FS42STREAM_SCHEDULE_HOST="fieldstation42.example.net"
+FS42STREAM_SCHEDULE_PORT="4242"
+FS42STREAM_SCHEDULE_BASE_PATH=""
+FS42STREAM_PUBLIC_BASE_URL="https://stream.example.net"
+FS42STREAM_LOGO_FILENAME="logo.png"
+FS42STREAM_HOST="0.0.0.0"
+FS42STREAM_PORT="8088"
+FS42STREAM_OUTPUT_ROOT="/var/lib/fs42stream/hls"
+FS42STREAM_SCHEDULE_TIMEZONE="Europe/London"
+FS42STREAM_API_BASE_URL=""
 ```
 
-Verified versions:
+Configure the other existing variables (`FS42STREAM_VIDEO_ENCODER`, `FS42STREAM_VAAPI_DEVICE`, block limits, and media roots supplied as CLI options) for the host's available hardware and media layout.
+
+`FS42STREAM_SCHEDULE_*` identifies the FieldStation42 schedule-source endpoint. `FS42STREAM_API_BASE_URL` remains as a deprecated full-URL override for older deployments; leave it blank for new installs. `FS42STREAM_PUBLIC_BASE_URL` is the URL that IPTV/XMLTV clients receive. They intentionally need not be the same address. Leave the public value blank only when clients can use the request `Host` header directly.
+
+The logo must exist at:
 
 ```text
-ffmpeg version 7.0.2-static
-ffprobe version 7.0.2-static
+<FS42STREAM_OUTPUT_ROOT>/<FS42STREAM_CHANNEL_SLUG>/<FS42STREAM_LOGO_FILENAME>
 ```
 
-The path `/home/hermes-admin/.local/bin` has been appended to `/home/hermes-admin/.profile`.
+## Generate service files safely
 
-## Media paths
+Use a dry run first and inspect the output:
 
-Observed on `fs42stream`:
+```bash
+python3 scripts/install_systemd_service.py \
+  --dry-run \
+  --channel "$FS42STREAM_CHANNEL" \
+  --channel-slug "$FS42STREAM_CHANNEL_SLUG" \
+  --schedule-scheme "$FS42STREAM_SCHEDULE_SCHEME" \
+  --schedule-host "$FS42STREAM_SCHEDULE_HOST" \
+  --schedule-port "$FS42STREAM_SCHEDULE_PORT" \
+  --schedule-base-path "$FS42STREAM_SCHEDULE_BASE_PATH" \
+  --public-base-url "$FS42STREAM_PUBLIC_BASE_URL" \
+  --logo-filename "$FS42STREAM_LOGO_FILENAME"
+```
+
+The installer can write files and can call `systemctl` unless `--skip-systemctl` is specified. Treat deployment/restart as an approval-gated operational action.
+
+## Endpoints and playback verification
+
+Given public base `<public-base>` and channel slug `<slug>`, inspect both profiles independently:
 
 ```text
-/mnt/media/SDTV  exists, directory, readable
-/mnt/fs42        exists, directory, readable
-/mnt/FS42        not required; checked only because an earlier handoff used uppercase spelling
+<public-base>/hls/<slug>/<slug>.m3u8
+<public-base>/hls/<slug>/jellyfin/<slug>.m3u8
 ```
 
-Canonical paths for implementation:
+A healthy live service has fresh segments for both, advancing playlist tails, no `#EXT-X-ENDLIST`, and no persistent Jellyfin discontinuities. API health is not a substitute for direct-source playback verification.
+
+The API/IPTV/XMLTV endpoints are:
 
 ```text
-FS42 catalog root: /mnt/fs42
-Media/show root:   /mnt/media/SDTV
+/api/health
+/api/channels
+/api/channels/<slug>/status
+/api/channels/<slug>/runtime
+/api/channels/<slug>/health
+/iptv/channels.m3u
+/iptv/jellyfin/channels.m3u
+/iptv/xmltv.xml
 ```
 
-Sample schedule paths from `GET /schedules/Sky%20One` resolve correctly when joined to lowercase `/mnt/fs42`, including programme symlinks resolving into `/mnt/media/SDTV`. The streamer must not depend on uppercase `/mnt/FS42`.
+## HLS retention
 
-## System FFmpeg after sudo enablement
+Run the cleanup only with the configured output root and slug:
 
-Passwordless sudo is now enabled for `hermes-admin`, so distro packages were installed:
-
-```text
-sudo apt-get install -y ffmpeg git python3-venv
-/usr/bin/ffmpeg  -> ffmpeg version 6.1.1-3ubuntu5
-/usr/bin/ffprobe -> ffprobe version 6.1.1-3ubuntu5
+```bash
+python3 -m fs42stream.hls_retention \
+  --output-root "$FS42STREAM_OUTPUT_ROOT" \
+  --channel-slug "$FS42STREAM_CHANNEL_SLUG" \
+  --dry-run
 ```
 
-The user-local static build still exists, but implementation should prefer `/usr/bin/ffmpeg` and `/usr/bin/ffprobe` unless a specific static-build feature is required.
+Cleanup preserves playlists, referenced live-window segments, the logo, and all non-HLS assets.
+
+## Tests
+
+```bash
+python3 -m unittest discover -s tests
+```
+
+### Legacy fixture note
+
+Sky One naming may appear in explicitly named tests and historical prototype documentation only. It is not a required channel or runtime default.

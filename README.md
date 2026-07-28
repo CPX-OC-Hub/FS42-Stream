@@ -1,48 +1,119 @@
 # FS42-Stream
 
-Headless FieldStation42 schedule-following HLS streaming backend.
+A headless, schedule-following HLS streaming backend. FS42-Stream reads a FieldStation42-compatible schedule API, follows the active wall-clock block, and publishes direct-player and Jellyfin HLS profiles.
 
-## Goal
+FS42-Stream is channel-agnostic: channel name, URL/filesystem slug, upstream schedule API, published URL, logo filename, media roots, encoder, and service paths are installation configuration.
 
-Follow the FieldStation42 schedule API exactly, especially `schedule_blocks[*].plan[*]`, while preserving programmes, adverts, bumps, idents, and channel timing.
+## Configuration
 
-## Initial environment
+The persistent-service installer writes `/etc/fs42stream/fs42stream.env`. Prioritize the values you usually set first; keep the more installation-specific defaults lower in the file.
 
-- FS42 API: `http://192.168.10.252:4242`
-- First channel: `Sky One`
-- Streaming host: `fs42stream` / `192.168.10.139`
-- Remote admin user: `hermes-admin`
-- Media roots observed on `fs42stream`:
-  - `/mnt/media/SDTV`
-  - `/mnt/fs42`
+| Priority | Variable | Purpose | Portable default |
+| --- | --- | --- | --- |
+| Common | `FS42STREAM_CHANNEL` | Schedule network name and display name | `Example Channel` |
+| Common | `FS42STREAM_CHANNEL_SLUG` | Safe HLS/API/filesystem identifier | `Example_Channel` |
+| Common | `FS42STREAM_SCHEDULE_SCHEME` | FieldStation42 schedule API scheme | `http` |
+| Common | `FS42STREAM_SCHEDULE_HOST` | FieldStation42 schedule API hostname/IP | `127.0.0.1` |
+| Common | `FS42STREAM_SCHEDULE_PORT` | FieldStation42 schedule API port | `4242` |
+| Common | `FS42STREAM_PUBLIC_BASE_URL` | External base URL placed in M3U/XMLTV metadata; blank derives it from the HTTP `Host` header | blank |
+| Common | `FS42STREAM_LOGO_FILENAME` | Logo file beneath `<output-root>/<channel-slug>/` | `logo.png` |
+| Usually default | `FS42STREAM_SCHEDULE_BASE_PATH` | Optional schedule API base path | blank |
+| Usually default | `FS42STREAM_HOST` / `FS42STREAM_PORT` | API/HLS listen address and port | `0.0.0.0` / `8088` |
+| Usually default | `FS42STREAM_OUTPUT_ROOT` | HLS output root | `/var/lib/fs42stream/hls` |
+| Usually default | `FS42STREAM_SCHEDULE_TIMEZONE` | Timezone for naive schedule timestamps | `Europe/London` |
+| Advanced | `FS42STREAM_API_BASE_URL` | Deprecated full schedule API URL override; leave blank unless migrating old config | blank |
 
-## Constraints
+`FS42STREAM_PUBLIC_BASE_URL` is recommended behind a reverse proxy, NAT, TLS terminator, or when IPTV/Jellyfin clients cannot use the service's bind address. It must include scheme and any externally visible port, for example `https://stream.example.net`.
 
-Avoid screen capture, `ffconcat`, per-advert FFmpeg restarts, and persistent stale HLS packagers.
+## Install or generate service files
 
-Current implementation direction: process one FS42 schedule block at a time, decode and normalize all plan items, use FFmpeg concat filter, then publish HLS.
-
-## Phase 2 bounded block runner
-
-Run the live Sky One schedule block for a bounded duration without installing or starting any persistent service:
-
-```bash
-python3 -m fs42stream.run_block --channel "Sky One" --duration-limit 120 --output-dir /tmp/fs42stream-hls
-```
-
-The runner fetches `http://192.168.10.252:4242/schedules/Sky%20One`, deterministically selects the current block or the next future block, validates only that selected block's `plan[*]` files with `/usr/bin/ffprobe`, preserves `plan[*]` order, resolves media under `/mnt/fs42` and `/mnt/media/SDTV`, then invokes `/usr/bin/ffmpeg` once to emit bounded HLS. Known runtime/off-air image slate entries such as missing `/mnt/fs42/runtime/brb.png` are explicitly replaced with a generated black slate video, or with a validated configured video when `--fallback-slate-video` is supplied; normal programme/ad media is still probed and fails loudly if missing. It prints JSON diagnostics including selection reason, resolved plan order, any runtime slate replacement, generated argv command, and HLS inspection when available. Use `--dry-run` to fetch, select, resolve, and validate without running FFmpeg.
-
-## Phase 4 foreground API/status/HLS server
-
-Run the stdlib-only foreground API server without installing a persistent service:
+Review generated files before installing them. This command does not contact a scheduler or start a service:
 
 ```bash
-python3 -m fs42stream.api_server --host 127.0.0.1 --port 8088 --output-root /tmp/fs42stream-live --status-json /tmp/fs42stream-live/status.json
+python3 scripts/install_systemd_service.py \
+  --dry-run \
+  --channel "Retro Movies" \
+  --channel-slug Retro_Movies \
+  --schedule-scheme https \
+  --schedule-host scheduler.example.net \
+  --schedule-port 443 \
+  --schedule-base-path "" \
+  --public-base-url "https://stream.example.net" \
+  --logo-filename retro-movies.png
 ```
 
-Endpoints:
+The generated systemd service runs the integrated API/HLS server and controller. The controller preserves the existing wall-clock schedule-following and direct/Jellyfin dual-profile behavior.
 
-- `GET /api/health` returns service health JSON.
-- `GET /api/channels` returns the supported `Sky One` channel and endpoint URLs.
-- `GET /api/channels/Sky_One/status` returns the latest status JSON file when present.
-- `GET /hls/Sky_One/<playlist-or-segment>` serves `.m3u8` and `.ts` files from `/tmp/fs42stream-live/Sky_One` only; traversal and paths resolving outside the output root are rejected.
+## Run locally
+
+```bash
+python3 -m fs42stream.integrated_runner \
+  --channel "Retro Movies" \
+  --channel-slug Retro_Movies \
+  --schedule-scheme http \
+  --schedule-host 127.0.0.1 \
+  --schedule-port 4242 \
+  --schedule-base-path "" \
+  --host 127.0.0.1 \
+  --port 8088 \
+  --output-root /tmp/fs42stream-hls \
+  --max-blocks 1 \
+  --duration-limit 120 \
+  --playout-mode ts-primary
+```
+
+`--channel-slug` is optional: if omitted, the runner converts the channel name to a safe underscore-separated slug. Set it explicitly to preserve a pre-existing HLS URL or directory name.
+
+## Published endpoints
+
+For channel slug `<slug>`, the service publishes:
+
+- `/api/channels/<slug>/status`, `/schedule`, `/runtime`, `/health`, `/events`, and `/epg`
+- `/hls/<slug>/<slug>.m3u8` (direct)
+- `/hls/<slug>/jellyfin/<slug>.m3u8` (Jellyfin)
+- `/iptv/channels.m3u`, `/iptv/jellyfin/channels.m3u`, and `/iptv/xmltv.xml`
+
+The M3U and XMLTV logo URLs use `FS42STREAM_PUBLIC_BASE_URL`, or the incoming HTTP `Host` header when it is blank. Place the configured logo asset at `<output-root>/<slug>/<logo-filename>`.
+
+## Existing installation migration
+
+Before replacing a unit file generated by an older release, add these values to its environment file (use your existing channel and endpoints):
+
+```bash
+FS42STREAM_CHANNEL="Your Channel"
+FS42STREAM_CHANNEL_SLUG="Your_Channel"
+FS42STREAM_SCHEDULE_SCHEME="http"
+FS42STREAM_SCHEDULE_HOST="fieldstation42.example.net"
+FS42STREAM_SCHEDULE_PORT="4242"
+FS42STREAM_SCHEDULE_BASE_PATH=""
+FS42STREAM_API_BASE_URL=""
+FS42STREAM_PUBLIC_BASE_URL="https://stream.example.net"
+FS42STREAM_LOGO_FILENAME="logo.png"
+```
+
+Keep the existing `FS42STREAM_*` media-root, encoder, timezone, bind, and output-root values. A deliberate review/restart and direct/Jellyfin playback verification are required for any deployment; this repository change does not deploy or restart services.
+
+## Retention cleanup
+
+Run cleanup against the configured output root and slug:
+
+```bash
+python3 -m fs42stream.hls_retention \
+  --output-root /var/lib/fs42stream/hls \
+  --channel-slug Your_Channel \
+  --max-age-seconds 21600 \
+  --max-segments-per-dir 7200 \
+  --dry-run
+```
+
+It only deletes stale, unreferenced `.ts` segments and preserves playlists and non-HLS assets.
+
+## Tests
+
+```bash
+python3 -m unittest discover -s tests
+```
+
+### Clearly labelled legacy example
+
+Historical tests and `README-phase1-prototype.md` may use `Sky One`/`Sky_One` as fixture data. They are not runtime defaults or installation instructions.

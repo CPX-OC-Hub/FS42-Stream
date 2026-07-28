@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shlex
 import subprocess
 import sys
@@ -23,19 +24,18 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from fs42stream.client import FS42ScheduleClient
+from fs42stream.client import DEFAULT_SCHEDULE_BASE_PATH, DEFAULT_SCHEDULE_HOST, DEFAULT_SCHEDULE_PORT, DEFAULT_SCHEDULE_SCHEME, FS42ScheduleClient, build_schedule_api_base_url
 from fs42stream.ffmpeg import FFMpegHLSCommandBuilder
 from fs42stream.ffprobe import FFProbe
 from fs42stream.hls_harness import HLSHarness, create_fixture_clips, fixture_schedule, inspect_hls_output
 from fs42stream.paths import PathResolver
 from fs42stream.planner import BlockPlanner
 
-CANONICAL_API = "http://192.168.10.252:4242"
-CANONICAL_CHANNEL = "Sky One"
-CANONICAL_CATALOG_ROOT = Path("/mnt/fs42")
-CANONICAL_MEDIA_ROOT = Path("/mnt/media/SDTV")
-CANONICAL_FFMPEG = "/usr/bin/ffmpeg"
-CANONICAL_FFPROBE = "/usr/bin/ffprobe"
+DEFAULT_CHANNEL = "Example Channel"
+DEFAULT_CATALOG_ROOT = Path("/mnt/fs42")
+DEFAULT_MEDIA_ROOT = Path("/mnt/media/SDTV")
+DEFAULT_FFMPEG = "/usr/bin/ffmpeg"
+DEFAULT_FFPROBE = "/usr/bin/ffprobe"
 
 
 @dataclass
@@ -86,7 +86,7 @@ def parse_playlist(path: Path) -> PlaylistInfo:
 
 def validate_argv(command: Sequence[str], *, allowed_roots: Sequence[Path], output_dir: Path) -> dict[str, Any]:
     cmd = list(command)
-    assert_ok(bool(cmd) and cmd[0] == CANONICAL_FFMPEG, f"ffmpeg executable must be {CANONICAL_FFMPEG}, got {cmd[0] if cmd else '<empty>'}")
+    assert_ok(bool(cmd) and cmd[0] == DEFAULT_FFMPEG, f"ffmpeg executable must be {DEFAULT_FFMPEG}, got {cmd[0] if cmd else '<empty>'}")
     assert_ok("-f" in cmd and "hls" in cmd, "ffmpeg argv must select HLS muxer")
     assert_ok("-filter_complex" in cmd, "ffmpeg argv must use a concat/normalisation filter graph")
     joined = " ".join(cmd)
@@ -112,8 +112,8 @@ def validate_fixture_hls(args: argparse.Namespace, evidence: dict[str, Any]) -> 
     fixtures_dir = work_dir / "fixtures"
     output_dir = work_dir / "hls"
     clips = create_fixture_clips(fixtures_dir, count=args.count, duration=args.duration, ffmpeg=args.ffmpeg)
-    schedule = fixture_schedule(clips, duration=args.duration)
-    assert_ok(schedule["network_name"] == CANONICAL_CHANNEL, "fixture schedule must use Sky One")
+    schedule = fixture_schedule(clips, duration=args.duration, channel_name=args.fixture_channel)
+    assert_ok(schedule["network_name"] == args.fixture_channel, f"fixture schedule must use configured fixture channel {args.fixture_channel!r}")
     assert_ok(len(schedule["schedule_blocks"]) == 1, "fixture schedule should contain exactly one block")
     assert_ok(len(schedule["schedule_blocks"][0]["plan"]) == len(clips), "fixture schedule must preserve one plan entry per clip")
 
@@ -168,10 +168,11 @@ def validate_fixture_hls(args: argparse.Namespace, evidence: dict[str, Any]) -> 
 
 
 def validate_live_schedule(args: argparse.Namespace, evidence: dict[str, Any]) -> None:
-    client = FS42ScheduleClient(args.api_url, timeout=args.api_timeout)
+    schedule_api_url = args.api_url or build_schedule_api_base_url(scheme=args.schedule_scheme, host=args.schedule_host, port=args.schedule_port, base_path=args.schedule_base_path)
+    client = FS42ScheduleClient(schedule_api_url, timeout=args.api_timeout)
     schedule = client.fetch_schedule(args.channel, expected_blocks=args.expected_blocks)
     blocks = schedule["schedule_blocks"]
-    assert_ok(schedule.get("network_name") in (args.channel, CANONICAL_CHANNEL), f"unexpected network_name: {schedule.get('network_name')!r}")
+    assert_ok(schedule.get("network_name") == args.channel, f"unexpected network_name: {schedule.get('network_name')!r}")
     uppercase_hits: list[str] = []
     outside_hits: list[str] = []
     plan_entries = 0
@@ -193,7 +194,7 @@ def validate_live_schedule(args: argparse.Namespace, evidence: dict[str, Any]) -
     assert_ok(not uppercase_hits, f"schedule contains uppercase /mnt/FS42 paths: {uppercase_hits[:5]}")
     assert_ok(not outside_hits, f"schedule contains paths outside canonical roots: {outside_hits[:5]}")
     evidence["live_schedule"] = {
-        "api_url": args.api_url,
+        "api_url": schedule_api_url,
         "channel": args.channel,
         "blocks": len(blocks),
         "expected_blocks": args.expected_blocks,
@@ -210,14 +211,19 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--work-dir", type=Path, default=Path("/tmp/fs42-phase1-validation"), help="scratch directory for synthetic HLS output")
     parser.add_argument("--count", type=int, default=3, help="synthetic clip count")
     parser.add_argument("--duration", type=float, default=1.0, help="synthetic clip duration seconds")
-    parser.add_argument("--ffmpeg", default=CANONICAL_FFMPEG)
-    parser.add_argument("--ffprobe", default=CANONICAL_FFPROBE)
-    parser.add_argument("--api-url", default=CANONICAL_API)
-    parser.add_argument("--channel", default=CANONICAL_CHANNEL)
+    parser.add_argument("--ffmpeg", default=os.environ.get("FS42STREAM_FFMPEG", DEFAULT_FFMPEG))
+    parser.add_argument("--ffprobe", default=os.environ.get("FS42STREAM_FFPROBE", DEFAULT_FFPROBE))
+    parser.add_argument("--schedule-scheme", default=os.environ.get("FS42STREAM_SCHEDULE_SCHEME", DEFAULT_SCHEDULE_SCHEME))
+    parser.add_argument("--schedule-host", default=os.environ.get("FS42STREAM_SCHEDULE_HOST", DEFAULT_SCHEDULE_HOST))
+    parser.add_argument("--schedule-port", type=int, default=int(os.environ.get("FS42STREAM_SCHEDULE_PORT", str(DEFAULT_SCHEDULE_PORT))))
+    parser.add_argument("--schedule-base-path", default=os.environ.get("FS42STREAM_SCHEDULE_BASE_PATH", DEFAULT_SCHEDULE_BASE_PATH))
+    parser.add_argument("--api-url", default=os.environ.get("FS42STREAM_API_BASE_URL", ""), help="deprecated full schedule API URL override; prefer split FS42STREAM_SCHEDULE_* values")
+    parser.add_argument("--channel", default=os.environ.get("FS42STREAM_CHANNEL", DEFAULT_CHANNEL))
+    parser.add_argument("--fixture-channel", default=os.environ.get("FS42STREAM_FIXTURE_CHANNEL", DEFAULT_CHANNEL), help="synthetic fixture channel name; does not call the external scheduler")
     parser.add_argument("--expected-blocks", type=int, default=338)
     parser.add_argument("--api-timeout", type=float, default=10.0)
-    parser.add_argument("--catalog-root", type=Path, default=CANONICAL_CATALOG_ROOT)
-    parser.add_argument("--media-root", type=Path, default=CANONICAL_MEDIA_ROOT)
+    parser.add_argument("--catalog-root", type=Path, default=Path(os.environ.get("FS42STREAM_CATALOG_ROOT", str(DEFAULT_CATALOG_ROOT))))
+    parser.add_argument("--media-root", type=Path, default=Path(os.environ.get("FS42STREAM_MEDIA_ROOT", str(DEFAULT_MEDIA_ROOT))))
     parser.add_argument("--live-schedule", action="store_true", help="also call the live FS42 API and validate schedule paths/count")
     parser.add_argument("--skip-unit-tests", action="store_true")
     parser.add_argument("--evidence-json", type=Path, default=None, help="optional path to write JSON evidence")
@@ -229,10 +235,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     for executable in [args.ffmpeg, args.ffprobe]:
         if not Path(executable).exists():
             failures.append(f"missing executable: {executable}")
-    if args.ffmpeg != CANONICAL_FFMPEG:
-        failures.append(f"ffmpeg must be canonical {CANONICAL_FFMPEG}; got {args.ffmpeg}")
-    if args.ffprobe != CANONICAL_FFPROBE:
-        failures.append(f"ffprobe must be canonical {CANONICAL_FFPROBE}; got {args.ffprobe}")
+    if args.ffmpeg != DEFAULT_FFMPEG:
+        failures.append(f"ffmpeg must be canonical {DEFAULT_FFMPEG}; got {args.ffmpeg}")
+    if args.ffprobe != DEFAULT_FFPROBE:
+        failures.append(f"ffprobe must be canonical {DEFAULT_FFPROBE}; got {args.ffprobe}")
 
     if not args.skip_unit_tests:
         completed = run_cmd([sys.executable, "-m", "unittest", "discover", "-s", "tests", "-v"], cwd=REPO_ROOT, timeout=180)

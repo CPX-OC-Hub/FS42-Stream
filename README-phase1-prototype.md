@@ -1,29 +1,44 @@
-# FS42-Stream
+# FS42-Stream phase-1 prototype notes
 
-Phase 1 Python stdlib prototype skeleton for turning FieldStation42 schedule blocks into normalized block-level concat-filter HLS ffmpeg commands.
+> Historical document. This file describes the original phase-1 Python stdlib prototype and does **not** describe the current production service. For current setup, endpoints, operations, and validation, use:
+>
+> - `README.md`
+> - `docs/fs42stream-setup.md`
+> - `docs/phase1-validation-checklist.md`
 
-This prototype does **not** deploy or run a persistent packager. It provides:
+The phase-1 prototype explored turning FieldStation42 schedule blocks into normalized HLS ffmpeg commands.
 
-- FS42 schedule client for `/schedules/{channel}`
-- path resolver constrained to `/mnt/fs42` and `/mnt/media/SDTV`
-- ffprobe JSON validation helper
-- block planner preserving `schedule_blocks[*].plan[*]`
-- ffmpeg command builder using per-block concat filter and normalization to 640x480, 25fps, SAR 1:1, yuv420p, 48kHz stereo
-- fixture-backed HLS integration harness that generates 2-3 synthetic lavfi clips, runs one ffmpeg HLS command, and inspects playlist/segments
+It provided:
 
-Run tests with:
+- FS42 schedule client for `/schedules/{channel}`;
+- path resolver constrained to `/mnt/fs42` and `/mnt/media/SDTV`;
+- ffprobe JSON validation helper;
+- block planner preserving `schedule_blocks[*].plan[*]`;
+- ffmpeg command builder using concat-filter normalization to 640x480, 25fps, SAR 1:1, yuv420p, 48kHz stereo;
+- fixture-backed HLS integration harness that generated synthetic lavfi clips, ran ffmpeg, and inspected playlist/segments.
 
-```sh
+Historical test commands:
+
+```bash
 python3 -m unittest discover -s tests -v
 python3 -m compileall -q fs42stream tests
 ```
 
-Run the harness without deploying any persistent service:
+Historical harness commands:
 
-```sh
-# Print the generated HLS ffmpeg argv after creating temporary synthetic clips.
-python3 scripts/run_hls_harness.py --work-dir /tmp/fs42-hls-harness --count 3 --duration 1 --dry-run
+```bash
+# Print generated HLS ffmpeg argv after creating temporary synthetic clips.
+python3 scripts/run_hls_harness.py \
+  --work-dir /tmp/fs42-hls-harness \
+  --count 3 \
+  --duration 1 \
+  --dry-run
 
-# Generate HLS in /tmp/fs42-hls-harness/hls and inspect the playlist/segments.
-python3 scripts/run_hls_harness.py --work-dir /tmp/fs42-hls-harness --count 3 --duration 1
+# Generate HLS in /tmp/fs42-hls-harness/hls and inspect playlist/segments.
+python3 scripts/run_hls_harness.py \
+  --work-dir /tmp/fs42-hls-harness \
+  --count 3 \
+  --duration 1
 ```
+
+The current service has since evolved into a systemd-managed live streamer with API, direct HLS, Jellyfin HLS, IPTV M3U, XMLTV, local logo hosting, shared direct/Jellyfin block lifecycle, and `ts-primary` live playout.

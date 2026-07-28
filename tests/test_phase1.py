@@ -101,6 +101,42 @@ class PathResolverTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     resolver.resolve(bad)
 
+    def test_recovers_unique_nested_commercial_when_schedule_points_at_root(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            fs42_root = root / "fs42"
+            sdtv_root = root / "SDTV"
+            commercial_root = fs42_root / "catalog" / "commercial"
+            late_dir = commercial_root / "Late"
+            late_dir.mkdir(parents=True)
+            sdtv_root.mkdir()
+            recovered = late_dir / "Miller - 1995 - fixed.mp4"
+            recovered.write_text("stub")
+
+            resolver = PathResolver(fs42_root=fs42_root, sdtv_root=sdtv_root)
+            self.assertEqual(
+                resolver.resolve("catalog/commercial/Miller - 1995 - fixed.mp4"),
+                recovered,
+            )
+
+    def test_recovers_unique_nested_commercial_when_schedule_uses_catalog_parent_traversal(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            fs42_root = root / "fs42"
+            sdtv_root = root / "SDTV"
+            commercial_root = fs42_root / "catalog" / "commercial"
+            late_dir = commercial_root / "Late"
+            late_dir.mkdir(parents=True)
+            sdtv_root.mkdir()
+            recovered = late_dir / "guinness - engima 1995.mp4"
+            recovered.write_text("stub")
+
+            resolver = PathResolver(fs42_root=fs42_root, sdtv_root=sdtv_root)
+            self.assertEqual(
+                resolver.resolve("catalog/SkyOne/../commercial/guinness - engima 1995.mp4"),
+                recovered,
+            )
+
 
 class FFProbeTests(unittest.TestCase):
     def test_validate_video_invokes_ffprobe_and_parses_json(self):
@@ -155,6 +191,30 @@ class BlockPlannerTests(unittest.TestCase):
         self.assertEqual(blocks[0].items[0].resolved_path, fs42_root / "catalog/SkyOne/late/South Park/episode.mp4")
         self.assertEqual(probe.validate_video.call_count, 2)
 
+    def test_clamps_file_backed_item_duration_to_actual_media_remaining_after_skip(self):
+        schedule = {
+            "schedule_blocks": [
+                {
+                    "title": "Duration Clamp",
+                    "plan": [
+                        {
+                            "path": "catalog/SkyOne/show.mp4",
+                            "duration": 120,
+                            "skip": 10,
+                            "is_stream": False,
+                            "content_type": "feature",
+                            "media_type": "video",
+                        }
+                    ],
+                }
+            ]
+        }
+        probe = mock.Mock(validate_video=mock.Mock(return_value=ProbeResult(40, 640, 480, 25, 48000, 2)))
+        block = BlockPlanner(PathResolver(fs42_root="/mnt/fs42", sdtv_root="/mnt/media/SDTV"), probe).plan(schedule)[0]
+
+        self.assertEqual(block.items[0].skip, 10.0)
+        self.assertEqual(block.items[0].duration, 30.0)
+
     def test_replaces_known_runtime_image_slate_with_generated_fallback_without_probing_missing_png(self):
         schedule = {
             "schedule_blocks": [
@@ -178,8 +238,8 @@ class BlockPlannerTests(unittest.TestCase):
 
         self.assertEqual(probe.validate_video.call_count, 0)
         self.assertEqual(block.items[0].resolved_path, Path("/mnt/fs42/runtime/brb.png"))
-        self.assertEqual(block.items[0].input_kind, "lavfi")
-        self.assertIn("color=black", block.items[0].ffmpeg_input)
+        self.assertEqual(block.items[0].input_kind, "image_loop")
+        self.assertEqual(block.items[0].ffmpeg_input, str(Path("/mnt/fs42/runtime/brb.png")))
         self.assertEqual(block.items[0].runtime_action, "generated_fallback_slate")
 
     def test_can_use_configured_fallback_video_for_known_runtime_slate(self):
@@ -234,7 +294,7 @@ class BlockPlannerTests(unittest.TestCase):
             ["/mnt/fs42/catalog/commercial/ad-a.mp4", "/mnt/fs42/catalog/commercial/ad-b.mp4"],
         )
 
-    def test_commercial_runtime_path_is_not_replaced_with_off_air_fallback(self):
+    def test_runtime_png_with_commercial_type_is_replaced_with_off_air_fallback(self):
         schedule = {
             "schedule_blocks": [
                 {
@@ -246,11 +306,38 @@ class BlockPlannerTests(unittest.TestCase):
             ]
         }
         probe = mock.Mock()
-        probe.validate_video.side_effect = FileNotFoundError("missing commercial")
+        block = BlockPlanner(PathResolver(fs42_root="/mnt/fs42", sdtv_root="/mnt/media/SDTV"), probe).plan(schedule)[0]
 
-        with self.assertRaisesRegex(FileNotFoundError, "missing commercial"):
-            BlockPlanner(PathResolver(fs42_root="/mnt/fs42", sdtv_root="/mnt/media/SDTV"), probe).plan(schedule)
-        probe.validate_video.assert_called_once_with(Path("/mnt/fs42/runtime/brb.png"))
+        probe.validate_video.assert_not_called()
+        self.assertEqual(block.items[0].resolved_path, Path("/mnt/fs42/runtime/brb.png"))
+        self.assertEqual(block.items[0].input_kind, "image_loop")
+        self.assertEqual(block.items[0].runtime_action, "generated_fallback_slate")
+
+    def test_runtime_png_with_bad_commercial_metadata_is_still_replaced_with_fallback(self):
+        schedule = {
+            "schedule_blocks": [
+                {
+                    "title": "Bad Runtime Metadata",
+                    "plan": [
+                        {
+                            "path": "runtime/brb.png",
+                            "duration": 8,
+                            "skip": 0,
+                            "is_stream": False,
+                            "content_type": "commercial",
+                            "media_type": "video",
+                        }
+                    ],
+                }
+            ]
+        }
+        probe = mock.Mock()
+        block = BlockPlanner(PathResolver(fs42_root="/mnt/fs42", sdtv_root="/mnt/media/SDTV"), probe).plan(schedule)[0]
+
+        probe.validate_video.assert_not_called()
+        self.assertEqual(block.items[0].resolved_path, Path("/mnt/fs42/runtime/brb.png"))
+        self.assertEqual(block.items[0].input_kind, "image_loop")
+        self.assertEqual(block.items[0].runtime_action, "generated_fallback_slate")
 
 
 class CatchUpBlockRunnerTests(unittest.TestCase):
@@ -301,6 +388,8 @@ class CatchUpBlockRunnerTests(unittest.TestCase):
 
         self.assertEqual(diagnostics["catch_up"]["applied"], True)
         self.assertEqual(diagnostics["catch_up"]["start_plan_index"], 2)
+        self.assertEqual(diagnostics["playout"]["current_item"]["path"], "catalog/SkyOne/show.mp4")
+        self.assertEqual(diagnostics["playout"]["current_item"]["media_seek"], 510.0)
         self.assertEqual(builder.block.items[0].source["content_type"], "feature")
         self.assertEqual(builder.block.items[0].skip, 510.0)
         self.assertEqual(builder.block.items[0].duration, 490.0)
@@ -331,10 +420,10 @@ class CatchUpBlockRunnerTests(unittest.TestCase):
         self.assertEqual(builder.block.items[0].source["content_type"], "commercial")
         self.assertEqual(builder.block.items[0].skip, 25.0)
         self.assertEqual(builder.block.items[0].duration, 5.0)
-        self.assertEqual(builder.blocks[1].items[0].source["content_type"], "feature")
-        self.assertEqual(builder.blocks[1].items[0].skip, 500.0)
+        self.assertEqual(builder.block.items[1].source["content_type"], "feature")
+        self.assertEqual(builder.block.items[1].skip, 500.0)
 
-    def test_sequential_renderer_builds_one_ffmpeg_command_per_remaining_plan_item(self):
+    def test_direct_profile_builds_single_block_concat_command_for_remaining_plan_items(self):
         schedule = {
             "network_name": "Sky One",
             "schedule_blocks": [
@@ -354,14 +443,52 @@ class CatchUpBlockRunnerTests(unittest.TestCase):
 
         diagnostics = runner.run(BlockRunConfig(now=datetime(2026, 6, 25, 22, 0, 0), dry_run=True, hls_start_number=7, output_name="Sky_One"))
 
-        self.assertEqual(len(builder.blocks), 3)
-        self.assertEqual([block.items[0].source["content_type"] for block in builder.blocks], ["feature", "commercial", "feature"])
-        self.assertEqual([len(block.items) for block in builder.blocks], [1, 1, 1])
-        self.assertEqual([kwargs["hls_start_number"] for kwargs in builder.kwargs_by_call], [7, 7, 7])
-        self.assertEqual([kwargs["hls_append"] for kwargs in builder.kwargs_by_call], [False, True, True])
-        self.assertEqual(len(diagnostics["commands"]), 3)
-        self.assertNotIn("concat=n=3", " ".join(" ".join(cmd) for cmd in diagnostics["commands"]))
-        self.assertEqual(diagnostics["render_mode"], "sequential-plan-items")
+        self.assertEqual(len(builder.blocks), 1)
+        self.assertEqual([item.source["content_type"] for item in builder.blocks[0].items], ["feature", "commercial", "feature"])
+        self.assertEqual([kwargs["hls_start_number"] for kwargs in builder.kwargs_by_call], [7])
+        self.assertEqual([kwargs["hls_append"] for kwargs in builder.kwargs_by_call], [False])
+        self.assertEqual(len(diagnostics["commands"]), 1)
+        self.assertEqual(len(builder.block.items), 3)
+        self.assertEqual(diagnostics["render_mode"], "block-concat")
+
+    def test_jellyfin_profile_builds_single_block_concat_command_for_remaining_block(self):
+        schedule = {
+            "network_name": "Sky One",
+            "schedule_blocks": [
+                {
+                    "title": "Show With Ad Break",
+                    "start_time": "2026-06-25T22:00:00",
+                    "end_time": "2026-06-25T22:30:00",
+                    "plan": [
+                        {"path": "catalog/SkyOne/show.mp4", "duration": 60, "skip": 0, "is_stream": False, "content_type": "feature"},
+                        {"path": "catalog/SkyOne/../commercial/ad.mp4", "duration": 30, "skip": 0, "is_stream": False, "content_type": "commercial"},
+                        {"path": "catalog/SkyOne/show.mp4", "duration": 60, "skip": 60, "is_stream": False, "content_type": "feature"},
+                    ],
+                }
+            ],
+        }
+        runner, builder = self._runner_for(schedule)
+
+        diagnostics = runner.run(
+            BlockRunConfig(
+                now=datetime(2026, 6, 25, 22, 0, 0),
+                dry_run=True,
+                hls_start_number=42,
+                hls_start_time_offset=100.0,
+                output_name="Sky_One",
+                stream_profile="jellyfin",
+            )
+        )
+
+        self.assertEqual(len(builder.blocks), 1)
+        self.assertEqual([item.source["content_type"] for item in builder.blocks[0].items], ["feature", "commercial", "feature"])
+        self.assertEqual([kwargs["stream_profile"] for kwargs in builder.kwargs_by_call], ["jellyfin"])
+        self.assertEqual([kwargs["hls_start_number"] for kwargs in builder.kwargs_by_call], [42])
+        self.assertEqual([kwargs["hls_append"] for kwargs in builder.kwargs_by_call], [False])
+        self.assertEqual([kwargs["hls_start_time_offset"] for kwargs in builder.kwargs_by_call], [100.0])
+        self.assertEqual(len(diagnostics["commands"]), 1)
+        self.assertEqual(diagnostics["render_mode"], "block-concat")
+        self.assertEqual(diagnostics["stream_profile"], "jellyfin")
 
 
 class FFMpegCommandBuilderTests(unittest.TestCase):
@@ -409,6 +536,22 @@ class FFMpegCommandBuilderTests(unittest.TestCase):
         self.assertIn("-g 50", joined)
         self.assertIn("-keyint_min 50", joined)
         self.assertIn("-sc_threshold 0", joined)
+
+    def test_jellyfin_profile_uses_longer_live_playlist_window(self):
+        resolver = PathResolver()
+        probe = mock.Mock(validate_video=mock.Mock(return_value=ProbeResult(1, 320, 240, 25, 44100, 1)))
+        block = BlockPlanner(resolver, probe).plan(SCHEDULE)[0]
+
+        cmd = FFMpegHLSCommandBuilder(ffmpeg="/usr/bin/ffmpeg").build(
+            block,
+            output_dir=Path("/tmp/hls"),
+            output_name="Sky_One",
+            stream_profile="jellyfin",
+        )
+
+        joined = " ".join(cmd)
+        self.assertIn("-hls_list_size 60", joined)
+        self.assertNotIn("-hls_list_size 12", joined)
 
     def test_builds_vaapi_transition_safe_gop_without_unsupported_x264_scene_cut_flags(self):
         resolver = PathResolver()
@@ -501,10 +644,34 @@ class FFMpegCommandBuilderTests(unittest.TestCase):
         )
 
         joined = " ".join(cmd)
-        self.assertIn("-start_number 42", joined)
         self.assertIn("-hls_flags omit_endlist+append_list+discont_start", joined)
+        self.assertNotIn("-start_number", joined)
         self.assertIn("/tmp/hls/Sky_One_%05d.ts", joined)
         self.assertEqual(cmd[-1], "/tmp/hls/Sky_One.m3u8")
+
+    def test_jellyfin_profile_uses_explicit_elapsed_timestamp_offset_and_marks_append_boundaries(self):
+        resolver = PathResolver()
+        probe = mock.Mock(validate_video=mock.Mock(return_value=ProbeResult(1, 320, 240, 25, 44100, 1)))
+        block = BlockPlanner(resolver, probe).plan(SCHEDULE)[0]
+
+        cmd = FFMpegHLSCommandBuilder(ffmpeg="/usr/bin/ffmpeg").build(
+            block,
+            output_dir=Path("/tmp/hls"),
+            output_name="Sky_One",
+            hls_start_number=42,
+            hls_start_time_offset=83.25,
+            hls_append=True,
+            stream_profile="jellyfin",
+        )
+
+        joined = " ".join(cmd)
+        self.assertIn("-fflags +genpts", joined)
+        self.assertIn("-output_ts_offset 83.25", joined)
+        self.assertNotIn("-output_ts_offset 84", joined)
+        self.assertIn("-hls_flags omit_endlist+append_list", joined)
+        self.assertNotIn("-start_number", joined)
+        self.assertNotIn("discont_start", joined)
+        self.assertNotIn("-avoid_negative_ts", joined)
 
     def test_builds_silent_audio_chain_for_video_only_inputs(self):
         resolver = PathResolver()
@@ -532,9 +699,8 @@ class FFMpegCommandBuilderTests(unittest.TestCase):
 
         self.assertIsInstance(cmd, list)
         self.assertIn("-f", cmd)
-        self.assertIn("lavfi", cmd)
-        self.assertIn("color=black", cmd)
-        self.assertNotIn("/mnt/fs42/runtime/brb.png", cmd)
+        self.assertIn("-loop", cmd)
+        self.assertIn("/mnt/fs42/runtime/brb.png", cmd)
         self.assertNotIn("shell=True", " ".join(cmd))
 
     def test_includes_commercial_plan_entries_as_ffmpeg_inputs_in_order(self):

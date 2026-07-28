@@ -1,64 +1,99 @@
-# Phase 1 QA validation checklist (PR #6 / issue #4)
+# FS42-Stream validation checklist
 
-Use this immediately after HLS harness changes. It does not deploy a persistent service.
+Use this checklist after changes to the live renderer, controller, API server, IPTV/XMLTV generation, or service wiring. It is installation-neutral: substitute values from the active environment file; do not use another installation's host, channel, media roots, or credentials.
 
-## Automated runner
+## Automated verification
 
-```sh
-python3 scripts/phase1_validate.py --work-dir /tmp/fs42-phase1-validation --evidence-json /tmp/fs42-phase1-validation-evidence.json
+```bash
+python3 -m unittest \
+  tests.test_api_server \
+  tests.test_run_block \
+  tests.test_live_controller \
+  tests.test_integrated_runner \
+  tests.test_systemd_service
+
+python3 -m unittest discover -s tests
 ```
 
-To include the live FieldStation42 schedule API gate:
+## Record the active configuration
 
-```sh
-python3 scripts/phase1_validate.py --live-schedule --api-timeout 10 --work-dir /tmp/fs42-phase1-validation --evidence-json /tmp/fs42-phase1-validation-evidence.json
+Before live verification, record the reviewed values of:
+
+```text
+FS42STREAM_CHANNEL
+FS42STREAM_CHANNEL_SLUG
+FS42STREAM_SCHEDULE_SCHEME
+FS42STREAM_SCHEDULE_HOST
+FS42STREAM_SCHEDULE_PORT
+FS42STREAM_SCHEDULE_BASE_PATH
+FS42STREAM_API_BASE_URL
+FS42STREAM_PUBLIC_BASE_URL
+FS42STREAM_LOGO_FILENAME
+FS42STREAM_OUTPUT_ROOT
+FS42STREAM_SCHEDULE_TIMEZONE
+FS42STREAM_PLAYOUT_MODE
 ```
 
-Canonical defaults baked into the runner:
+For public base `<public-base>` and slug `<slug>`, check API and generated metadata:
 
-- FS42 API: `http://192.168.10.252:4242`
-- channel: `Sky One`
-- catalog root: `/mnt/fs42`
-- media root: `/mnt/media/SDTV`
-- no uppercase `/mnt/FS42` dependency
-- ffmpeg: `/usr/bin/ffmpeg`
-- ffprobe: `/usr/bin/ffprobe`
+```text
+<public-base>/api/health
+<public-base>/api/channels
+<public-base>/api/channels/<slug>/status
+<public-base>/api/channels/<slug>/runtime
+<public-base>/api/channels/<slug>/health
+<public-base>/iptv/channels.m3u
+<public-base>/iptv/jellyfin/channels.m3u
+<public-base>/iptv/xmltv.xml
+```
 
-## Gates and required evidence
+Confirm that M3U/XMLTV use the configured public base and logo location, never the schedule-source endpoint.
 
-1. **Unit output**
-   - `python3 -m unittest discover -s tests -v` return code is `0`.
-   - Runner embeds stdout/stderr in the evidence JSON.
+## Direct and Jellyfin playback checks
 
-2. **Path resolution**
-   - HLS argv input paths resolve under the synthetic work root for harness runs.
-   - Live schedule mode verifies every `path`/`realpath` resolves under `/mnt/fs42` or `/mnt/media/SDTV`.
-   - Live schedule mode fails on any uppercase `/mnt/FS42` path.
+Verify both profiles independently:
 
-3. **Schedule fidelity**
-   - Fixture schedule uses network `Sky One`.
-   - Fixture plan entry count equals generated clip count.
-   - Live schedule mode checks the API returns the expected 338 blocks and records total plan entries checked.
+```text
+<public-base>/hls/<slug>/<slug>.m3u8
+<public-base>/hls/<slug>/jellyfin/<slug>.m3u8
+```
 
-4. **ffmpeg argv safety**
-   - Command is an argv list executed with `shell=False` by the harness.
-   - First argv element must be `/usr/bin/ffmpeg`.
-   - Command must contain HLS muxer flags plus the expected normalisation/concat filter tokens.
-   - Evidence JSON includes both `argv_json` and shell-escaped display form.
+Required properties:
 
-5. **HLS playlist continuity**
-   - Playlist exists and contains `#EXT-X-ENDLIST`.
-   - Media sequence is non-negative.
-   - Every playlist media entry has an `#EXTINF` and points to an existing non-empty segment.
-   - Evidence JSON records playlist path, media sequence, EXTINF values, segment paths and byte sizes.
+- both playlists return HTTP 200 and advance over repeated samples;
+- neither live playlist contains `#EXT-X-ENDLIST`;
+- Jellyfin has no persistent `#EXT-X-DISCONTINUITY`;
+- segment files exist and have fresh mtimes;
+- both profiles represent the same active schedule block;
+- a frame decodes from both sources.
 
-6. **Readback and timing sanity**
-   - `/usr/bin/ffprobe` can read the generated playlist.
-   - `/usr/bin/ffmpeg -v error -i <playlist> -t 1 -f null -` can read back the playlist.
-   - Playlist `EXTINF` sum is compared to requested fixture duration; drift is recorded and bounded by the runner.
+Use this portable sampler by setting `PUBLIC_BASE_URL` and `CHANNEL_SLUG`:
 
-## Manual review notes
+```bash
+PUBLIC_BASE_URL="https://stream.example.net"
+CHANNEL_SLUG="Your_Channel"
+python3 - <<'PY'
+import os, re, time, urllib.request
+base = os.environ['PUBLIC_BASE_URL'].rstrip('/')
+slug = os.environ['CHANNEL_SLUG']
+urls = [('direct', f'{base}/hls/{slug}/{slug}.m3u8'), ('jellyfin', f'{base}/hls/{slug}/jellyfin/{slug}.m3u8')]
+last = {}
+for i in range(3):
+    print('SAMPLE', i)
+    for label, url in urls:
+        text = urllib.request.urlopen(url, timeout=15).read().decode('utf-8', 'replace')
+        segments = re.findall(r'([^\n]+\.ts)', text)
+        tail = int(re.search(r'_(\d+)\.ts$', segments[-1]).group(1)) if segments else None
+        print(label, 'tail', tail, 'endlist', '#EXT-X-ENDLIST' in text, 'discont', text.count('#EXT-X-DISCONTINUITY'))
+        last[label] = tail
+    time.sleep(4)
+PY
+```
 
-- The synthetic run is a harness integrity gate; it does not prove production media availability.
-- Use `--live-schedule` on the FS42 network to validate canonical API/channel/block count and real schedule paths.
-- Do not claim a live/prod gate passed unless the command was actually run and the output/evidence JSON is available.
+## Evidence and release gate
+
+For any later deployment, retain test output, reviewed configuration, status payloads, direct/Jellyfin playlist samples, and frame-decode evidence. Do not treat API health as a replacement for direct-source playback verification.
+
+### Historical fixture note
+
+The phase-1 prototype documentation may contain Sky One fixture data. It is historical test evidence, not a runtime default or deployment instruction.
