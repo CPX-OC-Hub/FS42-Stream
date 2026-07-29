@@ -1,6 +1,6 @@
 # FS42-Stream
 
-A headless, schedule-following HLS streaming backend. FS42-Stream reads a FieldStation42-compatible schedule API, follows the active wall-clock block, and publishes direct-player and Jellyfin HLS profiles.
+A headless, schedule-following HLS streaming backend. FS42-Stream reads a FieldStation42-compatible schedule API, follows the active wall-clock block, and publishes Jellyfin HLS by default; direct-player HLS is a startup-configurable debugging profile.
 
 FS42-Stream is channel-agnostic: channel name, URL/filesystem slug, upstream schedule API, published URL, logo filename, media roots, encoder, and service paths are installation configuration.
 
@@ -17,6 +17,7 @@ The persistent-service installer writes `/etc/fs42stream/fs42stream.env`. Priori
 | Common | `FS42STREAM_SCHEDULE_PORT` | FieldStation42 schedule API port | `4242` |
 | Common | `FS42STREAM_PUBLIC_BASE_URL` | External base URL placed in M3U/XMLTV metadata; blank derives it from the HTTP `Host` header | blank |
 | Common | `FS42STREAM_LOGO_FILENAME` | Logo file beneath `<output-root>/<channel-slug>/` | `logo.png` |
+| Common | `FS42STREAM_STREAM_PROFILES` | Active output runners: `jellyfin`, `direct`, `both`, or `direct,jellyfin` | `jellyfin` |
 | Usually default | `FS42STREAM_SCHEDULE_BASE_PATH` | Optional schedule API base path | blank |
 | Usually default | `FS42STREAM_HOST` / `FS42STREAM_PORT` | API/HLS listen address and port | `0.0.0.0` / `8088` |
 | Usually default | `FS42STREAM_OUTPUT_ROOT` | HLS output root | `/var/lib/fs42stream/hls` |
@@ -42,7 +43,7 @@ python3 scripts/install_systemd_service.py \
   --logo-filename retro-movies.png
 ```
 
-The generated systemd service runs the integrated API/HLS server and controller. The controller preserves the existing wall-clock schedule-following and direct/Jellyfin dual-profile behavior.
+The generated systemd service runs the integrated API/HLS server and controller. It defaults to the Jellyfin profile only. For direct debugging without a code change, set `FS42STREAM_STREAM_PROFILES="direct"`; set it to `both` (or `direct,jellyfin`) to run both profiles, then perform an approved service restart.
 
 ## Run locally
 
@@ -59,7 +60,8 @@ python3 -m fs42stream.integrated_runner \
   --output-root /tmp/fs42stream-hls \
   --max-blocks 1 \
   --duration-limit 120 \
-  --playout-mode ts-primary
+  --playout-mode ts-primary \
+  --stream-profiles jellyfin
 ```
 
 `--channel-slug` is optional: if omitted, the runner converts the channel name to a safe underscore-separated slug. Set it explicitly to preserve a pre-existing HLS URL or directory name.
@@ -69,9 +71,11 @@ python3 -m fs42stream.integrated_runner \
 For channel slug `<slug>`, the service publishes:
 
 - `/api/channels/<slug>/status`, `/schedule`, `/runtime`, `/health`, `/events`, and `/epg`
-- `/hls/<slug>/<slug>.m3u8` (direct)
-- `/hls/<slug>/jellyfin/<slug>.m3u8` (Jellyfin)
-- `/iptv/channels.m3u`, `/iptv/jellyfin/channels.m3u`, and `/iptv/xmltv.xml`
+- `/hls/<slug>/jellyfin/<slug>.m3u8` (Jellyfin; enabled by default)
+- `/hls/<slug>/<slug>.m3u8` (direct; advertised only when `FS42STREAM_STREAM_PROFILES` includes `direct`)
+- `/iptv/jellyfin/channels.m3u` (Jellyfin IPTV; enabled by default)
+- `/iptv/channels.m3u` (direct IPTV; served only when `FS42STREAM_STREAM_PROFILES` includes `direct`)
+- `/iptv/xmltv.xml`
 
 The M3U and XMLTV logo URLs use `FS42STREAM_PUBLIC_BASE_URL`, or the incoming HTTP `Host` header when it is blank. Place the configured logo asset at `<output-root>/<slug>/<logo-filename>`.
 

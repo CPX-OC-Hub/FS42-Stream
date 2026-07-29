@@ -57,11 +57,26 @@ class FS42APIHTTPServer(ThreadingHTTPServer):
         self.output_root = config.output_root.resolve(strict=False)
         self.status_json = (config.status_json or (config.output_root / "status.json")).resolve(strict=False)
 
-    def channel_metadata(self, *, request_base_url: str | None = None) -> dict[str, str]:
+    def enabled_stream_profiles(self) -> tuple[str, ...]:
+        try:
+            payload = json.loads(self.status_json.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return ("direct", "jellyfin")
+        if not isinstance(payload, Mapping):
+            return ("direct", "jellyfin")
+        profiles = payload.get("stream_profiles")
+        if not isinstance(profiles, list):
+            return ("direct", "jellyfin")
+        enabled = tuple(profile for profile in profiles if profile in {"direct", "jellyfin"})
+        return enabled or ("direct", "jellyfin")
+
+    def channel_metadata(self, *, request_base_url: str | None = None) -> dict[str, Any]:
         base_url = (self.config.public_base_url or request_base_url or "").rstrip("/")
         logo_path = f"/hls/{quote(self.config.channel_slug, safe='')}/{quote(self.config.logo_filename, safe='')}"
         logo_url = f"{base_url}{logo_path}" if base_url else logo_path
-        return _channel_metadata(channel_slug=self.config.channel_slug, name=self.config.channel_name, logo_url=logo_url)
+        metadata = _channel_metadata(channel_slug=self.config.channel_slug, name=self.config.channel_name, logo_url=logo_url)
+        metadata["stream_profiles"] = list(self.enabled_stream_profiles())
+        return metadata
 
 
 class FS42APIRequestHandler(BaseHTTPRequestHandler):
@@ -100,9 +115,8 @@ class FS42APIRequestHandler(BaseHTTPRequestHandler):
                             "events_url": f"/api/channels/{channel['slug']}/events",
                             "epg_url": f"/api/channels/{channel['slug']}/epg",
                             "hls_url": f"/hls/{channel['slug']}/",
-                            "hls_playlist_url": f"/hls/{channel['slug']}/{channel['slug']}.m3u8",
-                            "jellyfin_hls_playlist_url": f"/hls/{channel['slug']}/jellyfin/{channel['slug']}.m3u8",
-                            "jellyfin_iptv_url": "/iptv/jellyfin/channels.m3u",
+                            **({"hls_playlist_url": f"/hls/{channel['slug']}/{channel['slug']}.m3u8", "iptv_url": "/iptv/channels.m3u"} if "direct" in channel["stream_profiles"] else {}),
+                            **({"jellyfin_hls_playlist_url": f"/hls/{channel['slug']}/jellyfin/{channel['slug']}.m3u8", "jellyfin_iptv_url": "/iptv/jellyfin/channels.m3u"} if "jellyfin" in channel["stream_profiles"] else {}),
                         }
                     ]
                 },
@@ -234,6 +248,9 @@ class FS42APIRequestHandler(BaseHTTPRequestHandler):
         if single_slug is not None and single_slug != self._api_server().config.channel_slug:
             self._send_error(HTTPStatus.NOT_FOUND, "channel_not_found", f"unknown channel: {single_slug}")
             return
+        if stream_profile not in self._api_server().enabled_stream_profiles():
+            self._send_error(HTTPStatus.NOT_FOUND, "stream_profile_disabled", f"{stream_profile} stream profile is disabled")
+            return
         body = _m3u_payload(channel=self._api_server().channel_metadata(request_base_url=self._request_base_url()), base_url=self._api_server().config.public_base_url or self._request_base_url(), stream_profile=stream_profile).encode("utf-8")
         self._send_bytes(HTTPStatus.OK, body, "application/vnd.apple.mpegurl")
 
@@ -320,6 +337,11 @@ class FS42APIRequestHandler(BaseHTTPRequestHandler):
         if candidate.suffix not in {".m3u8", ".ts", ".png"}:
             self._send_error(HTTPStatus.NOT_FOUND, "hls_not_found", "only .m3u8 playlists, .ts segments, and .png assets are served")
             return
+        if candidate.suffix in {".m3u8", ".ts"}:
+            requested_profile = "jellyfin" if safe_relative.parts and safe_relative.parts[0] == "jellyfin" else "direct"
+            if requested_profile not in self._api_server().enabled_stream_profiles():
+                self._send_error(HTTPStatus.NOT_FOUND, "stream_profile_disabled", f"{requested_profile} stream profile is disabled")
+                return
         if not candidate.is_file():
             self._send_error(HTTPStatus.NOT_FOUND, "hls_not_found", f"HLS file not found: {safe_relative}")
             return
@@ -371,7 +393,7 @@ def _safe_hls_relative_path(raw_relative: str) -> Path | None:
     return Path(*pure.parts)
 
 
-def _channel_metadata(*, channel_slug: str, name: str, logo_url: str) -> dict[str, str]:
+def _channel_metadata(*, channel_slug: str, name: str, logo_url: str) -> dict[str, Any]:
     return {"id": _channel_id(channel_slug), "slug": channel_slug, "name": name, "logo_url": logo_url}
 
 
@@ -482,6 +504,9 @@ def _playlist_path(status_payload: Mapping[str, Any], *, output_root: Path, chan
         return Path(str(raw_hls["playlist"]))
     if status_payload.get("playlist"):
         return Path(str(status_payload["playlist"]))
+    profiles = status_payload.get("stream_profiles")
+    if isinstance(profiles, list) and "jellyfin" in profiles and "direct" not in profiles:
+        return output_root / channel_slug / "jellyfin" / f"{channel_slug}.m3u8"
     return output_root / channel_slug / f"{channel_slug}.m3u8"
 
 

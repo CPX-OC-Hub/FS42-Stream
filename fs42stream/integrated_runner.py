@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import threading
 from dataclasses import dataclass
@@ -22,6 +23,21 @@ from .systemd_service import ServiceConfig
 
 DEFAULT_MAX_BLOCKS = ServiceConfig.max_blocks
 DEFAULT_DURATION_LIMIT = ServiceConfig.duration_limit
+DEFAULT_STREAM_PROFILES: tuple[StreamProfile, ...] = ("jellyfin",)
+
+
+def parse_stream_profiles(value: str) -> tuple[StreamProfile, ...]:
+    """Normalize the public CLI/environment stream-profile selection."""
+    normalized = value.strip().lower()
+    if normalized == "both":
+        return ("direct", "jellyfin")
+    profiles = tuple(part.strip() for part in normalized.split(",") if part.strip())
+    if not profiles:
+        raise ValueError("stream profiles must select at least one of: direct, jellyfin, both")
+    invalid_profiles = [profile for profile in profiles if profile not in {"direct", "jellyfin"}]
+    if invalid_profiles or len(set(profiles)) != len(profiles):
+        raise ValueError("stream profiles must be 'direct', 'jellyfin', 'both', or a comma-separated direct,jellyfin list")
+    return cast(tuple[StreamProfile, ...], profiles)
 
 
 @dataclass(frozen=True)
@@ -48,7 +64,7 @@ class IntegratedRunnerConfig:
     video_encoder: str = "libx264"
     vaapi_device: str | None = None
     schedule_timezone: str | None = DEFAULT_SCHEDULE_TIMEZONE
-    stream_profiles: tuple[StreamProfile, ...] = ("direct", "jellyfin")
+    stream_profiles: tuple[StreamProfile, ...] = DEFAULT_STREAM_PROFILES
     playout_mode: PlayoutMode = "ts-primary"
 
 
@@ -133,7 +149,7 @@ def run_integrated(
         "api_host": actual_host,
         "api_port": actual_port,
         "api_base_url": f"http://{actual_host}:{actual_port}",
-        **_api_urls(actual_host, actual_port, channel_slug=channel_slug),
+        **_api_urls(actual_host, actual_port, channel_slug=channel_slug, stream_profiles=stream_profiles),
         "max_blocks": config.max_blocks,
         "blocks_completed": 0,
         "duration_limit": config.duration_limit,
@@ -244,6 +260,7 @@ def main(
     parser.add_argument("--vaapi-device", help="VAAPI device path, e.g. /dev/dri/renderD128")
     parser.add_argument("--schedule-timezone", default=DEFAULT_SCHEDULE_TIMEZONE, help="timezone for naive FS42 schedule timestamps, e.g. Europe/London")
     parser.add_argument("--playout-mode", choices=("hls-primary", "ts-primary"), default="ts-primary", help="render directly to HLS or render TS first then package HLS")
+    parser.add_argument("--stream-profiles", default=os.environ.get("FS42STREAM_STREAM_PROFILES", "jellyfin"), help="active output profiles: jellyfin (default), direct, both, or a comma-separated list")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv)
 
@@ -271,6 +288,7 @@ def main(
         vaapi_device=args.vaapi_device,
         schedule_timezone=args.schedule_timezone,
         playout_mode=args.playout_mode,
+        stream_profiles=parse_stream_profiles(args.stream_profiles),
     )
     effective_controller_factory = controller_factory
     if controller_factory is LiveController:
@@ -335,9 +353,9 @@ def _normalize_live_status_update(update: Mapping[str, Any]) -> dict[str, Any]:
     return normalized
 
 
-def _api_urls(host: str, port: int, *, channel_slug: str) -> dict[str, str]:
+def _api_urls(host: str, port: int, *, channel_slug: str, stream_profiles: Sequence[StreamProfile]) -> dict[str, str]:
     base_url = f"http://{host}:{port}"
-    return {
+    urls = {
         "status_url": f"{base_url}/api/channels/{channel_slug}/status",
         "schedule_url": f"{base_url}/api/channels/{channel_slug}/schedule",
         "runtime_url": f"{base_url}/api/channels/{channel_slug}/runtime",
@@ -345,12 +363,13 @@ def _api_urls(host: str, port: int, *, channel_slug: str) -> dict[str, str]:
         "events_url": f"{base_url}/api/channels/{channel_slug}/events",
         "epg_url": f"{base_url}/api/channels/{channel_slug}/epg",
         "hls_url": f"{base_url}/hls/{channel_slug}/",
-        "hls_playlist_url": f"{base_url}/hls/{channel_slug}/{channel_slug}.m3u8",
-        "jellyfin_hls_playlist_url": f"{base_url}/hls/{channel_slug}/jellyfin/{channel_slug}.m3u8",
-        "iptv_url": f"{base_url}/iptv/channels.m3u",
-        "jellyfin_iptv_url": f"{base_url}/iptv/jellyfin/channels.m3u",
         "xmltv_url": f"{base_url}/iptv/xmltv.xml",
     }
+    if "direct" in stream_profiles:
+        urls.update({"hls_playlist_url": f"{base_url}/hls/{channel_slug}/{channel_slug}.m3u8", "iptv_url": f"{base_url}/iptv/channels.m3u"})
+    if "jellyfin" in stream_profiles:
+        urls.update({"jellyfin_hls_playlist_url": f"{base_url}/hls/{channel_slug}/jellyfin/{channel_slug}.m3u8", "jellyfin_iptv_url": f"{base_url}/iptv/jellyfin/channels.m3u"})
+    return urls
 
 
 def _write_status(path: Path, payload: Mapping[str, Any]) -> None:

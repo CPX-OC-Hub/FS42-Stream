@@ -13,6 +13,20 @@ class SystemdServiceTests(unittest.TestCase):
         self.assertGreaterEqual(config.duration_limit, 5400.0)
         self.assertIn('FS42STREAM_DURATION_LIMIT="7200"', env)
 
+    def test_service_defaults_to_jellyfin_only_and_passes_profile_switch_to_runner(self):
+        config = ServiceConfig()
+
+        env = render_environment_file(config)
+        unit = render_unit_file(config)
+
+        self.assertEqual(config.stream_profiles, "jellyfin")
+        self.assertIn('FS42STREAM_STREAM_PROFILES="jellyfin"', env)
+        self.assertIn('--stream-profiles "${FS42STREAM_STREAM_PROFILES}"', unit)
+
+    def test_service_can_render_direct_or_both_profile_selection(self):
+        self.assertIn('FS42STREAM_STREAM_PROFILES="direct"', render_environment_file(ServiceConfig(stream_profiles="direct")))
+        self.assertIn('FS42STREAM_STREAM_PROFILES="both"', render_environment_file(ServiceConfig(stream_profiles="both")))
+
     def test_renders_environment_file_with_service_defaults(self):
         config = ServiceConfig(
             channel="Sky One",
