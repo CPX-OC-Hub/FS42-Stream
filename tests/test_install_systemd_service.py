@@ -45,9 +45,15 @@ class InstallSystemdServiceTests(unittest.TestCase):
             self.assertIn("FS42STREAM_OUTPUT_ROOT", env_text)
             self.assertIn('FS42STREAM_DURATION_LIMIT="7200"', env_text)
             self.assertIn("FS42STREAM_SCHEDULE_TIMEZONE", env_text)
+            self.assertIn('FS42STREAM_STREAM_PROFILES="jellyfin"', env_text)
             self.assertIn("--schedule-timezone ${FS42STREAM_SCHEDULE_TIMEZONE}", unit_text)
             self.assertIn("ExecStart=/usr/bin/python3 -m fs42stream.integrated_runner", unit_text)
             self.assertTrue(output_root.exists())
+
+    def test_dry_run_rejects_invalid_stream_profiles(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(SystemExit):
+                main(["--env-file", str(Path(tmp) / "env"), "--unit-file", str(Path(tmp) / "unit"), "--output-root", str(Path(tmp) / "hls"), "--stream-profiles", "debug", "--dry-run"])
 
     def test_script_can_run_directly_from_repo_root(self):
         completed = subprocess.run(

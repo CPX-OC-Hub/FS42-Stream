@@ -20,9 +20,12 @@ FS42STREAM_PORT="8088"
 FS42STREAM_OUTPUT_ROOT="/var/lib/fs42stream/hls"
 FS42STREAM_SCHEDULE_TIMEZONE="Europe/London"
 FS42STREAM_API_BASE_URL=""
+FS42STREAM_STREAM_PROFILES="jellyfin"
 ```
 
 Configure the other existing variables (`FS42STREAM_VIDEO_ENCODER`, `FS42STREAM_VAAPI_DEVICE`, block limits, and media roots supplied as CLI options) for the host's available hardware and media layout.
+
+`FS42STREAM_STREAM_PROFILES` controls which output runners start. It defaults to `jellyfin` for production. Set it to `direct` for isolated direct-stream debugging, or `both` (equivalent to `direct,jellyfin`) to run both profiles. After changing this systemd environment value, review the generated unit and restart only as an approved operational action.
 
 `FS42STREAM_SCHEDULE_*` identifies the FieldStation42 schedule-source endpoint. `FS42STREAM_API_BASE_URL` remains as a deprecated full-URL override for older deployments; leave it blank for new installs. `FS42STREAM_PUBLIC_BASE_URL` is the URL that IPTV/XMLTV clients receive. They intentionally need not be the same address. Leave the public value blank only when clients can use the request `Host` header directly.
 
@@ -53,14 +56,19 @@ The installer can write files and can call `systemctl` unless `--skip-systemctl`
 
 ## Endpoints and playback verification
 
-Given public base `<public-base>` and channel slug `<slug>`, inspect both profiles independently:
+Given public base `<public-base>` and channel slug `<slug>`, Jellyfin is enabled by default:
 
 ```text
-<public-base>/hls/<slug>/<slug>.m3u8
 <public-base>/hls/<slug>/jellyfin/<slug>.m3u8
 ```
 
-A healthy live service has fresh segments for both, advancing playlist tails, no `#EXT-X-ENDLIST`, and no persistent Jellyfin discontinuities. API health is not a substitute for direct-source playback verification.
+When `FS42STREAM_STREAM_PROFILES` includes `direct`, also inspect:
+
+```text
+<public-base>/hls/<slug>/<slug>.m3u8
+```
+
+A healthy live service has fresh segments for each enabled profile, advancing playlist tails, no `#EXT-X-ENDLIST`, and no persistent Jellyfin discontinuities. API health is not a substitute for direct-source playback verification.
 
 The API/IPTV/XMLTV endpoints are:
 
@@ -70,8 +78,8 @@ The API/IPTV/XMLTV endpoints are:
 /api/channels/<slug>/status
 /api/channels/<slug>/runtime
 /api/channels/<slug>/health
-/iptv/channels.m3u
-/iptv/jellyfin/channels.m3u
+/iptv/jellyfin/channels.m3u  # Jellyfin IPTV; enabled by default
+/iptv/channels.m3u           # direct IPTV; only when FS42STREAM_STREAM_PROFILES includes direct
 /iptv/xmltv.xml
 ```
 

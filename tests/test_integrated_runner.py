@@ -1,5 +1,6 @@
 import http.client
 import json
+import os
 import tempfile
 import threading
 import time
@@ -21,6 +22,69 @@ class IntegratedRunnerTests(unittest.TestCase):
         self.assertEqual(config.max_blocks, ServiceConfig.max_blocks)
         self.assertEqual(config.duration_limit, ServiceConfig.duration_limit)
         self.assertEqual(config.playout_mode, "ts-primary")
+        self.assertEqual(config.stream_profiles, ("jellyfin",))
+
+    def test_jellyfin_only_integrated_status_omits_direct_urls(self):
+        class FakeServer:
+            server_address = ("127.0.0.1", 18088)
+            def serve_forever(self):
+                pass
+            def shutdown(self):
+                pass
+            def server_close(self):
+                pass
+
+        class FakeController:
+            def run(self, config):
+                return {"status": "complete", "channel": config.channel, "blocks_completed": 1, "stream_profile": config.stream_profile, "events": []}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            result = run_integrated(
+                IntegratedRunnerConfig(channel="Sky One", host="127.0.0.1", port=0, output_root=root, max_blocks=1, duration_limit=1),
+                server_factory=lambda **kwargs: FakeServer(),
+                controller_factory=lambda: FakeController(),
+            )
+            final_status = json.loads((root / "status.json").read_text())
+
+        for payload in (result, final_status):
+            self.assertEqual(payload["stream_profiles"], ["jellyfin"])
+            self.assertNotIn("hls_playlist_url", payload)
+            self.assertNotIn("iptv_url", payload)
+            self.assertIn("jellyfin_hls_playlist_url", payload)
+            self.assertIn("jellyfin_iptv_url", payload)
+
+    def test_cli_uses_jellyfin_only_by_default_and_accepts_both_or_direct_profiles(self):
+        seen_profiles = []
+
+        class FakeServer:
+            server_address = ("127.0.0.1", 8088)
+            def serve_forever(self):
+                pass
+            def shutdown(self):
+                pass
+            def server_close(self):
+                pass
+
+        class FakeController:
+            def run(self, config):
+                seen_profiles.append(config.stream_profile)
+                return {"status": "complete", "channel": config.channel, "blocks_completed": 1, "stream_profile": config.stream_profile, "events": []}
+
+        with tempfile.TemporaryDirectory() as tmp, mock.patch("sys.stdout"), mock.patch.dict(os.environ, {}, clear=True):
+            common = ["--channel", "Sky One", "--host", "127.0.0.1", "--port", "8088", "--output-root", tmp, "--max-blocks", "1", "--duration-limit", "1"]
+            self.assertEqual(main(common, server_factory=lambda **kwargs: FakeServer(), controller_factory=lambda: FakeController()), 0)
+            self.assertEqual(seen_profiles, ["jellyfin"])
+            seen_profiles.clear()
+            with mock.patch.dict(os.environ, {"FS42STREAM_STREAM_PROFILES": "direct,jellyfin"}, clear=True):
+                self.assertEqual(main(common, server_factory=lambda **kwargs: FakeServer(), controller_factory=lambda: FakeController()), 0)
+            self.assertEqual(seen_profiles, ["direct", "jellyfin"])
+            seen_profiles.clear()
+            self.assertEqual(main([*common, "--stream-profiles", "both"], server_factory=lambda **kwargs: FakeServer(), controller_factory=lambda: FakeController()), 0)
+            self.assertEqual(seen_profiles, ["direct", "jellyfin"])
+            seen_profiles.clear()
+            self.assertEqual(main([*common, "--stream-profiles", "direct"], server_factory=lambda **kwargs: FakeServer(), controller_factory=lambda: FakeController()), 0)
+            self.assertEqual(seen_profiles, ["direct"])
 
     def test_fake_server_and_controller_lifecycle_writes_status_and_closes_server(self):
         events = []
@@ -52,7 +116,7 @@ class IntegratedRunnerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             result = run_integrated(
-                IntegratedRunnerConfig(channel="Sky One", host="127.0.0.1", port=0, output_root=root, max_blocks=2, duration_limit=10),
+                IntegratedRunnerConfig(channel="Sky One", host="127.0.0.1", port=0, output_root=root, max_blocks=2, duration_limit=10, stream_profiles=("direct", "jellyfin")),
                 server_factory=lambda **kwargs: FakeServer(),
                 controller_factory=lambda: FakeController(),
             )
@@ -115,7 +179,7 @@ class IntegratedRunnerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             result = run_integrated(
-                IntegratedRunnerConfig(channel="Sky One", host="127.0.0.1", port=0, output_root=root, max_blocks=1, duration_limit=1),
+                IntegratedRunnerConfig(channel="Sky One", host="127.0.0.1", port=0, output_root=root, max_blocks=1, duration_limit=1, stream_profiles=("direct", "jellyfin")),
                 server_factory=create_server,
                 controller_factory=lambda: HTTPCheckingController(),
             )
@@ -153,7 +217,7 @@ class IntegratedRunnerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             result = run_integrated(
-                IntegratedRunnerConfig(channel="Sky One", host="127.0.0.1", port=0, output_root=root, max_blocks=1, duration_limit=10),
+                IntegratedRunnerConfig(channel="Sky One", host="127.0.0.1", port=0, output_root=root, max_blocks=1, duration_limit=10, stream_profiles=("direct", "jellyfin")),
                 server_factory=lambda **kwargs: FakeServer(),
                 controller_factory=lambda: FakeController(),
             )
@@ -264,7 +328,7 @@ class IntegratedRunnerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             result = run_integrated(
-                IntegratedRunnerConfig(channel="Sky One", host="127.0.0.1", port=0, output_root=root, max_blocks=1, duration_limit=1),
+                IntegratedRunnerConfig(channel="Sky One", host="127.0.0.1", port=0, output_root=root, max_blocks=1, duration_limit=1, stream_profiles=("direct", "jellyfin")),
                 server_factory=create_server,
                 controller_factory=lambda: HTTPProjectionController(),
             )
@@ -362,7 +426,7 @@ class IntegratedRunnerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             result = run_integrated(
-                IntegratedRunnerConfig(channel="Sky One", host="127.0.0.1", port=0, output_root=root, max_blocks=1, duration_limit=1),
+                IntegratedRunnerConfig(channel="Sky One", host="127.0.0.1", port=0, output_root=root, max_blocks=1, duration_limit=1, stream_profiles=("direct", "jellyfin")),
                 server_factory=lambda **kwargs: type("FakeServer", (), {"server_address": ("127.0.0.1", 18088), "serve_forever": lambda self: None, "shutdown": lambda self: None, "server_close": lambda self: None})(),
                 controller_factory=lambda: ProjectionController(),
             )
@@ -393,7 +457,7 @@ class IntegratedRunnerTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp, mock.patch("sys.stdout"):
             rc = main(
-                ["--channel", "Sky One", "--host", "127.0.0.1", "--port", "8088", "--output-root", tmp],
+                ["--channel", "Sky One", "--host", "127.0.0.1", "--port", "8088", "--output-root", tmp, "--stream-profiles", "both"],
                 server_factory=lambda **kwargs: FakeServer(),
                 controller_factory=lambda: FakeController(),
             )
@@ -424,7 +488,7 @@ class IntegratedRunnerTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp, mock.patch("sys.stdout"):
             rc = main(
-                ["--channel", "Sky One", "--host", "127.0.0.1", "--port", "8088", "--output-root", tmp, "--max-blocks", "2", "--duration-limit", "10"],
+                ["--channel", "Sky One", "--host", "127.0.0.1", "--port", "8088", "--output-root", tmp, "--max-blocks", "2", "--duration-limit", "10", "--stream-profiles", "both"],
                 server_factory=lambda **kwargs: FakeServer(),
                 controller_factory=lambda: FakeController(),
             )

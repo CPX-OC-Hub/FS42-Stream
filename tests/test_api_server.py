@@ -68,6 +68,41 @@ class APIServerTests(unittest.TestCase):
             self.assertEqual(payload["channels"][0]["jellyfin_iptv_url"], "/iptv/jellyfin/channels.m3u")
             self.assertEqual(payload["channels"][0]["logo_url"], f"http://127.0.0.1:{server.server_address[1]}/hls/Sky_One/skyone.png")
 
+    def test_jellyfin_only_status_does_not_advertise_or_serve_direct_stream_metadata(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            status_path = root / "status.json"
+            status_path.write_text(json.dumps({"status": "running", "channel": "Sky One", "stream_profiles": ["jellyfin"]}))
+            server = self._start_server(root, status_json=status_path)
+
+            status, _headers, body = self._request(server, "/api/channels")
+            self.assertEqual(status, 200)
+            channel = json.loads(body)["channels"][0]
+            self.assertEqual(channel["stream_profiles"], ["jellyfin"])
+            self.assertNotIn("hls_playlist_url", channel)
+            self.assertEqual(channel["jellyfin_hls_playlist_url"], "/hls/Sky_One/jellyfin/Sky_One.m3u8")
+
+            channel_dir = root / "Sky_One"
+            channel_dir.mkdir()
+            (channel_dir / "Sky_One.m3u8").write_text("#EXTM3U\nSky_One_00000.ts\n")
+            (channel_dir / "Sky_One_00000.ts").write_bytes(b"segment")
+            jellyfin_dir = channel_dir / "jellyfin"
+            jellyfin_dir.mkdir()
+            (jellyfin_dir / "Sky_One.m3u8").write_text("#EXTM3U\nSky_One_00000.ts\n")
+
+            status, _headers, _body = self._request(server, "/iptv/channels.m3u")
+            self.assertEqual(status, 404)
+            status, _headers, body = self._request(server, "/iptv/jellyfin/channels.m3u")
+            self.assertEqual(status, 200)
+            self.assertIn("/hls/Sky_One/jellyfin/Sky_One.m3u8", body.decode("utf-8"))
+            status, _headers, _body = self._request(server, "/hls/Sky_One/Sky_One.m3u8")
+            self.assertEqual(status, 404)
+            status, _headers, _body = self._request(server, "/hls/Sky_One/Sky_One_00000.ts")
+            self.assertEqual(status, 404)
+            status, _headers, body = self._request(server, "/hls/Sky_One/jellyfin/Sky_One.m3u8")
+            self.assertEqual(status, 200)
+            self.assertEqual(body, b"#EXTM3U\nSky_One_00000.ts\n")
+
     def test_channel_metadata_and_iptv_urls_use_configured_non_sky_channel(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

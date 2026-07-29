@@ -9,6 +9,7 @@ from typing import Sequence
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from fs42stream.integrated_runner import parse_stream_profiles
 from fs42stream.systemd_service import ServiceConfig, render_environment_file, render_unit_file
 
 
@@ -37,9 +38,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--api-base-url", default="", help="deprecated full schedule API URL override; prefer split schedule variables")
     parser.add_argument("--public-base-url", default="")
     parser.add_argument("--logo-filename", default="logo.png")
+    parser.add_argument("--stream-profiles", default="jellyfin", help="active profiles: jellyfin (default), direct, both, or direct,jellyfin")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--skip-systemctl", action="store_true", help="write files but do not run systemctl daemon-reload/enable/restart")
     args = parser.parse_args(argv)
+    try:
+        parse_stream_profiles(args.stream_profiles)
+    except ValueError as exc:
+        parser.error(str(exc))
 
     config = ServiceConfig(
         service_name=args.service_name,
@@ -64,6 +70,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         api_base_url=args.api_base_url,
         public_base_url=args.public_base_url,
         logo_filename=args.logo_filename,
+        stream_profiles=args.stream_profiles,
     )
     env_text = render_environment_file(config)
     unit_text = render_unit_file(config)
