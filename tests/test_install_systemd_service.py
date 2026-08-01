@@ -64,6 +64,21 @@ class InstallSystemdServiceTests(unittest.TestCase):
         self.assertIn('FS42STREAM_BRB_IMAGE_PATH="catalog/SkyOne/runtime/brb.png"', output)
         self.assertIn('--brb-image-path "${FS42STREAM_BRB_IMAGE_PATH}"', output)
 
+    def test_dry_run_propagates_loudnorm_audio_normalization(self):
+        with tempfile.TemporaryDirectory() as tmp, mock.patch("sys.stdout") as stdout:
+            rc = main([
+                "--env-file", str(Path(tmp) / "env"),
+                "--unit-file", str(Path(tmp) / "unit"),
+                "--output-root", str(Path(tmp) / "hls"),
+                "--audio-normalization", "loudnorm",
+                "--dry-run",
+            ])
+
+        self.assertEqual(rc, 0)
+        output = "".join(call.args[0] for call in stdout.write.call_args_list)
+        self.assertIn('FS42STREAM_AUDIO_NORMALIZATION="loudnorm"', output)
+        self.assertIn('--audio-normalization "${FS42STREAM_AUDIO_NORMALIZATION}"', output)
+
     def test_script_can_run_directly_from_repo_root(self):
         completed = subprocess.run(
             [sys.executable, "scripts/install_systemd_service.py", "--dry-run"],

@@ -22,11 +22,18 @@ FS42STREAM_OUTPUT_ROOT="/var/lib/fs42stream/hls"
 FS42STREAM_SCHEDULE_TIMEZONE="Europe/London"
 FS42STREAM_API_BASE_URL=""
 FS42STREAM_STREAM_PROFILES="jellyfin"
+FS42STREAM_AUDIO_NORMALIZATION="off"
 ```
 
 Configure the other existing variables (`FS42STREAM_VIDEO_ENCODER`, `FS42STREAM_VAAPI_DEVICE`, block limits, and media roots supplied as CLI options) for the host's available hardware and media layout.
 
 `FS42STREAM_STREAM_PROFILES` controls which output runners start. It defaults to `jellyfin` for production. Set it to `direct` for isolated direct-stream debugging, or `both` (equivalent to `direct,jellyfin`) to run both profiles. After changing this systemd environment value, review the generated unit and restart only as an approved operational action.
+
+### Rollback-safe loudnorm trial
+
+`FS42STREAM_AUDIO_NORMALIZATION` defaults to `off`. To enable the trial, set it to `loudnorm`; the runner appends single-pass FFmpeg `loudnorm=I=-16:LRA=11:TP=-1.5` after the existing 48 kHz/stereo formatting for real media audio. Generated silence for no-audio items remains unchanged. The same setting is available as `--audio-normalization off|loudnorm` on the integrated runner and service installer.
+
+Before enabling, generate or inspect the unit and arrange an approved restart plus playback/audio-level verification for every enabled profile. To roll back, set `FS42STREAM_AUDIO_NORMALIZATION="off"` and restart only through the approved operational process. No deployment or restart is performed by this change.
 
 `FS42STREAM_SCHEDULE_*` identifies the FieldStation42 schedule-source endpoint. `FS42STREAM_API_BASE_URL` remains as a deprecated full-URL override for older deployments; leave it blank for new installs. `FS42STREAM_PUBLIC_BASE_URL` is the URL that IPTV/XMLTV clients receive. They intentionally need not be the same address. Leave the public value blank only when clients can use the request `Host` header directly.
 

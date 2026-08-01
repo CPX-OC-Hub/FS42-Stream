@@ -492,6 +492,34 @@ class CatchUpBlockRunnerTests(unittest.TestCase):
 
 
 class FFMpegCommandBuilderTests(unittest.TestCase):
+    def test_audio_normalization_defaults_off_without_loudnorm(self):
+        resolver = PathResolver()
+        probe = mock.Mock(validate_video=mock.Mock(return_value=ProbeResult(1, 320, 240, 25, 44100, 1)))
+        block = BlockPlanner(resolver, probe).plan(SCHEDULE)[0]
+
+        cmd = FFMpegHLSCommandBuilder(ffmpeg="/usr/bin/ffmpeg").build(block, output_dir=Path("/tmp/hls"))
+
+        self.assertNotIn("loudnorm", " ".join(cmd))
+
+    def test_loudnorm_normalizes_real_audio_after_resample_and_stereo_formatting(self):
+        resolver = PathResolver()
+        probe = mock.Mock(validate_video=mock.Mock(return_value=ProbeResult(1, 320, 240, 25, 44100, 1)))
+        block = BlockPlanner(resolver, probe).plan(SCHEDULE)[0]
+
+        cmd = FFMpegHLSCommandBuilder(ffmpeg="/usr/bin/ffmpeg", audio_normalization="loudnorm").build(block, output_dir=Path("/tmp/hls"))
+
+        self.assertIn("[0:a]aresample=48000,aformat=channel_layouts=stereo,loudnorm=I=-16:LRA=11:TP=-1.5[a0]", " ".join(cmd))
+
+    def test_loudnorm_does_not_modify_generated_silence_for_video_only_inputs(self):
+        resolver = PathResolver()
+        probe = mock.Mock(validate_video=mock.Mock(return_value=ProbeResult(1, 320, 240, 25, 0, 0)))
+        block = BlockPlanner(resolver, probe).plan(SCHEDULE)[0]
+
+        cmd = FFMpegHLSCommandBuilder(ffmpeg="/usr/bin/ffmpeg", audio_normalization="loudnorm").build(block, output_dir=Path("/tmp/hls"))
+
+        self.assertIn("anullsrc=channel_layout=stereo:sample_rate=48000", " ".join(cmd))
+        self.assertNotIn("loudnorm", " ".join(cmd))
+
     def test_builds_block_level_concat_filter_hls_command_with_normalisation(self):
         resolver = PathResolver()
         probe = mock.Mock(validate_video=mock.Mock(return_value=ProbeResult(1, 320, 240, 25, 44100, 1)))

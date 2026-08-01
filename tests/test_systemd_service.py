@@ -22,6 +22,14 @@ class SystemdServiceTests(unittest.TestCase):
         self.assertEqual(config.stream_profiles, "jellyfin")
         self.assertIn('FS42STREAM_STREAM_PROFILES="jellyfin"', env)
         self.assertIn('--stream-profiles "${FS42STREAM_STREAM_PROFILES}"', unit)
+        self.assertEqual(config.audio_normalization, "off")
+        self.assertIn('FS42STREAM_AUDIO_NORMALIZATION="off"', env)
+        self.assertIn('--audio-normalization "${FS42STREAM_AUDIO_NORMALIZATION}"', unit)
+
+    def test_service_can_render_loudnorm_audio_normalization(self):
+        env = render_environment_file(ServiceConfig(audio_normalization="loudnorm"))
+
+        self.assertIn('FS42STREAM_AUDIO_NORMALIZATION="loudnorm"', env)
 
     def test_service_renders_configurable_brb_image_path_and_passes_it_to_runner(self):
         config = ServiceConfig(brb_image_path="catalog/SkyOne/runtime/brb.png")

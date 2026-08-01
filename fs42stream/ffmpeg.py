@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
-from typing import Literal
+from typing import Literal, cast
 
 from .planner import PlannedBlock
 
 
 StreamProfile = Literal["direct", "jellyfin"]
 PlayoutMode = Literal["hls-primary", "ts-primary"]
+AudioNormalization = Literal["off", "loudnorm"]
 
 DIRECT_HLS_LIST_SIZE = 12
 JELLYFIN_HLS_LIST_SIZE = 60
@@ -18,13 +19,28 @@ def hls_list_size_for_profile(stream_profile: StreamProfile) -> int:
     return JELLYFIN_HLS_LIST_SIZE if stream_profile == "jellyfin" else DIRECT_HLS_LIST_SIZE
 
 
+def normalize_audio_normalization(value: str) -> AudioNormalization:
+    normalized = value.strip().lower()
+    if normalized not in {"off", "loudnorm"}:
+        raise ValueError("audio normalization must be 'off' or 'loudnorm'")
+    return cast(AudioNormalization, normalized)
+
+
 class FFMpegHLSCommandBuilder:
     """Build normalized FFmpeg commands for playout and HLS packaging."""
 
-    def __init__(self, ffmpeg: str = "/usr/bin/ffmpeg", *, video_encoder: str = "libx264", vaapi_device: str | None = None) -> None:
+    def __init__(
+        self,
+        ffmpeg: str = "/usr/bin/ffmpeg",
+        *,
+        video_encoder: str = "libx264",
+        vaapi_device: str | None = None,
+        audio_normalization: AudioNormalization = "off",
+    ) -> None:
         self.ffmpeg = ffmpeg
         self.video_encoder = video_encoder
         self.vaapi_device = vaapi_device
+        self.audio_normalization: AudioNormalization = normalize_audio_normalization(audio_normalization)
         if self.video_encoder.endswith("_vaapi") and not self.vaapi_device:
             raise ValueError("vaapi_device is required when using a VAAPI video encoder")
 
@@ -52,7 +68,11 @@ class FFMpegHLSCommandBuilder:
             raise ValueError("stream_profile must be 'direct' or 'jellyfin'")
 
         cmd = self._build_block_inputs(block, stream_profile=stream_profile)
-        filter_complex = self._filter_complex(block, upload_to_vaapi=self.video_encoder.endswith("_vaapi"))
+        filter_complex = self._filter_complex(
+            block,
+            upload_to_vaapi=self.video_encoder.endswith("_vaapi"),
+            audio_normalization=self.audio_normalization,
+        )
         output_slug = self._slug(output_name or block.title)
         playlist = output_dir / f"{output_slug}.m3u8"
         segment_pattern = output_dir / f"{output_slug}_%05d.ts"
@@ -93,7 +113,11 @@ class FFMpegHLSCommandBuilder:
             raise ValueError("duration_limit must be positive")
 
         cmd = self._build_block_inputs(block, stream_profile="direct")
-        filter_complex = self._filter_complex(block, upload_to_vaapi=self.video_encoder.endswith("_vaapi"))
+        filter_complex = self._filter_complex(
+            block,
+            upload_to_vaapi=self.video_encoder.endswith("_vaapi"),
+            audio_normalization=self.audio_normalization,
+        )
         cmd.extend(self._normalized_video_audio_output_args(filter_complex))
         if duration_limit is not None:
             cmd.extend(["-t", self._num(duration_limit)])
@@ -195,7 +219,11 @@ class FFMpegHLSCommandBuilder:
         )
 
         cmd = self._build_block_inputs(block, stream_profile=stream_profile)
-        filter_complex = self._filter_complex(block, upload_to_vaapi=self.video_encoder.endswith("_vaapi"))
+        filter_complex = self._filter_complex(
+            block,
+            upload_to_vaapi=self.video_encoder.endswith("_vaapi"),
+            audio_normalization=self.audio_normalization,
+        )
         cmd.extend(self._normalized_video_audio_output_args(filter_complex))
         if duration_limit is not None:
             cmd.extend(["-t", self._num(duration_limit)])
@@ -252,7 +280,12 @@ class FFMpegHLSCommandBuilder:
         ]
 
     @staticmethod
-    def _filter_complex(block: PlannedBlock, *, upload_to_vaapi: bool = False) -> str:
+    def _filter_complex(
+        block: PlannedBlock,
+        *,
+        upload_to_vaapi: bool = False,
+        audio_normalization: AudioNormalization = "off",
+    ) -> str:
         chains: list[str] = []
         labels: list[str] = []
         for idx, item in enumerate(block.items):
@@ -263,7 +296,10 @@ class FFMpegHLSCommandBuilder:
                 f"[v{idx}]"
             )
             if item.probe.audio_channels > 0:
-                chains.append(f"[{idx}:a]aresample=48000,aformat=channel_layouts=stereo[a{idx}]")
+                audio_filters = "aresample=48000,aformat=channel_layouts=stereo"
+                if audio_normalization == "loudnorm":
+                    audio_filters += ",loudnorm=I=-16:LRA=11:TP=-1.5"
+                chains.append(f"[{idx}:a]{audio_filters}[a{idx}]")
             else:
                 duration = item.duration or item.probe.duration or 1.0
                 chains.append(
