@@ -18,6 +18,8 @@ The persistent-service installer writes `/etc/fs42stream/fs42stream.env`. Priori
 | Common | `FS42STREAM_PUBLIC_BASE_URL` | External base URL placed in M3U/XMLTV metadata; blank derives it from the HTTP `Host` header | blank |
 | Common | `FS42STREAM_LOGO_FILENAME` | Logo file beneath `<output-root>/<channel-slug>/` | `logo.png` |
 | Common | `FS42STREAM_STREAM_PROFILES` | Active output runners: `jellyfin`, `direct`, `both`, or `direct,jellyfin` | `jellyfin` |
+| Common | `FS42STREAM_BRB_IMAGE_PATH` | Image used for the BRB/fallback slate | `runtime/brb.png` |
+| Safety trial | `FS42STREAM_AUDIO_NORMALIZATION` | `off` (default) or single-pass real-audio `loudnorm` | `off` |
 | Usually default | `FS42STREAM_SCHEDULE_BASE_PATH` | Optional schedule API base path | blank |
 | Usually default | `FS42STREAM_HOST` / `FS42STREAM_PORT` | API/HLS listen address and port | `0.0.0.0` / `8088` |
 | Usually default | `FS42STREAM_OUTPUT_ROOT` | HLS output root | `/var/lib/fs42stream/hls` |
@@ -25,6 +27,16 @@ The persistent-service installer writes `/etc/fs42stream/fs42stream.env`. Priori
 | Advanced | `FS42STREAM_API_BASE_URL` | Deprecated full schedule API URL override; leave blank unless migrating old config | blank |
 
 `FS42STREAM_PUBLIC_BASE_URL` is recommended behind a reverse proxy, NAT, TLS terminator, or when IPTV/Jellyfin clients cannot use the service's bind address. It must include scheme and any externally visible port, for example `https://stream.example.net`.
+
+### Stale-schedule BRB slate
+
+`FS42STREAM_BRB_IMAGE_PATH` selects the image emitted when the FS42 schedule summary has expired. The portable default is the FS42-root-relative `runtime/brb.png`, resolving to `/mnt/fs42/runtime/brb.png` on the live host. A channel-branded asset can be selected without code changes:
+
+```bash
+FS42STREAM_BRB_IMAGE_PATH="catalog/SkyOne/runtime/brb.png"
+```
+
+Relative values resolve beneath the configured FS42 root. Absolute values are accepted only beneath configured FS42 or SDTV media roots; unsafe paths such as `/etc/brb.png` are rejected. The configured BRB image is treated as an image-loop fallback slate, so the existing `--fallback-slate-video` behavior still takes precedence when configured.
 
 ## Install or generate service files
 
@@ -44,6 +56,12 @@ python3 scripts/install_systemd_service.py \
 ```
 
 The generated systemd service runs the integrated API/HLS server and controller. It defaults to the Jellyfin profile only. For direct debugging without a code change, set `FS42STREAM_STREAM_PROFILES="direct"`; set it to `both` (or `direct,jellyfin`) to run both profiles, then perform an approved service restart.
+
+## Optional loudnorm trial and rollback
+
+Audio normalization is disabled by default. To trial single-pass FFmpeg loudnorm for real media audio only, set `FS42STREAM_AUDIO_NORMALIZATION="loudnorm"` in `/etc/fs42stream/fs42stream.env` (or pass `--audio-normalization loudnorm` to the runner/installer). The filter is appended after `aresample=48000,aformat=channel_layouts=stereo` with conservative `I=-16:LRA=11:TP=-1.5` targets. Generated no-audio silence is not modified.
+
+Review the generated unit, then perform a separately approved restart and verify both enabled profile(s), audio levels, and logs. To roll back, set `FS42STREAM_AUDIO_NORMALIZATION="off"` and perform an approved restart; this restores the prior filter graph. This repository change never deploys or restarts a service.
 
 ## Run locally
 
@@ -93,9 +111,10 @@ FS42STREAM_SCHEDULE_BASE_PATH=""
 FS42STREAM_API_BASE_URL=""
 FS42STREAM_PUBLIC_BASE_URL="https://stream.example.net"
 FS42STREAM_LOGO_FILENAME="logo.png"
+FS42STREAM_BRB_IMAGE_PATH="runtime/brb.png"
 ```
 
-Keep the existing `FS42STREAM_*` media-root, encoder, timezone, bind, and output-root values. A deliberate review/restart and direct/Jellyfin playback verification are required for any deployment; this repository change does not deploy or restart services.
+To change the live slate, edit only `FS42STREAM_BRB_IMAGE_PATH` (for example, `catalog/SkyOne/runtime/brb.png`), review the environment file and generated unit, then use the approved deployment process for any restart. To roll back, restore `FS42STREAM_BRB_IMAGE_PATH="runtime/brb.png"` and perform the same approved restart and playback verification. This repository change does not deploy or restart services.
 
 ## Retention cleanup
 

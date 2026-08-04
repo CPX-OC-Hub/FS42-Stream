@@ -9,7 +9,7 @@ from typing import Sequence
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from fs42stream.integrated_runner import parse_stream_profiles
+from fs42stream.integrated_runner import parse_audio_normalization, parse_stream_profiles
 from fs42stream.systemd_service import ServiceConfig, render_environment_file, render_unit_file
 
 
@@ -39,11 +39,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--public-base-url", default="")
     parser.add_argument("--logo-filename", default="logo.png")
     parser.add_argument("--stream-profiles", default="jellyfin", help="active profiles: jellyfin (default), direct, both, or direct,jellyfin")
+    parser.add_argument("--brb-image-path", default="runtime/brb.png", help="fallback BRB image path relative to FS42 root or absolute under an allowed media root")
+    parser.add_argument("--audio-normalization", default="off", help="audio normalization mode: off (default) or loudnorm")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--skip-systemctl", action="store_true", help="write files but do not run systemctl daemon-reload/enable/restart")
     args = parser.parse_args(argv)
     try:
         parse_stream_profiles(args.stream_profiles)
+        parse_audio_normalization(args.audio_normalization)
     except ValueError as exc:
         parser.error(str(exc))
 
@@ -71,6 +74,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         public_base_url=args.public_base_url,
         logo_filename=args.logo_filename,
         stream_profiles=args.stream_profiles,
+        brb_image_path=args.brb_image_path,
+        audio_normalization=args.audio_normalization,
     )
     env_text = render_environment_file(config)
     unit_text = render_unit_file(config)

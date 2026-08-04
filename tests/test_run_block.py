@@ -92,6 +92,26 @@ class BlockRunnerTests(unittest.TestCase):
         self.assertTrue(diagnostics["stale_schedule"]["active"])
         self.assertEqual(diagnostics["plan"][0]["resolved_path"], "/mnt/fs42/runtime/brb.png")
 
+    def test_runner_uses_configured_channel_brb_image_for_stale_schedule_diagnostics(self):
+        client = mock.Mock(fetch_schedule=mock.Mock(return_value=SCHEDULE))
+        client.fetch_schedule_summary.return_value = {"schedule_summary": {"network_id": "Sky One", "start": "2026-06-17T08:00:00", "end": "2026-06-17T09:00:00"}}
+        probe = mock.Mock(validate_video=mock.Mock(return_value=ProbeResult(1, 320, 240, 25, 44100, 1)))
+        runner = BlockRunner(
+            client=client,
+            planner=BlockPlanner(PathResolver(fs42_root="/mnt/fs42", sdtv_root="/mnt/media/SDTV"), probe, brb_image_path="catalog/SkyOne/runtime/brb.png"),
+            builder=FFMpegHLSCommandBuilder(),
+        )
+
+        diagnostics = runner.run(BlockRunConfig(channel="Sky One", duration_limit=600, output_dir=Path("/tmp/out"), now=datetime(2026, 6, 17, 10, 5, 0), dry_run=True))
+
+        self.assertEqual(diagnostics["plan"][0]["resolved_path"], "/mnt/fs42/catalog/SkyOne/runtime/brb.png")
+        self.assertEqual(diagnostics["stale_schedule"]["brb_image_path"], "/mnt/fs42/catalog/SkyOne/runtime/brb.png")
+        self.assertEqual(diagnostics["plan"][0]["input_kind"], "image_loop")
+
+    def test_configured_brb_image_path_rejects_unsafe_absolute_path(self):
+        with self.assertRaisesRegex(ValueError, "outside allowed media roots"):
+            BlockPlanner(PathResolver(fs42_root="/mnt/fs42", sdtv_root="/mnt/media/SDTV"), mock.Mock(), brb_image_path="/etc/brb.png")
+
     def test_runner_uses_engine_render_state_metadata_instead_of_reconstructing_from_raw_block(self):
         client = mock.Mock(fetch_schedule=mock.Mock(return_value=SCHEDULE))
         planner = mock.Mock()

@@ -23,6 +23,44 @@ class IntegratedRunnerTests(unittest.TestCase):
         self.assertEqual(config.duration_limit, ServiceConfig.duration_limit)
         self.assertEqual(config.playout_mode, "ts-primary")
         self.assertEqual(config.stream_profiles, ("jellyfin",))
+        self.assertEqual(str(config.brb_image_path), "runtime/brb.png")
+        self.assertEqual(config.audio_normalization, "off")
+
+    def test_cli_reads_brb_image_path_from_environment_and_forwards_it_to_controller(self):
+        configs = []
+
+        class FakeServer:
+            server_address = ("127.0.0.1", 8088)
+            def serve_forever(self):
+                pass
+            def shutdown(self):
+                pass
+            def server_close(self):
+                pass
+
+        class FakeController:
+            def run(self, config):
+                configs.append(config)
+                return {"status": "complete", "channel": config.channel, "blocks_completed": 1, "events": []}
+
+        with tempfile.TemporaryDirectory() as tmp, mock.patch("sys.stdout"), mock.patch.dict(os.environ, {"FS42STREAM_BRB_IMAGE_PATH": "catalog/SkyOne/runtime/brb.png"}, clear=True):
+            rc = main(["--channel", "Sky One", "--host", "127.0.0.1", "--port", "8088", "--output-root", tmp, "--max-blocks", "1", "--duration-limit", "1"], server_factory=lambda **kwargs: FakeServer(), controller_factory=lambda: FakeController())
+
+        self.assertEqual(rc, 0)
+        self.assertEqual(str(configs[0].brb_image_path), "catalog/SkyOne/runtime/brb.png")
+
+    def test_cli_and_environment_propagate_audio_normalization_and_reject_invalid_values(self):
+        configs = []
+
+        with mock.patch("fs42stream.integrated_runner.run_integrated", side_effect=lambda config, **kwargs: configs.append(config) or {"status": "complete"}), mock.patch("sys.stdout"):
+            self.assertEqual(main(["--audio-normalization", "loudnorm"]), 0)
+            with mock.patch.dict(os.environ, {"FS42STREAM_AUDIO_NORMALIZATION": "loudnorm"}, clear=True):
+                self.assertEqual(main([]), 0)
+            with self.assertRaises(SystemExit) as invalid:
+                main(["--audio-normalization", "invalid"])
+
+        self.assertEqual([config.audio_normalization for config in configs], ["loudnorm", "loudnorm"])
+        self.assertEqual(invalid.exception.code, 2)
 
     def test_jellyfin_only_integrated_status_omits_direct_urls(self):
         class FakeServer:
