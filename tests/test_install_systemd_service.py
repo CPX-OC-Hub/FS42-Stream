@@ -55,6 +55,15 @@ class InstallSystemdServiceTests(unittest.TestCase):
             with self.assertRaises(SystemExit):
                 main(["--env-file", str(Path(tmp) / "env"), "--unit-file", str(Path(tmp) / "unit"), "--output-root", str(Path(tmp) / "hls"), "--stream-profiles", "debug", "--dry-run"])
 
+    def test_dry_run_propagates_configured_brb_image_path(self):
+        with tempfile.TemporaryDirectory() as tmp, mock.patch("sys.stdout") as stdout:
+            rc = main(["--dry-run", "--env-file", str(Path(tmp) / "env"), "--unit-file", str(Path(tmp) / "unit"), "--output-root", str(Path(tmp) / "hls"), "--brb-image-path", "catalog/SkyOne/runtime/brb.png"])
+
+        output = "".join(call.args[0] for call in stdout.write.call_args_list)
+        self.assertEqual(rc, 0)
+        self.assertIn('FS42STREAM_BRB_IMAGE_PATH="catalog/SkyOne/runtime/brb.png"', output)
+        self.assertIn('--brb-image-path "${FS42STREAM_BRB_IMAGE_PATH}"', output)
+
     def test_script_can_run_directly_from_repo_root(self):
         completed = subprocess.run(
             [sys.executable, "scripts/install_systemd_service.py", "--dry-run"],

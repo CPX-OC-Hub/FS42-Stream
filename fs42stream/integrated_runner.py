@@ -16,7 +16,7 @@ from .ffmpeg import FFMpegHLSCommandBuilder, PlayoutMode, StreamProfile
 from .ffprobe import FFProbe
 from .live_controller import LiveController, LiveControllerConfig, SharedScheduleBlockClock
 from .paths import PathResolver
-from .planner import BlockPlanner
+from .planner import DEFAULT_BRB_IMAGE_PATH, BlockPlanner
 from .run_block import DEFAULT_API_BASE_URL, DEFAULT_CHANNEL, DEFAULT_FFMPEG, DEFAULT_FFPROBE, DEFAULT_FS42_ROOT, DEFAULT_SCHEDULE_TIMEZONE, DEFAULT_SDTV_ROOT, BlockRunner
 from .systemd_service import ServiceConfig
 
@@ -66,6 +66,7 @@ class IntegratedRunnerConfig:
     schedule_timezone: str | None = DEFAULT_SCHEDULE_TIMEZONE
     stream_profiles: tuple[StreamProfile, ...] = DEFAULT_STREAM_PROFILES
     playout_mode: PlayoutMode = "ts-primary"
+    brb_image_path: str | Path = DEFAULT_BRB_IMAGE_PATH
 
 
 class IntegratedServer(Protocol):
@@ -120,6 +121,7 @@ def run_integrated(
             "stream_profiles": list(stream_profiles),
             "playout_mode": config.playout_mode,
             "schedule_timezone": config.schedule_timezone,
+            "brb_image_path": str(config.brb_image_path),
             "updated_at": _utc_now(),
         },
     )
@@ -156,6 +158,7 @@ def run_integrated(
         "stream_profiles": list(stream_profiles),
         "playout_mode": config.playout_mode,
         "schedule_timezone": config.schedule_timezone,
+        "brb_image_path": str(config.brb_image_path),
         "updated_at": _utc_now(),
     }
     _write_status(status_json, running_status)
@@ -191,6 +194,7 @@ def run_integrated(
                             stream_profile=profile,
                             playout_mode=config.playout_mode,
                             shared_schedule_clock=shared_schedule_clock,
+                            brb_image_path=config.brb_image_path,
                         )
                     )
                 )
@@ -261,6 +265,7 @@ def main(
     parser.add_argument("--schedule-timezone", default=DEFAULT_SCHEDULE_TIMEZONE, help="timezone for naive FS42 schedule timestamps, e.g. Europe/London")
     parser.add_argument("--playout-mode", choices=("hls-primary", "ts-primary"), default="ts-primary", help="render directly to HLS or render TS first then package HLS")
     parser.add_argument("--stream-profiles", default=os.environ.get("FS42STREAM_STREAM_PROFILES", "jellyfin"), help="active output profiles: jellyfin (default), direct, both, or a comma-separated list")
+    parser.add_argument("--brb-image-path", default=os.environ.get("FS42STREAM_BRB_IMAGE_PATH", str(DEFAULT_BRB_IMAGE_PATH)), help="fallback BRB image path relative to FS42 root or absolute under an allowed media root")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv)
 
@@ -289,6 +294,7 @@ def main(
         schedule_timezone=args.schedule_timezone,
         playout_mode=args.playout_mode,
         stream_profiles=parse_stream_profiles(args.stream_profiles),
+        brb_image_path=args.brb_image_path,
     )
     effective_controller_factory = controller_factory
     if controller_factory is LiveController:
@@ -310,6 +316,7 @@ def _create_controller(config: IntegratedRunnerConfig) -> LiveController:
         planner=BlockPlanner(
             PathResolver(fs42_root=config.fs42_root, sdtv_root=config.sdtv_root),
             FFProbe(config.ffprobe),
+            brb_image_path=config.brb_image_path,
         ),
         builder=FFMpegHLSCommandBuilder(
             config.ffmpeg,

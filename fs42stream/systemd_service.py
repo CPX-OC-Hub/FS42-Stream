@@ -32,6 +32,7 @@ class ServiceConfig:
     public_base_url: str = ""
     logo_filename: str = "logo.png"
     stream_profiles: str = "jellyfin"
+    brb_image_path: str = "runtime/brb.png"
 
 
 def render_environment_file(config: ServiceConfig) -> str:
@@ -55,6 +56,7 @@ def render_environment_file(config: ServiceConfig) -> str:
         "FS42STREAM_PUBLIC_BASE_URL": config.public_base_url,
         "FS42STREAM_LOGO_FILENAME": config.logo_filename,
         "FS42STREAM_STREAM_PROFILES": config.stream_profiles,
+        "FS42STREAM_BRB_IMAGE_PATH": config.brb_image_path,
     }
     lines = ["# Managed by FS42-Stream installer", "# Edit values here, then run: sudo systemctl restart fs42stream", ""]
     lines.extend(f'{key}="{_escape_env(value)}"' for key, value in values.items())
@@ -73,7 +75,7 @@ Type=simple
 User={config.user}
 WorkingDirectory={config.install_dir}
 EnvironmentFile={config.env_file}
-ExecStart={python} -m fs42stream.integrated_runner --channel "${{FS42STREAM_CHANNEL}}" --channel-slug ${{FS42STREAM_CHANNEL_SLUG}} --host ${{FS42STREAM_HOST}} --port ${{FS42STREAM_PORT}} --output-root ${{FS42STREAM_OUTPUT_ROOT}} --max-blocks ${{FS42STREAM_MAX_BLOCKS}} --duration-limit ${{FS42STREAM_DURATION_LIMIT}} --schedule-scheme ${{FS42STREAM_SCHEDULE_SCHEME}} --schedule-host ${{FS42STREAM_SCHEDULE_HOST}} --schedule-port ${{FS42STREAM_SCHEDULE_PORT}} --schedule-base-path "${{FS42STREAM_SCHEDULE_BASE_PATH}}" --api-base-url "${{FS42STREAM_API_BASE_URL}}" --public-base-url "${{FS42STREAM_PUBLIC_BASE_URL}}" --logo-filename ${{FS42STREAM_LOGO_FILENAME}} --video-encoder ${{FS42STREAM_VIDEO_ENCODER}} --vaapi-device ${{FS42STREAM_VAAPI_DEVICE}} --schedule-timezone ${{FS42STREAM_SCHEDULE_TIMEZONE}} --playout-mode ${{FS42STREAM_PLAYOUT_MODE}} --stream-profiles "${{FS42STREAM_STREAM_PROFILES}}"
+ExecStart={python} -m fs42stream.integrated_runner --channel "${{FS42STREAM_CHANNEL}}" --channel-slug ${{FS42STREAM_CHANNEL_SLUG}} --host ${{FS42STREAM_HOST}} --port ${{FS42STREAM_PORT}} --output-root ${{FS42STREAM_OUTPUT_ROOT}} --max-blocks ${{FS42STREAM_MAX_BLOCKS}} --duration-limit ${{FS42STREAM_DURATION_LIMIT}} --schedule-scheme ${{FS42STREAM_SCHEDULE_SCHEME}} --schedule-host ${{FS42STREAM_SCHEDULE_HOST}} --schedule-port ${{FS42STREAM_SCHEDULE_PORT}} --schedule-base-path "${{FS42STREAM_SCHEDULE_BASE_PATH}}" --api-base-url "${{FS42STREAM_API_BASE_URL}}" --public-base-url "${{FS42STREAM_PUBLIC_BASE_URL}}" --logo-filename ${{FS42STREAM_LOGO_FILENAME}} --video-encoder ${{FS42STREAM_VIDEO_ENCODER}} --vaapi-device ${{FS42STREAM_VAAPI_DEVICE}} --schedule-timezone ${{FS42STREAM_SCHEDULE_TIMEZONE}} --playout-mode ${{FS42STREAM_PLAYOUT_MODE}} --stream-profiles "${{FS42STREAM_STREAM_PROFILES}}" --brb-image-path "${{FS42STREAM_BRB_IMAGE_PATH}}"
 Restart=on-failure
 RestartSec=5
 KillSignal=SIGTERM

@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import subprocess
 import sys
 import threading
@@ -16,7 +17,7 @@ from .client import DEFAULT_SCHEDULE_BASE_PATH, DEFAULT_SCHEDULE_HOST, DEFAULT_S
 from .ffmpeg import FFMpegHLSCommandBuilder, PlayoutMode, StreamProfile, hls_list_size_for_profile
 from .ffprobe import FFProbe
 from .paths import PathResolver
-from .planner import BlockPlanner
+from .planner import DEFAULT_BRB_IMAGE_PATH, BlockPlanner
 from .playout_supervisor import SupervisedPlayout, supervise_schedule_playout
 from .run_block import (
     _build_stale_placeholder_schedule,
@@ -73,6 +74,7 @@ class LiveControllerConfig:
     shared_schedule_clock: Any | None = None
     hls_retention_max_age_seconds: float = 6 * 60 * 60
     hls_retention_max_segments_per_dir: int = 7200
+    brb_image_path: str | Path = DEFAULT_BRB_IMAGE_PATH
 
 
 class ScheduleClient(Protocol):
@@ -162,7 +164,8 @@ def _select_shared_schedule_block(
             summary = None
     stale_schedule = _stale_schedule_state(summary, channel=config.channel, now=selection_now, schedule_timezone=config.schedule_timezone)
     if stale_schedule and stale_schedule.get("active"):
-        schedule = _build_stale_placeholder_schedule(config.channel, now=selection_now, duration_limit=config.duration_limit, schedule_timezone=config.schedule_timezone)
+        schedule = _build_stale_placeholder_schedule(config.channel, now=selection_now, duration_limit=config.duration_limit, schedule_timezone=config.schedule_timezone, brb_image_path=config.brb_image_path)
+        stale_schedule["brb_image_path"] = str(config.brb_image_path)
     playout_state = supervise_schedule_playout(
         schedule,
         now=selection_now,
@@ -856,6 +859,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--schedule-timezone", default=DEFAULT_SCHEDULE_TIMEZONE, help="timezone for naive FS42 schedule timestamps, e.g. Europe/London")
     parser.add_argument("--max-recovery-attempts-per-block", type=int, default=3, help="bounded ffmpeg failure recovery attempts within a schedule block")
     parser.add_argument("--fallback-slate-video", type=Path)
+    parser.add_argument("--brb-image-path", default=os.environ.get("FS42STREAM_BRB_IMAGE_PATH", str(DEFAULT_BRB_IMAGE_PATH)), help="fallback BRB image path relative to FS42 root or absolute under an allowed media root")
     parser.add_argument("--timeout", type=float, default=10.0)
     parser.add_argument("--now", help="override current time for deterministic tests, e.g. 2026-06-17T10:05:00")
     parser.add_argument("--dry-run", action="store_true")
@@ -869,7 +873,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     schedule_client = FS42ScheduleClient(schedule_api_url, timeout=args.timeout)
     block_runner = BlockRunner(
         client=FS42ScheduleClient(schedule_api_url, timeout=args.timeout),
-        planner=BlockPlanner(PathResolver(fs42_root=args.fs42_root, sdtv_root=args.sdtv_root), FFProbe(args.ffprobe), fallback_slate_video=args.fallback_slate_video),
+        planner=BlockPlanner(PathResolver(fs42_root=args.fs42_root, sdtv_root=args.sdtv_root), FFProbe(args.ffprobe), fallback_slate_video=args.fallback_slate_video, brb_image_path=args.brb_image_path),
         builder=FFMpegHLSCommandBuilder(args.ffmpeg, video_encoder=args.video_encoder, vaapi_device=args.vaapi_device),
     )
     controller = LiveController(schedule_client=schedule_client, block_runner=block_runner)
@@ -886,6 +890,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         playout_mode=args.playout_mode,
         hls_retention_max_age_seconds=args.hls_retention_max_age_seconds,
         hls_retention_max_segments_per_dir=args.hls_retention_max_segments_per_dir,
+        brb_image_path=args.brb_image_path,
     )
     try:
         result = controller.run(config)

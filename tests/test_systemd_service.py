@@ -23,6 +23,12 @@ class SystemdServiceTests(unittest.TestCase):
         self.assertIn('FS42STREAM_STREAM_PROFILES="jellyfin"', env)
         self.assertIn('--stream-profiles "${FS42STREAM_STREAM_PROFILES}"', unit)
 
+    def test_service_renders_configurable_brb_image_path_and_passes_it_to_runner(self):
+        config = ServiceConfig(brb_image_path="catalog/SkyOne/runtime/brb.png")
+
+        self.assertIn('FS42STREAM_BRB_IMAGE_PATH="catalog/SkyOne/runtime/brb.png"', render_environment_file(config))
+        self.assertIn('--brb-image-path "${FS42STREAM_BRB_IMAGE_PATH}"', render_unit_file(config))
+
     def test_service_can_render_direct_or_both_profile_selection(self):
         self.assertIn('FS42STREAM_STREAM_PROFILES="direct"', render_environment_file(ServiceConfig(stream_profiles="direct")))
         self.assertIn('FS42STREAM_STREAM_PROFILES="both"', render_environment_file(ServiceConfig(stream_profiles="both")))

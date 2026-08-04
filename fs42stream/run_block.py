@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -18,7 +19,7 @@ from .ffmpeg import FFMpegHLSCommandBuilder, PlayoutMode, StreamProfile
 from .ffprobe import FFProbe
 from .hls_harness import inspect_hls_output
 from .paths import PathResolver
-from .planner import BlockPlanner, PlannedBlock, plan_item_type_summary
+from .planner import DEFAULT_BRB_IMAGE_PATH, BlockPlanner, PlannedBlock, plan_item_type_summary
 from .playout_engine import resolve_block_playout
 
 DEFAULT_API_BASE_URL = "http://127.0.0.1:4242"
@@ -135,7 +136,7 @@ def _stale_schedule_state(summary: Mapping[str, Any] | None, *, channel: str, no
     }
 
 
-def _build_stale_placeholder_schedule(channel: str, *, now: datetime | None, duration_limit: float, schedule_timezone: str | None) -> dict[str, Any]:
+def _build_stale_placeholder_schedule(channel: str, *, now: datetime | None, duration_limit: float, schedule_timezone: str | None, brb_image_path: str | Path = DEFAULT_BRB_IMAGE_PATH) -> dict[str, Any]:
     start = _schedule_now(now, schedule_timezone)
     fallback_duration = max(duration_limit, 60.0)
     end = start + timedelta(seconds=fallback_duration)
@@ -148,7 +149,7 @@ def _build_stale_placeholder_schedule(channel: str, *, now: datetime | None, dur
                 "end_time": end.isoformat(),
                 "plan": [
                     {
-                        "path": "runtime/brb.png",
+                        "path": str(brb_image_path),
                         "duration": fallback_duration,
                         "skip": 0,
                         "is_stream": False,
@@ -203,7 +204,9 @@ class BlockRunner:
                     summary = None
             stale_schedule = _stale_schedule_state(summary, channel=config.channel, now=config.now, schedule_timezone=config.schedule_timezone)
             if stale_schedule and stale_schedule.get("active"):
-                schedule = _build_stale_placeholder_schedule(config.channel, now=config.now, duration_limit=config.duration_limit, schedule_timezone=config.schedule_timezone)
+                brb_image_path = getattr(self.planner, "brb_image_path", DEFAULT_BRB_IMAGE_PATH)
+                schedule = _build_stale_placeholder_schedule(config.channel, now=config.now, duration_limit=config.duration_limit, schedule_timezone=config.schedule_timezone, brb_image_path=brb_image_path)
+                stale_schedule["brb_image_path"] = str(brb_image_path)
                 selected = SelectedBlock(index=0, reason="stale", block=schedule["schedule_blocks"][0])
             else:
                 selected = select_current_or_next_block(schedule, now=config.now, schedule_timezone=config.schedule_timezone)
@@ -467,6 +470,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--vaapi-device", help="VAAPI device path, e.g. /dev/dri/renderD128")
     parser.add_argument("--schedule-timezone", default=DEFAULT_SCHEDULE_TIMEZONE, help="timezone for naive FS42 schedule timestamps, e.g. Europe/London")
     parser.add_argument("--fallback-slate-video", type=Path, help="optional prebuilt video used instead of generated black slate for runtime/off-air image entries")
+    parser.add_argument("--brb-image-path", default=os.environ.get("FS42STREAM_BRB_IMAGE_PATH", str(DEFAULT_BRB_IMAGE_PATH)), help="fallback BRB image path relative to FS42 root or absolute under an allowed media root")
     parser.add_argument("--timeout", type=float, default=10.0, help="FS42 API timeout in seconds")
     parser.add_argument("--now", help="override current time for deterministic tests, e.g. 2026-06-17T10:05:00")
     parser.add_argument("--output-name", help="stable HLS playlist/segment prefix, e.g. Your_Channel")
@@ -477,7 +481,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     runner = BlockRunner(
         client=FS42ScheduleClient(args.api_base_url or build_schedule_api_base_url(scheme=args.schedule_scheme, host=args.schedule_host, port=args.schedule_port, base_path=args.schedule_base_path), timeout=args.timeout),
-        planner=BlockPlanner(PathResolver(fs42_root=args.fs42_root, sdtv_root=args.sdtv_root), FFProbe(args.ffprobe), fallback_slate_video=args.fallback_slate_video),
+        planner=BlockPlanner(PathResolver(fs42_root=args.fs42_root, sdtv_root=args.sdtv_root), FFProbe(args.ffprobe), fallback_slate_video=args.fallback_slate_video, brb_image_path=args.brb_image_path),
         builder=FFMpegHLSCommandBuilder(args.ffmpeg, video_encoder=args.video_encoder, vaapi_device=args.vaapi_device),
     )
     config = BlockRunConfig(

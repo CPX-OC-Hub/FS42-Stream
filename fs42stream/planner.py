@@ -7,6 +7,8 @@ from typing import Any, Mapping, Sequence
 from .ffprobe import FFProbe, ProbeResult
 from .paths import PathResolver
 
+DEFAULT_BRB_IMAGE_PATH = Path("runtime/brb.png")
+
 
 @dataclass(frozen=True)
 class PlannedItem:
@@ -41,10 +43,11 @@ class PlannedBlock:
 class BlockPlanner:
     """Build block-level plans without flattening or rewriting FS42's own plan entries."""
 
-    def __init__(self, resolver: PathResolver | None = None, probe: FFProbe | None = None, *, fallback_slate_video: str | Path | None = None) -> None:
+    def __init__(self, resolver: PathResolver | None = None, probe: FFProbe | None = None, *, fallback_slate_video: str | Path | None = None, brb_image_path: str | Path = DEFAULT_BRB_IMAGE_PATH) -> None:
         self.resolver = resolver or PathResolver()
         self.probe = probe or FFProbe()
         self.fallback_slate_video = Path(fallback_slate_video) if fallback_slate_video is not None else None
+        self.brb_image_path = self.resolver.resolve(brb_image_path)
 
     def plan(self, schedule: Mapping[str, Any]) -> list[PlannedBlock]:
         raw_blocks = schedule.get("schedule_blocks")
@@ -139,6 +142,8 @@ class BlockPlanner:
         )
 
     def _is_known_runtime_off_air_slate(self, item: Mapping[str, Any], resolved: Path) -> bool:
+        if resolved == self.brb_image_path:
+            return True
         try:
             resolved.relative_to(self.resolver.fs42_root.resolve(strict=False) / "runtime")
             under_runtime = True
