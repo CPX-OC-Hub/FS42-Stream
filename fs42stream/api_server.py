@@ -161,7 +161,7 @@ class FS42APIRequestHandler(BaseHTTPRequestHandler):
             self._handle_iptv_channels_m3u(single_slug=unquote(raw_slug))
             return
 
-        if request_path == "/iptv/xmltv.xml":
+        if request_path in {"/iptv/xmltv.xml", "/xmltv.xml"}:
             self._handle_iptv_xmltv()
             return
 
@@ -670,7 +670,7 @@ def _m3u_payload(*, channel: Mapping[str, str] | None = None, base_url: str, str
     else:
         hls_url = f"{base_url}/hls/{channel['slug']}/{channel['slug']}.m3u8"
     return "\n".join([
-        "#EXTM3U",
+        f"#EXTM3U x-tvg-url=\"{base_url}/iptv/xmltv.xml\"",
         f"#EXTINF:-1 tvg-id=\"{channel['id']}\" tvg-name=\"{display_name}\" tvg-logo=\"{channel['logo_url']}\" group-title=\"FS42\",{display_name}",
         hls_url,
         "",

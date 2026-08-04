@@ -738,10 +738,17 @@ class APIServerTests(unittest.TestCase):
             self.assertEqual(programmes[0].findtext("title"), "Show A")
             self.assertEqual(programmes[0].attrib["start"], "20260625220000 +0100")
 
+            status, headers, body = self._request(server, "/xmltv.xml")
+            self.assertEqual(status, 200)
+            self.assertEqual(headers["content-type"], "application/xml; charset=utf-8")
+            alias_xml = ET.fromstring(body)
+            self.assertEqual(alias_xml.find("channel").attrib["id"], "fs42.sky_one")
+
             status, headers, body = self._request(server, "/iptv/jellyfin/channels.m3u")
             self.assertEqual(status, 200)
             self.assertEqual(headers["content-type"], "application/vnd.apple.mpegurl")
             jellyfin_m3u = body.decode("utf-8")
+            self.assertIn(f'#EXTM3U x-tvg-url="http://127.0.0.1:{port}/iptv/xmltv.xml"', jellyfin_m3u)
             self.assertIn(f'#EXTINF:-1 tvg-id="fs42.sky_one" tvg-name="Sky One (Jellyfin)" tvg-logo="http://127.0.0.1:{port}/hls/Sky_One/skyone.png" group-title="FS42",Sky One (Jellyfin)', jellyfin_m3u)
             self.assertIn(f"http://127.0.0.1:{port}/hls/Sky_One/jellyfin/Sky_One.m3u8", jellyfin_m3u)
 
