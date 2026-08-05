@@ -73,6 +73,7 @@ class IntegratedRunnerConfig:
     playout_mode: PlayoutMode = "ts-primary"
     brb_image_path: str | Path = DEFAULT_BRB_IMAGE_PATH
     audio_normalization: AudioNormalization = "off"
+    jellyfin_pre_roll_lead_seconds: float = 0.0
 
 
 class IntegratedServer(Protocol):
@@ -128,6 +129,7 @@ def run_integrated(
             "stream_profiles": list(stream_profiles),
             "playout_mode": config.playout_mode,
             "audio_normalization": audio_normalization,
+            "jellyfin_pre_roll_lead_seconds": config.jellyfin_pre_roll_lead_seconds,
             "schedule_timezone": config.schedule_timezone,
             "brb_image_path": str(config.brb_image_path),
             "updated_at": _utc_now(),
@@ -166,6 +168,7 @@ def run_integrated(
         "stream_profiles": list(stream_profiles),
         "playout_mode": config.playout_mode,
         "audio_normalization": audio_normalization,
+        "jellyfin_pre_roll_lead_seconds": config.jellyfin_pre_roll_lead_seconds,
         "schedule_timezone": config.schedule_timezone,
         "brb_image_path": str(config.brb_image_path),
         "updated_at": _utc_now(),
@@ -204,6 +207,7 @@ def run_integrated(
                             playout_mode=config.playout_mode,
                             shared_schedule_clock=shared_schedule_clock,
                             brb_image_path=config.brb_image_path,
+                            jellyfin_pre_roll_lead_seconds=config.jellyfin_pre_roll_lead_seconds,
                         )
                     )
                 )
@@ -276,6 +280,7 @@ def main(
     parser.add_argument("--stream-profiles", default=os.environ.get("FS42STREAM_STREAM_PROFILES", "jellyfin"), help="active output profiles: jellyfin (default), direct, both, or a comma-separated list")
     parser.add_argument("--brb-image-path", default=os.environ.get("FS42STREAM_BRB_IMAGE_PATH", str(DEFAULT_BRB_IMAGE_PATH)), help="fallback BRB image path relative to FS42 root or absolute under an allowed media root")
     parser.add_argument("--audio-normalization", type=parse_audio_normalization, default=os.environ.get("FS42STREAM_AUDIO_NORMALIZATION", "off"), metavar="{off,loudnorm}", help="audio normalization mode; default off")
+    parser.add_argument("--jellyfin-pre-roll-lead-seconds", type=float, default=float(os.environ.get("FS42STREAM_JELLYFIN_PRE_ROLL_LEAD_SECONDS", "0")), help="private Jellyfin next-block staging lead time; zero disables it")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv)
 
@@ -306,6 +311,7 @@ def main(
         stream_profiles=parse_stream_profiles(args.stream_profiles),
         brb_image_path=args.brb_image_path,
         audio_normalization=args.audio_normalization,
+        jellyfin_pre_roll_lead_seconds=args.jellyfin_pre_roll_lead_seconds,
     )
     effective_controller_factory = controller_factory
     if controller_factory is LiveController:

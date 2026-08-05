@@ -62,6 +62,30 @@ class IntegratedRunnerTests(unittest.TestCase):
         self.assertEqual([config.audio_normalization for config in configs], ["loudnorm", "loudnorm"])
         self.assertEqual(invalid.exception.code, 2)
 
+    def test_cli_and_environment_propagate_jellyfin_pre_roll_lead_seconds(self):
+        configs = []
+
+        class FakeServer:
+            server_address = ("127.0.0.1", 8088)
+            def serve_forever(self):
+                pass
+            def shutdown(self):
+                pass
+            def server_close(self):
+                pass
+
+        class FakeController:
+            def run(self, config):
+                configs.append(config)
+                return {"status": "complete", "channel": config.channel, "blocks_completed": 1, "events": []}
+
+        with tempfile.TemporaryDirectory() as tmp, mock.patch("sys.stdout"):
+            self.assertEqual(main(["--output-root", tmp, "--max-blocks", "1", "--duration-limit", "1", "--jellyfin-pre-roll-lead-seconds", "120"], server_factory=lambda **kwargs: FakeServer(), controller_factory=lambda: FakeController()), 0)
+            with mock.patch.dict(os.environ, {"FS42STREAM_JELLYFIN_PRE_ROLL_LEAD_SECONDS": "90"}, clear=True):
+                self.assertEqual(main(["--output-root", tmp, "--max-blocks", "1", "--duration-limit", "1"], server_factory=lambda **kwargs: FakeServer(), controller_factory=lambda: FakeController()), 0)
+
+        self.assertEqual([config.jellyfin_pre_roll_lead_seconds for config in configs], [120.0, 90.0])
+
     def test_jellyfin_only_integrated_status_omits_direct_urls(self):
         class FakeServer:
             server_address = ("127.0.0.1", 18088)
