@@ -1,6 +1,6 @@
 import tempfile
 import unittest
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from fs42stream.jellyfin_preroll import GatedJellyfinPreRoll, staged_run_timing
@@ -55,6 +55,17 @@ class GatedJellyfinPreRollTests(unittest.TestCase):
         self.assertEqual(early.run_now, block_start)
         self.assertEqual(late.media_offset, 13.0)
         self.assertEqual(late.run_now, block_start + timedelta(seconds=13))
+
+    def test_staged_run_timing_accepts_aware_clock_values_from_live_service(self):
+        block_start = datetime(2026, 6, 17, 10, 30, 0)
+
+        early = staged_run_timing(
+            block_start=block_start,
+            stage_started_at=datetime(2026, 6, 17, 10, 29, 52, tzinfo=timezone.utc),
+        )
+
+        self.assertEqual(early.run_now, block_start)
+        self.assertEqual(early.media_offset, 0.0)
 
     def test_status_diagnostics_expose_fallback_when_boundary_arrives_without_stage_segments(self):
         with tempfile.TemporaryDirectory() as tmp:

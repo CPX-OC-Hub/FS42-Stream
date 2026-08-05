@@ -434,7 +434,7 @@ class LiveController:
                                 delay = max(0.0, (start_at - _schedule_now(config.clock(), config.schedule_timezone)).total_seconds())
                                 if delay:
                                     config.sleep(delay)
-                                run_stage(config.clock())
+                                run_stage(_schedule_now(config.clock(), config.schedule_timezone))
 
                             stage_thread = threading.Thread(target=delayed_stage, name=f"jellyfin-preroll-{ordinal + 1}", daemon=True)
                             stage_thread.start()

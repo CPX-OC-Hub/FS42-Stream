@@ -24,12 +24,19 @@ class StagedRunTiming:
 
 def staged_run_timing(*, block_start: datetime, stage_started_at: datetime) -> StagedRunTiming:
     """Use media zero before a boundary and normal schedule catch-up afterwards."""
+    block_start = _naive_schedule_time(block_start)
+    stage_started_at = _naive_schedule_time(stage_started_at)
     if stage_started_at <= block_start:
         return StagedRunTiming(run_now=block_start, media_offset=0.0)
     return StagedRunTiming(
         run_now=stage_started_at,
         media_offset=max(0.0, (stage_started_at - block_start).total_seconds()),
     )
+
+
+def _naive_schedule_time(value: datetime) -> datetime:
+    """Normalize service clock datetimes before comparing to naive schedules."""
+    return value.replace(tzinfo=None) if value.tzinfo is not None else value
 
 
 class GatedJellyfinPreRoll:
