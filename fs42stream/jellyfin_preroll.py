@@ -42,6 +42,7 @@ class GatedJellyfinPreRoll:
         staged_playlist: Path,
         publish_at: datetime,
         public_next_segment_number: int,
+        staged_block: str | None = None,
     ) -> None:
         if public_next_segment_number < 0:
             raise ValueError("public_next_segment_number must be non-negative")
@@ -49,12 +50,13 @@ class GatedJellyfinPreRoll:
         self.staged_playlist = staged_playlist
         self.publish_at = publish_at
         self.public_next_segment_number = public_next_segment_number
+        self._staged_block = staged_block or staged_playlist.parent.name
         self._published_source_names: set[str] = set()
         self._boundary_event: dict[str, Any] | None = None
 
     @property
     def staged_block(self) -> str:
-        return self.staged_playlist.parent.name
+        return self._staged_block
 
     def status(self, *, now: datetime, fallback_reason: str | None = None) -> dict[str, Any]:
         ready = len(_playlist_entries(self.staged_playlist))

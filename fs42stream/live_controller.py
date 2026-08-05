@@ -9,12 +9,13 @@ import sys
 import threading
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol, Sequence
 
 from .client import DEFAULT_SCHEDULE_BASE_PATH, DEFAULT_SCHEDULE_HOST, DEFAULT_SCHEDULE_PORT, DEFAULT_SCHEDULE_SCHEME, FS42ScheduleClient, build_schedule_api_base_url
 from .ffmpeg import FFMpegHLSCommandBuilder, PlayoutMode, StreamProfile, hls_list_size_for_profile
+from .jellyfin_preroll import GatedJellyfinPreRoll, staged_run_timing
 from .ffprobe import FFProbe
 from .paths import PathResolver
 from .planner import DEFAULT_BRB_IMAGE_PATH, BlockPlanner
@@ -75,6 +76,7 @@ class LiveControllerConfig:
     hls_retention_max_age_seconds: float = 6 * 60 * 60
     hls_retention_max_segments_per_dir: int = 7200
     brb_image_path: str | Path = DEFAULT_BRB_IMAGE_PATH
+    jellyfin_pre_roll_lead_seconds: float = 0.0
 
 
 class ScheduleClient(Protocol):
@@ -281,6 +283,8 @@ class LiveController:
             raise ValueError("max_blocks must be positive")
         if config.duration_limit <= 0:
             raise ValueError("duration_limit must be positive")
+        if config.jellyfin_pre_roll_lead_seconds < 0:
+            raise ValueError("jellyfin_pre_roll_lead_seconds must be non-negative")
         if config.stream_profile not in {"direct", "jellyfin"}:
             raise ValueError("stream_profile must be 'direct' or 'jellyfin'")
         if config.playout_mode not in {"hls-primary", "ts-primary"}:
@@ -300,6 +304,9 @@ class LiveController:
         last_stale_schedule: dict[str, Any] | None = None
         last_ffmpeg_status: dict[str, Any] | None = None
         previous_block_info: dict[str, Any] | None = None
+        active_pre_roll: dict[str, Any] | None = None
+        public_resume: dict[str, Any] | None = None
+        last_pre_roll_status: dict[str, Any] | None = None
 
         hls_start_number = 0
         hls_start_time_offset = 0.0
@@ -363,6 +370,89 @@ class LiveController:
             block_start = _parse_datetime(playout.render_state.start_time)
             block_end = _parse_datetime(playout.render_state.end_time)
             run_now = selection_now if not simulated_cursor else (block_start or cursor)
+            if public_resume is not None and public_resume.get("selected_index") == selected.index:
+                run_now = public_resume["run_now"]
+                hls_start_number = int(public_resume["hls_start_number"])
+                hls_start_time_offset = float(public_resume["hls_start_time_offset"])
+                public_resume = None
+            if (
+                config.stream_profile == "jellyfin"
+                and config.jellyfin_pre_roll_lead_seconds > 0
+                and ordinal < config.max_blocks - 1
+                and block_end is not None
+            ):
+                raw_blocks = schedule.get("schedule_blocks")
+                next_index = selected.index + 1
+                if isinstance(raw_blocks, list) and next_index < len(raw_blocks) and isinstance(raw_blocks[next_index], Mapping):
+                    next_block = raw_blocks[next_index]
+                    next_start = _parse_datetime(next_block.get("start_time"))
+                    next_end = _parse_datetime(next_block.get("end_time"))
+                    if next_start is not None:
+                        stage_dir = config.output_root / ".jellyfin-staging" / FFMpegHLSCommandBuilder._slug(config.channel) / f"{ordinal + 1:04d}-{next_start.strftime('%Y%m%dT%H%M%S')}"
+                        stage_dir.mkdir(parents=True, exist_ok=True)
+                        for stale_path in stage_dir.glob("*"):
+                            if stale_path.is_file():
+                                stale_path.unlink()
+                        stage_playlist = stage_dir / f"{FFMpegHLSCommandBuilder._slug(config.channel)}.m3u8"
+                        stage_duration = min(
+                            config.jellyfin_pre_roll_lead_seconds,
+                            max(0.0, (next_end - next_start).total_seconds()) if next_end is not None else config.jellyfin_pre_roll_lead_seconds,
+                        )
+                        stage_result: dict[str, Any] = {}
+
+                        def run_stage(stage_started_at: datetime) -> None:
+                            timing = staged_run_timing(block_start=next_start, stage_started_at=stage_started_at)
+                            stage_result.update(
+                                self.block_runner.run(
+                                    BlockRunConfig(
+                                        channel=config.channel,
+                                        duration_limit=stage_duration,
+                                        output_dir=stage_dir,
+                                        now=timing.run_now,
+                                        dry_run=config.dry_run,
+                                        output_name=FFMpegHLSCommandBuilder._slug(config.channel),
+                                        hls_start_number=0,
+                                        hls_start_time_offset=0.0,
+                                        hls_append=False,
+                                        hls_boundary_starts=(),
+                                        schedule_timezone=config.schedule_timezone,
+                                        stream_profile="jellyfin",
+                                        playout_mode=config.playout_mode,
+                                        schedule=schedule,
+                                        selected_block_index=next_index,
+                                        selected_block_reason="pre-roll",
+                                    )
+                                )
+                            )
+
+                        if simulated_cursor:
+                            run_stage(next_start - timedelta(seconds=config.jellyfin_pre_roll_lead_seconds))
+                            stage_thread = None
+                        else:
+                            def delayed_stage() -> None:
+                                start_at = next_start - timedelta(seconds=config.jellyfin_pre_roll_lead_seconds)
+                                delay = max(0.0, (start_at - _schedule_now(config.clock(), config.schedule_timezone)).total_seconds())
+                                if delay:
+                                    config.sleep(delay)
+                                run_stage(config.clock())
+
+                            stage_thread = threading.Thread(target=delayed_stage, name=f"jellyfin-preroll-{ordinal + 1}", daemon=True)
+                            stage_thread.start()
+                        active_pre_roll = {
+                            "next_index": next_index,
+                            "next_start": next_start,
+                            "next_block": dict(next_block),
+                            "stage_playlist": stage_playlist,
+                            "stage_result": stage_result,
+                            "stage_thread": stage_thread,
+                        }
+                        last_pre_roll_status = {
+                            "pre_roll_state": "staged-private",
+                            "staged_block": str(next_block.get("title") or FFMpegHLSCommandBuilder._slug(config.channel)),
+                            "staged_segments_ready": 0,
+                            "publish_at": next_start.isoformat(),
+                        }
+                        _emit_live_status(config, status="running", channel_output_dir=channel_output_dir, events=events, playout_state=playout_state, schedule_now=selection_now, stale_schedule=last_stale_schedule, pre_roll=last_pre_roll_status)
             effective_duration_limit = config.duration_limit
             if not simulated_cursor and block_end is not None:
                 schedule_now = _schedule_now(selection_now, config.schedule_timezone)
@@ -547,6 +637,30 @@ class LiveController:
                         break
 
             last_index = selected.index
+            if (
+                active_pre_roll is not None
+                and active_pre_roll.get("next_index") == selected.index + 1
+                and block_end is not None
+                and (simulated_cursor or _schedule_now(config.clock(), config.schedule_timezone) >= block_end)
+            ):
+                gate = GatedJellyfinPreRoll(
+                    public_playlist=channel_output_dir / f"{FFMpegHLSCommandBuilder._slug(config.channel)}.m3u8",
+                    staged_playlist=active_pre_roll["stage_playlist"],
+                    publish_at=active_pre_roll["next_start"],
+                    public_next_segment_number=hls_start_number,
+                    staged_block=str(active_pre_roll["next_block"].get("title") or "scheduled-block"),
+                )
+                last_pre_roll_status = gate.publish_if_due(block_end)
+                events.append({"event": "public_boundary_switch" if last_pre_roll_status.get("pre_roll_state") == "published" else "pre_roll_fallback", **last_pre_roll_status})
+                if last_pre_roll_status.get("pre_roll_state") == "published":
+                    staged_duration = _playlist_duration(active_pre_roll["stage_playlist"])
+                    public_resume = {
+                        "selected_index": active_pre_roll["next_index"],
+                        "run_now": active_pre_roll["next_start"] + timedelta(seconds=staged_duration),
+                        "hls_start_number": gate.public_next_segment_number,
+                        "hls_start_time_offset": hls_start_time_offset + staged_duration,
+                    }
+                active_pre_roll = None
             if not simulated_cursor and block_end is not None and ordinal < config.max_blocks - 1:
                 schedule_now = _schedule_now(config.clock(), config.schedule_timezone)
                 wait_seconds = max(0.0, (block_end - schedule_now).total_seconds())
@@ -570,7 +684,7 @@ class LiveController:
                         stale_schedule=last_stale_schedule,
                         ffmpeg=last_ffmpeg_status,
                     )
-                    filler_duration = wait_seconds + BOUNDARY_FILLER_STARTUP_GUARD_SECONDS
+                    filler_duration = wait_seconds if active_pre_roll is not None else wait_seconds + BOUNDARY_FILLER_STARTUP_GUARD_SECONDS
                     filler_diagnostics = dict(
                         self.filler_runner.run(
                             output_dir=channel_output_dir,
@@ -615,6 +729,25 @@ class LiveController:
                     )
                     hls_start_number = int(filler_diagnostics.get("hls_next_start_number") or hls_start_number)
                     hls_start_time_offset = _next_hls_start_time_offset(filler_diagnostics, fallback=hls_start_time_offset)
+                    if active_pre_roll is not None and active_pre_roll.get("next_index") == selected.index + 1:
+                        gate = GatedJellyfinPreRoll(
+                            public_playlist=channel_output_dir / f"{FFMpegHLSCommandBuilder._slug(config.channel)}.m3u8",
+                            staged_playlist=active_pre_roll["stage_playlist"],
+                            publish_at=active_pre_roll["next_start"],
+                            public_next_segment_number=hls_start_number,
+                            staged_block=str(active_pre_roll["next_block"].get("title") or "scheduled-block"),
+                        )
+                        last_pre_roll_status = gate.publish_if_due(block_end)
+                        events.append({"event": "public_boundary_switch" if last_pre_roll_status.get("pre_roll_state") == "published" else "pre_roll_fallback", **last_pre_roll_status})
+                        if last_pre_roll_status.get("pre_roll_state") == "published":
+                            staged_duration = _playlist_duration(active_pre_roll["stage_playlist"])
+                            public_resume = {
+                                "selected_index": active_pre_roll["next_index"],
+                                "run_now": active_pre_roll["next_start"] + timedelta(seconds=staged_duration),
+                                "hls_start_number": gate.public_next_segment_number,
+                                "hls_start_time_offset": hls_start_time_offset + staged_duration,
+                            }
+                        active_pre_roll = None
                     _emit_live_status(
                         config,
                         status="running",
@@ -655,6 +788,8 @@ class LiveController:
         }
         if last_ffmpeg_status is not None:
             result["ffmpeg"] = dict(last_ffmpeg_status)
+        if last_pre_roll_status is not None:
+            result["jellyfin_pre_roll"] = dict(last_pre_roll_status)
         if config.status_callback is not None:
             config.status_callback(result)
         return result
@@ -745,6 +880,24 @@ def _next_hls_start_time_offset(diagnostics: Mapping[str, Any], *, fallback: flo
     return fallback
 
 
+def _playlist_duration(playlist: Path) -> float:
+    """Return the accumulated EXTINF duration, independent of HLS sequence numbers."""
+    try:
+        lines = playlist.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return 0.0
+    total = 0.0
+    for line in lines:
+        text = line.strip()
+        if not text.startswith("#EXTINF:"):
+            continue
+        try:
+            total += float(text.removeprefix("#EXTINF:").split(",", 1)[0])
+        except ValueError:
+            continue
+    return total
+
+
 def _is_show_to_show_boundary(previous_block: Mapping[str, Any], next_block: Mapping[str, Any]) -> bool:
     previous_type = _last_content_type(previous_block)
     next_type = _first_content_type(next_block)
@@ -790,6 +943,7 @@ def _emit_live_status(
     schedule_now: datetime | None,
     stale_schedule: Mapping[str, Any] | None = None,
     ffmpeg: Mapping[str, Any] | None = None,
+    pre_roll: Mapping[str, Any] | None = None,
 ) -> None:
     if config.status_callback is None:
         return
@@ -817,6 +971,8 @@ def _emit_live_status(
     }
     if ffmpeg is not None:
         payload["ffmpeg"] = dict(ffmpeg)
+    if pre_roll is not None:
+        payload["jellyfin_pre_roll"] = dict(pre_roll)
     config.status_callback(payload)
 
 
@@ -867,6 +1023,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--playout-mode", choices=("hls-primary", "ts-primary"), default="ts-primary", help="render directly to HLS or render TS first then package HLS")
     parser.add_argument("--hls-retention-max-age-seconds", type=float, default=6 * 60 * 60, help="rolling HLS segment retention age")
     parser.add_argument("--hls-retention-max-segments-per-dir", type=int, default=7200, help="maximum HLS .ts segments to keep in each direct/Jellyfin channel directory")
+    parser.add_argument("--jellyfin-pre-roll-lead-seconds", type=float, default=float(os.environ.get("FS42STREAM_JELLYFIN_PRE_ROLL_LEAD_SECONDS", "0")), help="private Jellyfin next-block staging lead time; zero disables it")
     args = parser.parse_args(argv)
 
     schedule_api_url = args.api_base_url or build_schedule_api_base_url(scheme=args.schedule_scheme, host=args.schedule_host, port=args.schedule_port, base_path=args.schedule_base_path)
@@ -891,6 +1048,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         hls_retention_max_age_seconds=args.hls_retention_max_age_seconds,
         hls_retention_max_segments_per_dir=args.hls_retention_max_segments_per_dir,
         brb_image_path=args.brb_image_path,
+        jellyfin_pre_roll_lead_seconds=args.jellyfin_pre_roll_lead_seconds,
     )
     try:
         result = controller.run(config)

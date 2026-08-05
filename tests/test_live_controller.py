@@ -1339,6 +1339,56 @@ class LiveControllerTests(unittest.TestCase):
         self.assertEqual(payload["blocks_completed"], 2)
         self.assertEqual(payload["events"][0]["block"]["title"], "First Live Block")
 
+    def test_jellyfin_preroll_keeps_next_block_private_until_boundary_then_publishes_and_resumes_after_staged_media(self):
+        class PreRollRunner:
+            def __init__(self):
+                self.calls = []
+
+            def run(self, config):
+                self.calls.append(config)
+                staged = ".jellyfin-staging" in config.output_dir.parts
+                playlist = config.output_dir / f"{config.output_name}.m3u8"
+                config.output_dir.mkdir(parents=True, exist_ok=True)
+                if staged:
+                    names = [f"{config.output_name}_00000.ts", f"{config.output_name}_00001.ts"]
+                    for name in names:
+                        (config.output_dir / name).write_bytes(b"staged")
+                    playlist.write_text("#EXTM3U\n#EXTINF:2.0,\n" + "\n#EXTINF:2.0,\n".join(names) + "\n")
+                    return {"status": "ok", "playlist": str(playlist), "hls_next_start_number": 2, "hls_next_start_time_offset": 4.0, "hls": {"segments": [str(config.output_dir / name) for name in names]}, "ffmpeg": {"returncode": 0}, "plan": []}
+                if len([call for call in self.calls if ".jellyfin-staging" not in call.output_dir.parts]) == 1:
+                    names = [f"{config.output_name}_{number:05d}.ts" for number in range(3)]
+                    for name in names:
+                        (config.output_dir / name).write_bytes(b"current")
+                    playlist.write_text("#EXTM3U\n#EXTINF:2.0,\n" + "\n#EXTINF:2.0,\n".join(names) + "\n")
+                    return {"status": "ok", "playlist": str(playlist), "hls_next_start_number": 3, "hls_next_start_time_offset": 6.0, "hls": {"segments": [str(config.output_dir / name) for name in names]}, "ffmpeg": {"returncode": 0}, "plan": []}
+                return {"status": "ok", "playlist": str(playlist), "hls_next_start_number": 6, "hls_next_start_time_offset": 12.0, "hls": {"segments": []}, "ffmpeg": {"returncode": 0}, "plan": []}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            updates = []
+            runner = PreRollRunner()
+            result = LiveController(schedule_client=FakeScheduleClient(), block_runner=runner).run(
+                LiveControllerConfig(channel="Example Channel", output_root=Path(tmp), max_blocks=2, duration_limit=1800, now=datetime(2026, 6, 17, 10, 0, 0), stream_profile="jellyfin", jellyfin_pre_roll_lead_seconds=20, status_callback=updates.append)
+            )
+            public = Path(result["channel_output_dir"]) / "Example_Channel.m3u8"
+            public_text = public.read_text()
+
+        stage_call = next(call for call in runner.calls if ".jellyfin-staging" in call.output_dir.parts)
+        public_calls = [call for call in runner.calls if ".jellyfin-staging" not in call.output_dir.parts]
+        self.assertEqual(stage_call.now, datetime(2026, 6, 17, 10, 30, 0))
+        self.assertEqual(stage_call.hls_start_time_offset, 0.0)
+        self.assertEqual(public_calls[1].now, datetime(2026, 6, 17, 10, 30, 4))
+        self.assertEqual(public_calls[1].hls_start_number, 5)
+        self.assertEqual(public_calls[1].hls_start_time_offset, 10.0)
+        self.assertIn("Example_Channel_00003.ts", public_text)
+        self.assertIn("Example_Channel_00004.ts", public_text)
+        self.assertNotIn("#EXT-X-ENDLIST", public_text)
+        self.assertNotIn("#EXT-X-DISCONTINUITY", public_text)
+        diagnostics = result["jellyfin_pre_roll"]
+        self.assertEqual(diagnostics["pre_roll_state"], "published")
+        self.assertEqual(diagnostics["staged_segments_ready"], 2)
+        self.assertEqual(diagnostics["public_boundary_switch"]["event"], "public_boundary_switch")
+        self.assertTrue(any(update.get("jellyfin_pre_roll", {}).get("pre_roll_state") == "staged-private" for update in updates))
+
 
 if __name__ == "__main__":
     unittest.main()
