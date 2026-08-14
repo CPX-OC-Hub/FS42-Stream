@@ -243,7 +243,7 @@ class HLSBlackSlateFillerRunner:
                 "-start_number",
                 str(hls_start_number),
             ])
-        if stream_profile == "jellyfin" and hls_start_time_offset is not None:
+        if hls_start_time_offset is not None:
             command.extend(["-output_ts_offset", _num(hls_start_time_offset)])
         if hls_append:
             hls_flags = "omit_endlist+append_list" if stream_profile == "jellyfin" else "omit_endlist+append_list+discont_start"
@@ -498,7 +498,7 @@ class LiveController:
                     dry_run=config.dry_run,
                     output_name=FFMpegHLSCommandBuilder._slug(config.channel),
                     hls_start_number=block_hls_start_number,
-                    hls_start_time_offset=hls_start_time_offset if config.stream_profile == "jellyfin" else None,
+                    hls_start_time_offset=hls_start_time_offset,
                     hls_append=block_hls_append,
                     hls_boundary_starts=tuple(hls_boundary_starts),
                     schedule_timezone=config.schedule_timezone,
@@ -605,7 +605,7 @@ class LiveController:
                                 dry_run=config.dry_run,
                                 output_name=FFMpegHLSCommandBuilder._slug(config.channel),
                                 hls_start_number=hls_start_number,
-                                hls_start_time_offset=hls_start_time_offset if config.stream_profile == "jellyfin" else None,
+                                hls_start_time_offset=hls_start_time_offset,
                                 hls_append=True,
                                 hls_boundary_starts=tuple(hls_boundary_starts),
                                 schedule_timezone=config.schedule_timezone,
@@ -703,7 +703,7 @@ class LiveController:
                             output_name=FFMpegHLSCommandBuilder._slug(config.channel),
                             duration=filler_duration,
                             hls_start_number=hls_start_number,
-                            hls_start_time_offset=hls_start_time_offset if config.stream_profile == "jellyfin" else None,
+                            hls_start_time_offset=hls_start_time_offset,
                             hls_append=True,
                             stream_profile=config.stream_profile,
                         )
@@ -733,7 +733,7 @@ class LiveController:
                             "status": filler_diagnostics.get("status"),
                             "playlist": filler_diagnostics.get("playlist"),
                             "hls_start_number": hls_start_number,
-                            "hls_start_time_offset": hls_start_time_offset if config.stream_profile == "jellyfin" else None,
+                            "hls_start_time_offset": hls_start_time_offset,
                             "hls_next_start_number": filler_diagnostics.get("hls_next_start_number"),
                             "hls_next_start_time_offset": filler_diagnostics.get("hls_next_start_time_offset"),
                             "ffmpeg_returncode": _ffmpeg_returncode(filler_diagnostics),

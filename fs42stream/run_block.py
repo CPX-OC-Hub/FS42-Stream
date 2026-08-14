@@ -255,7 +255,7 @@ class BlockRunner:
                         transport_stream_path=transport_stream_part,
                         duration_limit=item_duration_limit,
                         hls_start_number=config.hls_start_number,
-                        hls_start_time_offset=config.hls_start_time_offset if config.stream_profile == "jellyfin" else None,
+                        hls_start_time_offset=config.hls_start_time_offset,
                         hls_append=config.hls_append or item_index > 0,
                         stream_profile=config.stream_profile,
                     )
@@ -269,7 +269,7 @@ class BlockRunner:
                     duration_limit=config.duration_limit,
                     output_name=config.output_name,
                     hls_start_number=config.hls_start_number,
-                    hls_start_time_offset=config.hls_start_time_offset if config.stream_profile == "jellyfin" else None,
+                    hls_start_time_offset=config.hls_start_time_offset,
                     hls_append=config.hls_append,
                     stream_profile=config.stream_profile,
                 )
@@ -322,7 +322,7 @@ class BlockRunner:
                     transport_stream_path=transport_stream_parts[run_index],
                     duration_limit=ts_primary_duration_limits[run_index],
                     hls_start_number=command_hls_start_number,
-                    hls_start_time_offset=command_hls_start_time_offset if config.stream_profile == "jellyfin" else None,
+                    hls_start_time_offset=command_hls_start_time_offset,
                     hls_append=appended_run,
                     stream_profile=config.stream_profile,
                 )
@@ -375,7 +375,7 @@ class BlockRunner:
                     duration_limit=render_duration_limits[run_index],
                     output_name=config.output_name,
                     hls_start_number=command_hls_start_number,
-                    hls_start_time_offset=command_hls_start_time_offset if config.stream_profile == "jellyfin" else None,
+                    hls_start_time_offset=command_hls_start_time_offset,
                     hls_append=appended_run,
                     stream_profile=config.stream_profile,
                 )

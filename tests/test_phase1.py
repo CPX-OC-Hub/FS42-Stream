@@ -560,7 +560,7 @@ class FFMpegCommandBuilderTests(unittest.TestCase):
 
         joined = " ".join(cmd)
         self.assertIn("-hls_time 2", joined)
-        self.assertIn("-hls_list_size 12", joined)
+        self.assertIn("-hls_list_size 60", joined)
         self.assertIn("-g 50", joined)
         self.assertIn("-keyint_min 50", joined)
         self.assertIn("-sc_threshold 0", joined)
@@ -594,7 +594,7 @@ class FFMpegCommandBuilderTests(unittest.TestCase):
 
         joined = " ".join(cmd)
         self.assertIn("-hls_time 2", joined)
-        self.assertIn("-hls_list_size 12", joined)
+        self.assertIn("-hls_list_size 60", joined)
         self.assertIn("-g 50", joined)
         self.assertNotIn("-keyint_min", cmd)
         self.assertNotIn("-sc_threshold", cmd)
@@ -658,7 +658,7 @@ class FFMpegCommandBuilderTests(unittest.TestCase):
         self.assertIn("/tmp/hls/Sky_One_%05d.ts", joined)
         self.assertEqual(cmd[-1], "/tmp/hls/Sky_One.m3u8")
 
-    def test_appends_later_blocks_without_resetting_hls_sequence(self):
+    def test_appends_later_blocks_without_resetting_hls_sequence_and_keeps_direct_timestamps_continuous(self):
         resolver = PathResolver()
         probe = mock.Mock(validate_video=mock.Mock(return_value=ProbeResult(1, 320, 240, 25, 44100, 1)))
         block = BlockPlanner(resolver, probe).plan(SCHEDULE)[0]
@@ -668,10 +668,12 @@ class FFMpegCommandBuilderTests(unittest.TestCase):
             output_dir=Path("/tmp/hls"),
             output_name="Sky_One",
             hls_start_number=42,
+            hls_start_time_offset=83.25,
             hls_append=True,
         )
 
         joined = " ".join(cmd)
+        self.assertIn("-output_ts_offset 83.25", joined)
         self.assertIn("-hls_flags omit_endlist+append_list+discont_start", joined)
         self.assertNotIn("-start_number", joined)
         self.assertIn("/tmp/hls/Sky_One_%05d.ts", joined)

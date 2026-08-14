@@ -521,7 +521,7 @@ class LiveControllerTests(unittest.TestCase):
         self.assertIn(["-g", "50"], [command[index:index + 2] for index in range(len(command) - 1)])
         self.assertIn(["-keyint_min", "50"], [command[index:index + 2] for index in range(len(command) - 1)])
         self.assertIn(["-sc_threshold", "0"], [command[index:index + 2] for index in range(len(command) - 1)])
-        self.assertIn(["-hls_list_size", "12"], [command[index:index + 2] for index in range(len(command) - 1)])
+        self.assertIn(["-hls_list_size", "60"], [command[index:index + 2] for index in range(len(command) - 1)])
         self.assertIn("-hls_flags", command)
         self.assertIn("omit_endlist+append_list+discont_start", command)
 
