@@ -620,7 +620,7 @@ class FFMpegCommandBuilderTests(unittest.TestCase):
 
         joined = " ".join(cmd)
         self.assertIn("append_list", joined)
-        self.assertIn("discont_start", joined)
+        self.assertNotIn("discont_start", joined)
         self.assertIn("omit_endlist", joined)
 
     def test_builds_vaapi_h264_command_when_requested(self):
@@ -674,7 +674,8 @@ class FFMpegCommandBuilderTests(unittest.TestCase):
 
         joined = " ".join(cmd)
         self.assertIn("-output_ts_offset 83.25", joined)
-        self.assertIn("-hls_flags omit_endlist+append_list+discont_start", joined)
+        self.assertIn("-hls_flags omit_endlist+append_list", joined)
+        self.assertNotIn("discont_start", joined)
         self.assertNotIn("-start_number", joined)
         self.assertIn("/tmp/hls/Sky_One_%05d.ts", joined)
         self.assertEqual(cmd[-1], "/tmp/hls/Sky_One.m3u8")

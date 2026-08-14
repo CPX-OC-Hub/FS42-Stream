@@ -523,7 +523,8 @@ class LiveControllerTests(unittest.TestCase):
         self.assertIn(["-sc_threshold", "0"], [command[index:index + 2] for index in range(len(command) - 1)])
         self.assertIn(["-hls_list_size", "60"], [command[index:index + 2] for index in range(len(command) - 1)])
         self.assertIn("-hls_flags", command)
-        self.assertIn("omit_endlist+append_list+discont_start", command)
+        self.assertIn("omit_endlist+append_list", command)
+        self.assertNotIn("discont_start", command)
 
     def test_jellyfin_boundary_filler_uses_explicit_elapsed_timestamp_offset(self):
         with tempfile.TemporaryDirectory() as tmp, mock.patch(

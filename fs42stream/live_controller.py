@@ -246,8 +246,7 @@ class HLSBlackSlateFillerRunner:
         if hls_start_time_offset is not None:
             command.extend(["-output_ts_offset", _num(hls_start_time_offset)])
         if hls_append:
-            hls_flags = "omit_endlist+append_list" if stream_profile == "jellyfin" else "omit_endlist+append_list+discont_start"
-            command.extend(["-hls_flags", hls_flags])
+            command.extend(["-hls_flags", "omit_endlist+append_list"])
         else:
             command.extend(["-hls_flags", "omit_endlist"])
         command.extend(["-hls_segment_filename", str(segment_pattern), str(playlist)])

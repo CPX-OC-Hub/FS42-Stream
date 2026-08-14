@@ -87,8 +87,6 @@ class FFMpegHLSCommandBuilder:
         hls_flags = ["omit_endlist"]
         if hls_append:
             hls_flags.append("append_list")
-            if stream_profile != "jellyfin":
-                hls_flags.append("discont_start")
         hls_args.extend(["-hls_flags", "+".join(hls_flags)])
         hls_args.extend(
             [
@@ -166,8 +164,6 @@ class FFMpegHLSCommandBuilder:
         hls_flags = ["omit_endlist"]
         if hls_append:
             hls_flags.append("append_list")
-            if stream_profile != "jellyfin":
-                hls_flags.append("discont_start")
         hls_args.extend(["-hls_flags", "+".join(hls_flags)])
         hls_args.extend(["-hls_segment_filename", str(segment_pattern), str(playlist)])
         cmd.extend(hls_args)
@@ -199,8 +195,6 @@ class FFMpegHLSCommandBuilder:
         hls_flags = ["omit_endlist"]
         if hls_append:
             hls_flags.append("append_list")
-            if stream_profile != "jellyfin":
-                hls_flags.append("discont_start")
         hls_options = [
             "f=hls",
             "hls_time=2",
