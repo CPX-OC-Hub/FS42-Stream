@@ -74,6 +74,8 @@ class IntegratedRunnerConfig:
     brb_image_path: str | Path = DEFAULT_BRB_IMAGE_PATH
     audio_normalization: AudioNormalization = "off"
     jellyfin_pre_roll_lead_seconds: float = 0.0
+    jellyfin_pre_roll_min_buffer_seconds: float = 30.0
+    jellyfin_pre_roll_max_publish_delay_seconds: float = 60.0
 
 
 class IntegratedServer(Protocol):
@@ -130,6 +132,8 @@ def run_integrated(
             "playout_mode": config.playout_mode,
             "audio_normalization": audio_normalization,
             "jellyfin_pre_roll_lead_seconds": config.jellyfin_pre_roll_lead_seconds,
+            "jellyfin_pre_roll_min_buffer_seconds": config.jellyfin_pre_roll_min_buffer_seconds,
+            "jellyfin_pre_roll_max_publish_delay_seconds": config.jellyfin_pre_roll_max_publish_delay_seconds,
             "schedule_timezone": config.schedule_timezone,
             "brb_image_path": str(config.brb_image_path),
             "updated_at": _utc_now(),
@@ -208,6 +212,8 @@ def run_integrated(
                             shared_schedule_clock=shared_schedule_clock,
                             brb_image_path=config.brb_image_path,
                             jellyfin_pre_roll_lead_seconds=config.jellyfin_pre_roll_lead_seconds,
+                            jellyfin_pre_roll_min_buffer_seconds=config.jellyfin_pre_roll_min_buffer_seconds,
+                            jellyfin_pre_roll_max_publish_delay_seconds=config.jellyfin_pre_roll_max_publish_delay_seconds,
                         )
                     )
                 )
@@ -281,6 +287,8 @@ def main(
     parser.add_argument("--brb-image-path", default=os.environ.get("FS42STREAM_BRB_IMAGE_PATH", str(DEFAULT_BRB_IMAGE_PATH)), help="fallback BRB image path relative to FS42 root or absolute under an allowed media root")
     parser.add_argument("--audio-normalization", type=parse_audio_normalization, default=os.environ.get("FS42STREAM_AUDIO_NORMALIZATION", "off"), metavar="{off,loudnorm}", help="audio normalization mode; default off")
     parser.add_argument("--jellyfin-pre-roll-lead-seconds", type=float, default=float(os.environ.get("FS42STREAM_JELLYFIN_PRE_ROLL_LEAD_SECONDS", "0")), help="private Jellyfin next-block staging lead time; zero disables it")
+    parser.add_argument("--jellyfin-pre-roll-min-buffer-seconds", type=float, default=float(os.environ.get("FS42STREAM_JELLYFIN_PRE_ROLL_MIN_BUFFER_SECONDS", "30")), help="minimum staged Jellyfin duration required before a public boundary switch")
+    parser.add_argument("--jellyfin-pre-roll-max-publish-delay-seconds", type=float, default=float(os.environ.get("FS42STREAM_JELLYFIN_PRE_ROLL_MAX_PUBLISH_DELAY_SECONDS", "60")), help="maximum filler-backed delay while waiting for the staged Jellyfin safe buffer")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv)
 
@@ -312,6 +320,8 @@ def main(
         brb_image_path=args.brb_image_path,
         audio_normalization=args.audio_normalization,
         jellyfin_pre_roll_lead_seconds=args.jellyfin_pre_roll_lead_seconds,
+        jellyfin_pre_roll_min_buffer_seconds=args.jellyfin_pre_roll_min_buffer_seconds,
+        jellyfin_pre_roll_max_publish_delay_seconds=args.jellyfin_pre_roll_max_publish_delay_seconds,
     )
     effective_controller_factory = controller_factory
     if controller_factory is LiveController:

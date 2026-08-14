@@ -28,7 +28,7 @@ class GatedJellyfinPreRollTests(unittest.TestCase):
             for number in range(884, 887):
                 (root / f"Sky_One_{number:05d}.ts").write_bytes(b"old")
 
-            gate = GatedJellyfinPreRoll(public_playlist=public, staged_playlist=staged_playlist, publish_at=datetime(2026, 6, 17, 10, 30, 0), public_next_segment_number=887)
+            gate = GatedJellyfinPreRoll(public_playlist=public, staged_playlist=staged_playlist, publish_at=datetime(2026, 6, 17, 10, 30, 0), public_next_segment_number=887, minimum_ready_duration_seconds=4)
 
             before = gate.publish_if_due(datetime(2026, 6, 17, 10, 29, 59))
             self.assertEqual(before["pre_roll_state"], "staged-private")
@@ -45,6 +45,60 @@ class GatedJellyfinPreRollTests(unittest.TestCase):
             self.assertNotIn("#EXT-X-DISCONTINUITY", public_text)
             self.assertEqual((root / "Sky_One_00887.ts").read_bytes(), b"Sky_One_00000.ts")
             self.assertEqual((root / "Sky_One_00888.ts").read_bytes(), b"Sky_One_00001.ts")
+
+    def test_boundary_holds_public_switch_until_safe_staged_duration_is_ready(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            stage = root / ".staged" / "second"
+            stage.mkdir(parents=True)
+            staged_playlist = self._write_stage(stage, [f"Example_Channel_{number:05d}.ts" for number in range(7)])
+            public = root / "Example_Channel.m3u8"
+            public.write_text("#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:100\n#EXTINF:2.0,\nExample_Channel_00100.ts\n")
+            (root / "Example_Channel_00100.ts").write_bytes(b"filler")
+
+            gate = GatedJellyfinPreRoll(
+                public_playlist=public,
+                staged_playlist=staged_playlist,
+                publish_at=datetime(2026, 6, 17, 10, 30, 0),
+                public_next_segment_number=101,
+            )
+            result = gate.publish_if_due(datetime(2026, 6, 17, 10, 30, 4))
+
+            public_text = public.read_text()
+        self.assertEqual(result["pre_roll_state"], "held-for-buffer")
+        self.assertTrue(result["publish_held_for_buffer"])
+        self.assertEqual(result["minimum_ready_duration_seconds"], 30.0)
+        self.assertEqual(result["minimum_ready_segments"], 0)
+        self.assertEqual(result["staged_segments_ready"], 7)
+        self.assertEqual(result["staged_duration_ready_seconds"], 14.0)
+        self.assertEqual(result["publish_delay_seconds"], 4.0)
+        self.assertNotIn("Example_Channel_00101.ts", public_text)
+        self.assertNotIn("#EXT-X-ENDLIST", public_text)
+        self.assertNotIn("#EXT-X-DISCONTINUITY", public_text)
+
+    def test_boundary_publishes_when_safe_staged_duration_threshold_is_met(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            stage = root / ".staged" / "second"
+            stage.mkdir(parents=True)
+            staged_playlist = self._write_stage(stage, [f"Example_Channel_{number:05d}.ts" for number in range(15)])
+            public = root / "Example_Channel.m3u8"
+            public.write_text("#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:100\n#EXTINF:2.0,\nExample_Channel_00100.ts\n")
+            (root / "Example_Channel_00100.ts").write_bytes(b"filler")
+
+            gate = GatedJellyfinPreRoll(
+                public_playlist=public,
+                staged_playlist=staged_playlist,
+                publish_at=datetime(2026, 6, 17, 10, 30, 0),
+                public_next_segment_number=101,
+            )
+            result = gate.publish_if_due(datetime(2026, 6, 17, 10, 30, 2))
+
+        self.assertEqual(result["pre_roll_state"], "published")
+        self.assertFalse(result["publish_held_for_buffer"])
+        self.assertEqual(result["staged_duration_ready_seconds"], 30.0)
+        self.assertEqual(result["public_boundary_switch"]["minimum_ready_duration_seconds"], 30.0)
+        self.assertEqual(result["public_boundary_switch"]["publish_delay_seconds"], 2.0)
 
     def test_staged_run_timing_uses_media_zero_when_started_early_and_catches_up_when_late(self):
         block_start = datetime(2026, 6, 17, 10, 30, 0)

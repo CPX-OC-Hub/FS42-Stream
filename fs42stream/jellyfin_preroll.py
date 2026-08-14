@@ -50,13 +50,21 @@ class GatedJellyfinPreRoll:
         publish_at: datetime,
         public_next_segment_number: int,
         staged_block: str | None = None,
+        minimum_ready_duration_seconds: float = 30.0,
+        minimum_ready_segments: int = 0,
     ) -> None:
         if public_next_segment_number < 0:
             raise ValueError("public_next_segment_number must be non-negative")
+        if minimum_ready_duration_seconds < 0:
+            raise ValueError("minimum_ready_duration_seconds must be non-negative")
+        if minimum_ready_segments < 0:
+            raise ValueError("minimum_ready_segments must be non-negative")
         self.public_playlist = public_playlist
         self.staged_playlist = staged_playlist
         self.publish_at = publish_at
         self.public_next_segment_number = public_next_segment_number
+        self.minimum_ready_duration_seconds = float(minimum_ready_duration_seconds)
+        self.minimum_ready_segments = minimum_ready_segments
         self._staged_block = staged_block or staged_playlist.parent.name
         self._published_source_names: set[str] = set()
         self._boundary_event: dict[str, Any] | None = None
@@ -65,20 +73,30 @@ class GatedJellyfinPreRoll:
     def staged_block(self) -> str:
         return self._staged_block
 
-    def status(self, *, now: datetime, fallback_reason: str | None = None) -> dict[str, Any]:
-        ready = len(_playlist_entries(self.staged_playlist))
+    def status(self, *, now: datetime, fallback_reason: str | None = None, publish_held_for_buffer: bool = False) -> dict[str, Any]:
+        entries = _playlist_entries(self.staged_playlist)
+        ready = len(entries)
+        staged_duration = sum(duration for duration, _ in entries)
+        publish_delay = max(0.0, (now - self.publish_at).total_seconds())
         if fallback_reason:
             state = "fallback"
         elif self._boundary_event:
             state = "published"
         elif now < self.publish_at:
             state = "staged-private"
+        elif publish_held_for_buffer:
+            state = "held-for-buffer"
         else:
             state = "awaiting-staged-segments"
         payload: dict[str, Any] = {
             "pre_roll_state": state,
             "staged_block": self.staged_block,
             "staged_segments_ready": ready,
+            "staged_duration_ready_seconds": staged_duration,
+            "minimum_ready_duration_seconds": self.minimum_ready_duration_seconds,
+            "minimum_ready_segments": self.minimum_ready_segments,
+            "publish_held_for_buffer": publish_held_for_buffer,
+            "publish_delay_seconds": publish_delay,
             "publish_at": self.publish_at.isoformat(),
         }
         if self._boundary_event is not None:
@@ -94,6 +112,9 @@ class GatedJellyfinPreRoll:
         entries = _playlist_entries(self.staged_playlist)
         if not entries:
             return self.status(now=now, fallback_reason="no-staged-segments-ready")
+        staged_duration = sum(duration for duration, _ in entries)
+        if len(entries) < self.minimum_ready_segments or staged_duration < self.minimum_ready_duration_seconds:
+            return self.status(now=now, publish_held_for_buffer=True)
 
         appended = 0
         public_entries = _playlist_entries(self.public_playlist)
@@ -122,6 +143,10 @@ class GatedJellyfinPreRoll:
                 "publish_at": self.publish_at.isoformat(),
                 "first_public_segment_number": self.public_next_segment_number - appended,
                 "segments_published": appended,
+                "staged_duration_ready_seconds": staged_duration,
+                "minimum_ready_duration_seconds": self.minimum_ready_duration_seconds,
+                "minimum_ready_segments": self.minimum_ready_segments,
+                "publish_delay_seconds": max(0.0, (now - self.publish_at).total_seconds()),
             }
         return self.status(now=now)
 

@@ -1367,7 +1367,7 @@ class LiveControllerTests(unittest.TestCase):
             updates = []
             runner = PreRollRunner()
             result = LiveController(schedule_client=FakeScheduleClient(), block_runner=runner).run(
-                LiveControllerConfig(channel="Example Channel", output_root=Path(tmp), max_blocks=2, duration_limit=1800, now=datetime(2026, 6, 17, 10, 0, 0), stream_profile="jellyfin", jellyfin_pre_roll_lead_seconds=20, status_callback=updates.append)
+                LiveControllerConfig(channel="Example Channel", output_root=Path(tmp), max_blocks=2, duration_limit=1800, now=datetime(2026, 6, 17, 10, 0, 0), stream_profile="jellyfin", jellyfin_pre_roll_lead_seconds=20, jellyfin_pre_roll_min_buffer_seconds=4, status_callback=updates.append)
             )
             public = Path(result["channel_output_dir"]) / "Example_Channel.m3u8"
             public_text = public.read_text()

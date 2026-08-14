@@ -25,6 +25,8 @@ class IntegratedRunnerTests(unittest.TestCase):
         self.assertEqual(config.stream_profiles, ("jellyfin",))
         self.assertEqual(str(config.brb_image_path), "runtime/brb.png")
         self.assertEqual(config.audio_normalization, "off")
+        self.assertEqual(config.jellyfin_pre_roll_min_buffer_seconds, 30.0)
+        self.assertEqual(config.jellyfin_pre_roll_max_publish_delay_seconds, 60.0)
 
     def test_cli_reads_brb_image_path_from_environment_and_forwards_it_to_controller(self):
         configs = []
