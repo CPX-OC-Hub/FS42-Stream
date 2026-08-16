@@ -254,7 +254,8 @@ class HLSBlackSlateFillerRunner:
         if stream_profile == "jellyfin" and playlist.exists():
             _normalize_jellyfin_live_playlist(playlist)
         hls_next_start_number = _next_hls_start_number(playlist, fallback=hls_start_number)
-        segment_duration = _hls_segment_duration_since(playlist, start_number=hls_start_number)
+        observed_segment_duration = _hls_segment_duration_since(playlist, start_number=hls_start_number)
+        segment_duration = min(observed_segment_duration, safe_duration)
         return {
             "status": "ok" if completed.returncode == 0 else "ffmpeg-error",
             "playlist": str(playlist),

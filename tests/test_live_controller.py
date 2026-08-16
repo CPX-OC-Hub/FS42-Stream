@@ -578,6 +578,31 @@ class LiveControllerTests(unittest.TestCase):
         self.assertEqual(diagnostics["hls_next_start_time_offset"], 50.0)
         self.assertNotIn("#EXT-X-DISCONTINUITY\n#EXT-X-DISCONTINUITY", playlist_text)
 
+    def test_boundary_filler_caps_elapsed_offset_to_commanded_duration_when_live_window_contains_prior_segments(self):
+        def write_rolled_playlist_with_prior_segments(command, check, shell, stdout, stderr, text):
+            playlist = Path(command[-1])
+            lines = ["#EXTM3U", "#EXT-X-VERSION:3", "#EXT-X-TARGETDURATION:2", "#EXT-X-MEDIA-SEQUENCE:11617"]
+            for number in range(11617, 11677):
+                lines.extend(["#EXTINF:2.000000,", f"Sky_One_{number:05d}.ts"])
+            playlist.write_text("\n".join(lines) + "\n")
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+        with tempfile.TemporaryDirectory() as tmp, mock.patch("subprocess.run", side_effect=write_rolled_playlist_with_prior_segments):
+            diagnostics = HLSBlackSlateFillerRunner("/usr/bin/ffmpeg").run(
+                output_dir=Path(tmp),
+                output_name="Sky_One",
+                duration=28.307936,
+                hls_start_number=11602,
+                hls_start_time_offset=23195.92,
+                hls_append=True,
+                stream_profile="direct",
+            )
+
+        self.assertEqual(diagnostics["hls_next_start_number"], 11677)
+        self.assertEqual(diagnostics["duration"], 30.0)
+        self.assertEqual(diagnostics["hls_segment_duration"], 30.0)
+        self.assertEqual(diagnostics["hls_next_start_time_offset"], 23225.92)
+
     def test_status_and_block_start_event_share_supervisor_projection_state(self):
         updates = []
         controller = LiveController(schedule_client=FakeScheduleClient(), block_runner=FakeBlockRunner())
