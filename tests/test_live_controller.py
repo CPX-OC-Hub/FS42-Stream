@@ -783,8 +783,14 @@ class LiveControllerTests(unittest.TestCase):
             next_block = json.loads(subprocess.check_output(["/usr/bin/ffprobe", "-v", "error", "-show_entries", "format=start_time", "-of", "json", str(playlist.parent / "Sky_One_00005.ts")], text=True))
 
         self.assertEqual(playlist_text.count("#EXT-X-DISCONTINUITY"), 0)
-        self.assertLess(float(first["format"]["start_time"]), float(filler["format"]["start_time"]))
-        self.assertLess(float(filler["format"]["start_time"]), float(next_block["format"]["start_time"]))
+        starts = [
+            float(first["format"]["start_time"]),
+            float(filler["format"]["start_time"]),
+            float(next_block["format"]["start_time"]),
+        ]
+        self.assertEqual(starts, sorted(starts))
+        for left, right in zip(starts, starts[1:]):
+            self.assertLess(right - left, 10.0)
 
     def test_service_duration_default_spans_ninety_minute_block_without_boundary_filler(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -361,7 +361,7 @@ class BlockRunner:
                     previous_hls_start_number = command_hls_start_number
                     hls_start_number = _next_hls_start_number(playlist, fallback=hls_start_number)
                     command_hls_start_number = hls_start_number
-                    if config.stream_profile == "jellyfin" and command_hls_start_time_offset is not None:
+                    if command_hls_start_time_offset is not None:
                         emitted_duration = _hls_segment_duration_since(playlist, start_number=previous_hls_start_number)
                         command_hls_start_time_offset += emitted_duration
                 if completed.returncode != 0:
@@ -408,7 +408,7 @@ class BlockRunner:
                     previous_hls_start_number = command_hls_start_number
                     hls_start_number = _next_hls_start_number(playlist, fallback=hls_start_number)
                     command_hls_start_number = hls_start_number
-                    if config.stream_profile == "jellyfin" and command_hls_start_time_offset is not None:
+                    if command_hls_start_time_offset is not None:
                         emitted_duration = _hls_segment_duration_since(playlist, start_number=previous_hls_start_number)
                         command_hls_start_time_offset += emitted_duration
                 if completed.returncode != 0:
