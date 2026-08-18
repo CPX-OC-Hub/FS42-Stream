@@ -715,11 +715,8 @@ class LiveController:
                             filler_diagnostics["hls_boundary_starts"] = []
                             filler_diagnostics["hls_discontinuity_sequence"] = 0
                         else:
-                            if hls_start_number not in hls_boundary_starts:
-                                hls_boundary_starts.append(hls_start_number)
-                                hls_boundary_starts.sort()
-                            filler_state = _rewrite_live_playlist_boundaries(filler_playlist, boundary_starts=hls_boundary_starts)
-                            filler_diagnostics["hls_boundary_starts"] = list(hls_boundary_starts)
+                            filler_state = _rewrite_live_playlist_boundaries(filler_playlist, boundary_starts=())
+                            filler_diagnostics["hls_boundary_starts"] = []
                             filler_diagnostics["hls_discontinuity_sequence"] = filler_state.get("discontinuity_sequence")
                     events.append(
                         {

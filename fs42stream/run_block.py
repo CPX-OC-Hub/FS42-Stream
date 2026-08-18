@@ -314,7 +314,7 @@ class BlockRunner:
                 transport_stream.unlink()
             for run_index, _preview_command in enumerate(commands):
                 appended_run = config.hls_append or run_index > 0
-                run_boundary_start = command_hls_start_number if appended_run and config.stream_profile != "jellyfin" else None
+                run_boundary_start = None
                 command = self.builder.build_transport_stream_and_hls(
                     ts_primary_blocks[run_index],
                     output_dir=config.output_dir,
@@ -379,7 +379,7 @@ class BlockRunner:
                     hls_append=appended_run,
                     stream_profile=config.stream_profile,
                 )
-                run_boundary_start = command_hls_start_number if appended_run and config.stream_profile != "jellyfin" else None
+                run_boundary_start = None
                 executed_commands.append(command)
                 completed = _run_ffmpeg_command(command, playlist=playlist, normalize_jellyfin=config.stream_profile == "jellyfin" and config.playout_mode == "ts-primary", status_callback=config.ffmpeg_status_callback)
                 run_info = {
