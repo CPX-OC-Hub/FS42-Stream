@@ -11,7 +11,7 @@ StreamProfile = Literal["direct", "jellyfin"]
 PlayoutMode = Literal["hls-primary", "ts-primary"]
 AudioNormalization = Literal["off", "loudnorm"]
 
-DIRECT_HLS_LIST_SIZE = 12
+DIRECT_HLS_LIST_SIZE = 60
 JELLYFIN_HLS_LIST_SIZE = 60
 
 
@@ -79,7 +79,7 @@ class FFMpegHLSCommandBuilder:
         cmd.extend(self._normalized_video_audio_output_args(filter_complex))
         if duration_limit is not None:
             cmd.extend(["-t", self._num(duration_limit)])
-        if stream_profile == "jellyfin" and hls_start_time_offset is not None:
+        if hls_start_time_offset is not None:
             cmd.extend(["-output_ts_offset", self._num(hls_start_time_offset)])
         hls_args = ["-f", "hls", "-hls_time", "2", "-hls_list_size", str(hls_list_size_for_profile(stream_profile))]
         if not hls_append:
@@ -87,8 +87,6 @@ class FFMpegHLSCommandBuilder:
         hls_flags = ["omit_endlist"]
         if hls_append:
             hls_flags.append("append_list")
-            if stream_profile != "jellyfin":
-                hls_flags.append("discont_start")
         hls_args.extend(["-hls_flags", "+".join(hls_flags)])
         hls_args.extend(
             [
@@ -158,7 +156,7 @@ class FFMpegHLSCommandBuilder:
         if realtime_input:
             cmd.append("-re")
         cmd.extend(["-i", str(input_path), "-map", "0:v:0", "-map", "0:a:0", "-c:v", "copy", "-c:a", "copy"])
-        if stream_profile == "jellyfin" and hls_start_time_offset is not None:
+        if hls_start_time_offset is not None:
             cmd.extend(["-output_ts_offset", self._num(hls_start_time_offset)])
         hls_args = ["-f", "hls", "-hls_time", "2", "-hls_list_size", str(hls_list_size_for_profile(stream_profile))]
         if not hls_append:
@@ -166,8 +164,6 @@ class FFMpegHLSCommandBuilder:
         hls_flags = ["omit_endlist"]
         if hls_append:
             hls_flags.append("append_list")
-            if stream_profile != "jellyfin":
-                hls_flags.append("discont_start")
         hls_args.extend(["-hls_flags", "+".join(hls_flags)])
         hls_args.extend(["-hls_segment_filename", str(segment_pattern), str(playlist)])
         cmd.extend(hls_args)
@@ -199,8 +195,6 @@ class FFMpegHLSCommandBuilder:
         hls_flags = ["omit_endlist"]
         if hls_append:
             hls_flags.append("append_list")
-            if stream_profile != "jellyfin":
-                hls_flags.append("discont_start")
         hls_options = [
             "f=hls",
             "hls_time=2",
@@ -227,7 +221,7 @@ class FFMpegHLSCommandBuilder:
         cmd.extend(self._normalized_video_audio_output_args(filter_complex))
         if duration_limit is not None:
             cmd.extend(["-t", self._num(duration_limit)])
-        if stream_profile == "jellyfin" and hls_start_time_offset is not None:
+        if hls_start_time_offset is not None:
             cmd.extend(["-output_ts_offset", self._num(hls_start_time_offset)])
         cmd.extend(["-f", "tee", tee_output])
         return cmd

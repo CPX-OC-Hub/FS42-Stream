@@ -255,7 +255,7 @@ class BlockRunner:
                         transport_stream_path=transport_stream_part,
                         duration_limit=item_duration_limit,
                         hls_start_number=config.hls_start_number,
-                        hls_start_time_offset=config.hls_start_time_offset if config.stream_profile == "jellyfin" else None,
+                        hls_start_time_offset=config.hls_start_time_offset,
                         hls_append=config.hls_append or item_index > 0,
                         stream_profile=config.stream_profile,
                     )
@@ -269,7 +269,7 @@ class BlockRunner:
                     duration_limit=config.duration_limit,
                     output_name=config.output_name,
                     hls_start_number=config.hls_start_number,
-                    hls_start_time_offset=config.hls_start_time_offset if config.stream_profile == "jellyfin" else None,
+                    hls_start_time_offset=config.hls_start_time_offset,
                     hls_append=config.hls_append,
                     stream_profile=config.stream_profile,
                 )
@@ -314,7 +314,7 @@ class BlockRunner:
                 transport_stream.unlink()
             for run_index, _preview_command in enumerate(commands):
                 appended_run = config.hls_append or run_index > 0
-                run_boundary_start = command_hls_start_number if appended_run and config.stream_profile != "jellyfin" else None
+                run_boundary_start = None
                 command = self.builder.build_transport_stream_and_hls(
                     ts_primary_blocks[run_index],
                     output_dir=config.output_dir,
@@ -322,12 +322,19 @@ class BlockRunner:
                     transport_stream_path=transport_stream_parts[run_index],
                     duration_limit=ts_primary_duration_limits[run_index],
                     hls_start_number=command_hls_start_number,
-                    hls_start_time_offset=command_hls_start_time_offset if config.stream_profile == "jellyfin" else None,
+                    hls_start_time_offset=command_hls_start_time_offset,
                     hls_append=appended_run,
                     stream_profile=config.stream_profile,
                 )
                 executed_commands.append(command)
-                completed = _run_ffmpeg_command(command, playlist=playlist, normalize_jellyfin=config.stream_profile == "jellyfin" and config.playout_mode == "ts-primary", status_callback=config.ffmpeg_status_callback)
+                completed = _run_ffmpeg_command(
+                    command,
+                    playlist=playlist,
+                    normalize_jellyfin=config.stream_profile == "jellyfin" and config.playout_mode == "ts-primary",
+                    status_callback=config.ffmpeg_status_callback,
+                    sanitize_live_playlist=config.playout_mode == "ts-primary" and appended_run,
+                    boundary_starts=tuple(boundary_starts),
+                )
                 ffmpeg_runs.append(
                     {
                         "index": run_index,
@@ -361,7 +368,7 @@ class BlockRunner:
                     previous_hls_start_number = command_hls_start_number
                     hls_start_number = _next_hls_start_number(playlist, fallback=hls_start_number)
                     command_hls_start_number = hls_start_number
-                    if config.stream_profile == "jellyfin" and command_hls_start_time_offset is not None:
+                    if command_hls_start_time_offset is not None:
                         emitted_duration = _hls_segment_duration_since(playlist, start_number=previous_hls_start_number)
                         command_hls_start_time_offset += emitted_duration
                 if completed.returncode != 0:
@@ -375,13 +382,20 @@ class BlockRunner:
                     duration_limit=render_duration_limits[run_index],
                     output_name=config.output_name,
                     hls_start_number=command_hls_start_number,
-                    hls_start_time_offset=command_hls_start_time_offset if config.stream_profile == "jellyfin" else None,
+                    hls_start_time_offset=command_hls_start_time_offset,
                     hls_append=appended_run,
                     stream_profile=config.stream_profile,
                 )
-                run_boundary_start = command_hls_start_number if appended_run and config.stream_profile != "jellyfin" else None
+                run_boundary_start = None
                 executed_commands.append(command)
-                completed = _run_ffmpeg_command(command, playlist=playlist, normalize_jellyfin=config.stream_profile == "jellyfin" and config.playout_mode == "ts-primary", status_callback=config.ffmpeg_status_callback)
+                completed = _run_ffmpeg_command(
+                    command,
+                    playlist=playlist,
+                    normalize_jellyfin=config.stream_profile == "jellyfin" and config.playout_mode == "ts-primary",
+                    status_callback=config.ffmpeg_status_callback,
+                    sanitize_live_playlist=config.playout_mode == "ts-primary" and appended_run,
+                    boundary_starts=tuple(boundary_starts),
+                )
                 run_info = {
                     "index": run_index,
                     "returncode": completed.returncode,
@@ -408,7 +422,7 @@ class BlockRunner:
                     previous_hls_start_number = command_hls_start_number
                     hls_start_number = _next_hls_start_number(playlist, fallback=hls_start_number)
                     command_hls_start_number = hls_start_number
-                    if config.stream_profile == "jellyfin" and command_hls_start_time_offset is not None:
+                    if command_hls_start_time_offset is not None:
                         emitted_duration = _hls_segment_duration_since(playlist, start_number=previous_hls_start_number)
                         command_hls_start_time_offset += emitted_duration
                 if completed.returncode != 0:
@@ -515,9 +529,17 @@ def _single_item_block(block: PlannedBlock, item: Any, *, item_index: int) -> Pl
     )
 
 
-def _run_ffmpeg_command(command: Sequence[str], *, playlist: Path, normalize_jellyfin: bool, status_callback: Callable[[Mapping[str, Any]], None] | None = None) -> subprocess.CompletedProcess[str]:
+def _run_ffmpeg_command(
+    command: Sequence[str],
+    *,
+    playlist: Path,
+    normalize_jellyfin: bool,
+    status_callback: Callable[[Mapping[str, Any]], None] | None = None,
+    sanitize_live_playlist: bool = False,
+    boundary_starts: Sequence[int] = (),
+) -> subprocess.CompletedProcess[str]:
     started_at = datetime.now(timezone.utc).isoformat()
-    if not normalize_jellyfin:
+    if not normalize_jellyfin and not sanitize_live_playlist:
         if status_callback is None:
             return subprocess.run(command, check=False, shell=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         process = subprocess.Popen(command, shell=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
@@ -527,25 +549,33 @@ def _run_ffmpeg_command(command: Sequence[str], *, playlist: Path, normalize_jel
         return subprocess.CompletedProcess(command, process.returncode, stdout=stdout, stderr=stderr)
 
     # Do not leave ffmpeg stdout/stderr connected to PIPE while we poll for
-    # live Jellyfin playlist normalization. FFmpeg writes progress/log output
+    # live playlist normalization. FFmpeg writes progress/log output
     # continuously; if the parent does not drain a PIPE, the child can block in
-    # pipe_write and freeze the live profile indefinitely.
+    # pipe_write and freeze the live profile indefinitely. Polling also removes
+    # FFmpeg's transient append-list discontinuity tags while clients are live.
     with tempfile.TemporaryFile(mode="w+t") as stdout_file, tempfile.TemporaryFile(mode="w+t") as stderr_file:
         process = subprocess.Popen(command, shell=False, stdout=stdout_file, stderr=stderr_file, text=True)
         _notify_ffmpeg_status(status_callback, state="running", pid=process.pid, started_at=started_at)
         while process.poll() is None:
-            if playlist.exists():
-                _normalize_jellyfin_live_playlist(playlist)
+            _sanitize_live_playlist(playlist, normalize_jellyfin=normalize_jellyfin, boundary_starts=boundary_starts)
             time.sleep(0.25)
         returncode = process.wait()
-        if playlist.exists():
-            _normalize_jellyfin_live_playlist(playlist)
+        _sanitize_live_playlist(playlist, normalize_jellyfin=normalize_jellyfin, boundary_starts=boundary_starts)
         stdout_file.seek(0)
         stderr_file.seek(0)
         stdout = stdout_file.read()
         stderr = stderr_file.read()
         _notify_ffmpeg_status(status_callback, state="exited" if returncode == 0 else "error", pid=None, started_at=started_at, returncode=returncode, error=stderr if returncode != 0 else None)
         return subprocess.CompletedProcess(command, returncode, stdout=stdout, stderr=stderr)
+
+
+def _sanitize_live_playlist(playlist: Path, *, normalize_jellyfin: bool, boundary_starts: Sequence[int] = ()) -> None:
+    if not playlist.exists():
+        return
+    if normalize_jellyfin:
+        _normalize_jellyfin_live_playlist(playlist)
+    else:
+        _rewrite_live_playlist_boundaries(playlist, boundary_starts=boundary_starts)
 
 
 def _notify_ffmpeg_status(status_callback: Callable[[Mapping[str, Any]], None] | None, *, state: str, pid: int | None, started_at: str, returncode: int | None = None, error: str | None = None) -> None:

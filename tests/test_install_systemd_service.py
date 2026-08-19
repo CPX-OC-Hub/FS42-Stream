@@ -79,6 +79,27 @@ class InstallSystemdServiceTests(unittest.TestCase):
         self.assertIn('FS42STREAM_AUDIO_NORMALIZATION="loudnorm"', output)
         self.assertIn('--audio-normalization "${FS42STREAM_AUDIO_NORMALIZATION}"', output)
 
+    def test_dry_run_propagates_jellyfin_pre_roll_lead_seconds(self):
+        with tempfile.TemporaryDirectory() as tmp, mock.patch("sys.stdout") as stdout:
+            rc = main([
+                "--env-file", str(Path(tmp) / "env"),
+                "--unit-file", str(Path(tmp) / "unit"),
+                "--output-root", str(Path(tmp) / "hls"),
+                "--jellyfin-pre-roll-lead-seconds", "120",
+                "--jellyfin-pre-roll-min-buffer-seconds", "45",
+                "--jellyfin-pre-roll-max-publish-delay-seconds", "90",
+                "--dry-run",
+            ])
+
+        self.assertEqual(rc, 0)
+        output = "".join(call.args[0] for call in stdout.write.call_args_list)
+        self.assertIn('FS42STREAM_JELLYFIN_PRE_ROLL_LEAD_SECONDS="120"', output)
+        self.assertIn('FS42STREAM_JELLYFIN_PRE_ROLL_MIN_BUFFER_SECONDS="45"', output)
+        self.assertIn('FS42STREAM_JELLYFIN_PRE_ROLL_MAX_PUBLISH_DELAY_SECONDS="90"', output)
+        self.assertIn('--jellyfin-pre-roll-lead-seconds "${FS42STREAM_JELLYFIN_PRE_ROLL_LEAD_SECONDS}"', output)
+        self.assertIn('--jellyfin-pre-roll-min-buffer-seconds "${FS42STREAM_JELLYFIN_PRE_ROLL_MIN_BUFFER_SECONDS}"', output)
+        self.assertIn('--jellyfin-pre-roll-max-publish-delay-seconds "${FS42STREAM_JELLYFIN_PRE_ROLL_MAX_PUBLISH_DELAY_SECONDS}"', output)
+
     def test_script_can_run_directly_from_repo_root(self):
         completed = subprocess.run(
             [sys.executable, "scripts/install_systemd_service.py", "--dry-run"],

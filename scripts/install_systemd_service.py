@@ -41,6 +41,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--stream-profiles", default="jellyfin", help="active profiles: jellyfin (default), direct, both, or direct,jellyfin")
     parser.add_argument("--brb-image-path", default="runtime/brb.png", help="fallback BRB image path relative to FS42 root or absolute under an allowed media root")
     parser.add_argument("--audio-normalization", default="off", help="audio normalization mode: off (default) or loudnorm")
+    parser.add_argument("--jellyfin-pre-roll-lead-seconds", type=float, default=0.0, help="private Jellyfin next-block staging lead time; zero disables it")
+    parser.add_argument("--jellyfin-pre-roll-min-buffer-seconds", type=float, default=30.0, help="minimum staged Jellyfin duration required before a public boundary switch")
+    parser.add_argument("--jellyfin-pre-roll-max-publish-delay-seconds", type=float, default=60.0, help="maximum filler-backed delay while waiting for the staged Jellyfin safe buffer")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--skip-systemctl", action="store_true", help="write files but do not run systemctl daemon-reload/enable/restart")
     args = parser.parse_args(argv)
@@ -76,6 +79,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         stream_profiles=args.stream_profiles,
         brb_image_path=args.brb_image_path,
         audio_normalization=args.audio_normalization,
+        jellyfin_pre_roll_lead_seconds=args.jellyfin_pre_roll_lead_seconds,
+        jellyfin_pre_roll_min_buffer_seconds=args.jellyfin_pre_roll_min_buffer_seconds,
+        jellyfin_pre_roll_max_publish_delay_seconds=args.jellyfin_pre_roll_max_publish_delay_seconds,
     )
     env_text = render_environment_file(config)
     unit_text = render_unit_file(config)

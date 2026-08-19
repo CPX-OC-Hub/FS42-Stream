@@ -63,6 +63,23 @@ class BlockSelectionTests(unittest.TestCase):
 
 
 class BlockRunnerTests(unittest.TestCase):
+    def test_direct_live_sanitizer_strips_ffmpeg_append_discontinuities_during_run(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            playlist = Path(tmp) / "Sky_One.m3u8"
+            playlist.write_text("#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:0\n#EXT-X-DISCONTINUITY\n#EXTINF:2.0,\nSky_One_00000.ts\n")
+            process = mock.Mock()
+            process.poll.side_effect = [None, 0]
+            process.wait.return_value = 0
+
+            with mock.patch("fs42stream.run_block.subprocess.Popen", return_value=process) as popen, mock.patch("fs42stream.run_block.time.sleep"):
+                completed = _run_ffmpeg_command(["ffmpeg", "-i", "in", "out"], playlist=playlist, normalize_jellyfin=False, sanitize_live_playlist=True)
+
+            self.assertEqual(completed.returncode, 0)
+            self.assertNotIn("#EXT-X-DISCONTINUITY", playlist.read_text())
+            kwargs = popen.call_args.kwargs
+            self.assertIsNot(kwargs["stdout"], subprocess.PIPE)
+            self.assertIsNot(kwargs["stderr"], subprocess.PIPE)
+
     def test_jellyfin_live_normalization_runner_does_not_use_undrained_pipes(self):
         with tempfile.TemporaryDirectory() as tmp:
             playlist = Path(tmp) / "Sky_One.m3u8"
