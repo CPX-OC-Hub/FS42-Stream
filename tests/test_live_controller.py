@@ -241,6 +241,36 @@ class LongBlockScheduleClient:
 
 
 class LiveControllerTests(unittest.TestCase):
+    @unittest.skipUnless(Path("/usr/bin/ffmpeg").exists(), "requires system ffmpeg")
+    def test_direct_boundary_filler_appends_next_segment_without_double_offset_or_discontinuity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            playlist = root / "Sky_One.m3u8"
+            lines = ["#EXTM3U", "#EXT-X-VERSION:3", "#EXT-X-TARGETDURATION:2", "#EXT-X-MEDIA-SEQUENCE:100"]
+            for number in range(100, 160):
+                lines.extend(["#EXTINF:2.000000,", f"Sky_One_{number:05d}.ts"])
+                (root / f"Sky_One_{number:05d}.ts").write_bytes(b"existing")
+            playlist.write_text("\n".join(lines) + "\n")
+
+            result = HLSBlackSlateFillerRunner("/usr/bin/ffmpeg").run(
+                output_dir=root,
+                output_name="Sky_One",
+                duration=4,
+                hls_start_number=160,
+                hls_start_time_offset=120.0,
+                hls_append=True,
+                stream_profile="direct",
+            )
+
+            text = playlist.read_text()
+            self.assertEqual(result["status"], "ok", result["ffmpeg"].get("stderr"))
+            self.assertNotIn("#EXT-X-DISCONTINUITY", text)
+            self.assertIn("Sky_One_00160.ts", text)
+            self.assertIn("Sky_One_00161.ts", text)
+            self.assertNotIn("Sky_One_00220.ts", text)
+            self.assertEqual(result["hls_next_start_number"], 162)
+            self.assertNotIn("-start_number", result["command"])
+
     def test_default_live_config_uses_ts_primary_playout_mode_and_passes_it_to_block_runner(self):
         updates = []
         runner = FakeBlockRunner()
@@ -504,10 +534,10 @@ class LiveControllerTests(unittest.TestCase):
         self.assertEqual(playlist_text.count("#EXT-X-DISCONTINUITY"), 0)
 
     def test_boundary_filler_uses_transition_safe_hls_cadence(self):
-        with tempfile.TemporaryDirectory() as tmp, mock.patch(
-            "subprocess.run",
-            return_value=subprocess.CompletedProcess(["ffmpeg"], 0, stdout="", stderr=""),
-        ) as run:
+        process = mock.Mock()
+        process.poll.return_value = 0
+        process.wait.return_value = 0
+        with tempfile.TemporaryDirectory() as tmp, mock.patch("subprocess.Popen", return_value=process) as popen:
             HLSBlackSlateFillerRunner("/usr/bin/ffmpeg").run(
                 output_dir=Path(tmp),
                 output_name="Sky_One",
@@ -516,7 +546,7 @@ class LiveControllerTests(unittest.TestCase):
                 hls_append=True,
             )
 
-        command = run.call_args.args[0]
+        command = popen.call_args.args[0]
         self.assertIn(["-hls_time", "2"], [command[index:index + 2] for index in range(len(command) - 1)])
         self.assertIn(["-g", "50"], [command[index:index + 2] for index in range(len(command) - 1)])
         self.assertIn(["-keyint_min", "50"], [command[index:index + 2] for index in range(len(command) - 1)])
@@ -527,10 +557,10 @@ class LiveControllerTests(unittest.TestCase):
         self.assertNotIn("discont_start", command)
 
     def test_jellyfin_boundary_filler_uses_explicit_elapsed_timestamp_offset(self):
-        with tempfile.TemporaryDirectory() as tmp, mock.patch(
-            "subprocess.run",
-            return_value=subprocess.CompletedProcess(["ffmpeg"], 0, stdout="", stderr=""),
-        ) as run:
+        process = mock.Mock()
+        process.poll.return_value = 0
+        process.wait.return_value = 0
+        with tempfile.TemporaryDirectory() as tmp, mock.patch("subprocess.Popen", return_value=process) as popen:
             HLSBlackSlateFillerRunner("/usr/bin/ffmpeg").run(
                 output_dir=Path(tmp),
                 output_name="Sky_One",
@@ -541,7 +571,7 @@ class LiveControllerTests(unittest.TestCase):
                 stream_profile="jellyfin",
             )
 
-        command = run.call_args.args[0]
+        command = popen.call_args.args[0]
         joined = " ".join(command)
         self.assertIn("-output_ts_offset 31.5", joined)
         self.assertIn("-t 8", joined)
@@ -553,15 +583,18 @@ class LiveControllerTests(unittest.TestCase):
         self.assertNotIn("-avoid_negative_ts", joined)
 
     def test_jellyfin_boundary_filler_reports_elapsed_offset_after_live_window_rollover(self):
-        def write_rolled_playlist(command, check, shell, stdout, stderr, text):
+        def write_rolled_playlist(command, shell, stdout, stderr, text):
             playlist = Path(command[-1])
             lines = ["#EXTM3U", "#EXT-X-VERSION:3", "#EXT-X-TARGETDURATION:2", "#EXT-X-MEDIA-SEQUENCE:8"]
             for number in range(8, 20):
                 lines.extend(["#EXTINF:2.000000,", f"Sky_One_{number:05d}.ts"])
             playlist.write_text("\n".join(lines) + "\n")
-            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+            process = mock.Mock()
+            process.poll.return_value = 0
+            process.wait.return_value = 0
+            return process
 
-        with tempfile.TemporaryDirectory() as tmp, mock.patch("subprocess.run", side_effect=write_rolled_playlist):
+        with tempfile.TemporaryDirectory() as tmp, mock.patch("subprocess.Popen", side_effect=write_rolled_playlist):
             diagnostics = HLSBlackSlateFillerRunner("/usr/bin/ffmpeg").run(
                 output_dir=Path(tmp),
                 output_name="Sky_One",
@@ -579,15 +612,18 @@ class LiveControllerTests(unittest.TestCase):
         self.assertNotIn("#EXT-X-DISCONTINUITY\n#EXT-X-DISCONTINUITY", playlist_text)
 
     def test_boundary_filler_caps_elapsed_offset_to_commanded_duration_when_live_window_contains_prior_segments(self):
-        def write_rolled_playlist_with_prior_segments(command, check, shell, stdout, stderr, text):
+        def write_rolled_playlist_with_prior_segments(command, shell, stdout, stderr, text):
             playlist = Path(command[-1])
             lines = ["#EXTM3U", "#EXT-X-VERSION:3", "#EXT-X-TARGETDURATION:2", "#EXT-X-MEDIA-SEQUENCE:11617"]
             for number in range(11617, 11677):
                 lines.extend(["#EXTINF:2.000000,", f"Sky_One_{number:05d}.ts"])
             playlist.write_text("\n".join(lines) + "\n")
-            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+            process = mock.Mock()
+            process.poll.return_value = 0
+            process.wait.return_value = 0
+            return process
 
-        with tempfile.TemporaryDirectory() as tmp, mock.patch("subprocess.run", side_effect=write_rolled_playlist_with_prior_segments):
+        with tempfile.TemporaryDirectory() as tmp, mock.patch("subprocess.Popen", side_effect=write_rolled_playlist_with_prior_segments):
             diagnostics = HLSBlackSlateFillerRunner("/usr/bin/ffmpeg").run(
                 output_dir=Path(tmp),
                 output_name="Sky_One",

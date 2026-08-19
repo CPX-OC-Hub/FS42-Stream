@@ -6,6 +6,7 @@ import math
 import os
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from dataclasses import dataclass
@@ -238,7 +239,7 @@ class HLSBlackSlateFillerRunner:
             "-hls_list_size",
             str(hls_list_size_for_profile(stream_profile)),
         ]
-        if stream_profile != "jellyfin" or not hls_append:
+        if not hls_append:
             command.extend([
                 "-start_number",
                 str(hls_start_number),
@@ -250,9 +251,24 @@ class HLSBlackSlateFillerRunner:
         else:
             command.extend(["-hls_flags", "omit_endlist"])
         command.extend(["-hls_segment_filename", str(segment_pattern), str(playlist)])
-        completed = subprocess.run(command, check=False, shell=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        if stream_profile == "jellyfin" and playlist.exists():
-            _normalize_jellyfin_live_playlist(playlist)
+        with tempfile.TemporaryFile(mode="w+t") as stdout_file, tempfile.TemporaryFile(mode="w+t") as stderr_file:
+            process = subprocess.Popen(command, shell=False, stdout=stdout_file, stderr=stderr_file, text=True)
+            while process.poll() is None:
+                if playlist.exists():
+                    if stream_profile == "jellyfin":
+                        _normalize_jellyfin_live_playlist(playlist)
+                    else:
+                        _rewrite_live_playlist_boundaries(playlist, boundary_starts=[])
+                time.sleep(0.25)
+            returncode = process.wait()
+            if playlist.exists():
+                if stream_profile == "jellyfin":
+                    _normalize_jellyfin_live_playlist(playlist)
+                else:
+                    _rewrite_live_playlist_boundaries(playlist, boundary_starts=[])
+            stdout_file.seek(0)
+            stderr_file.seek(0)
+            completed = subprocess.CompletedProcess(command, returncode, stdout_file.read(), stderr_file.read())
         hls_next_start_number = _next_hls_start_number(playlist, fallback=hls_start_number)
         observed_segment_duration = _hls_segment_duration_since(playlist, start_number=hls_start_number)
         segment_duration = min(observed_segment_duration, safe_duration)
