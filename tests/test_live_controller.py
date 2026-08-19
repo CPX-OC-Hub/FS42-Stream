@@ -1096,7 +1096,7 @@ class LiveControllerTests(unittest.TestCase):
         self.assertEqual([call.duration_limit for call in runner.calls], [1500.0, 1800])
         self.assertEqual(updates[-1]["status"], "complete")
 
-    def test_boundary_filler_overruns_wallclock_boundary_instead_of_jellyfin_startup_bridge(self):
+    def test_boundary_filler_stops_at_wallclock_boundary_instead_of_overrunning(self):
         class FeatureScheduleClient:
             def fetch_schedule(self, channel, expected_blocks=None):
                 return {
@@ -1146,15 +1146,15 @@ class LiveControllerTests(unittest.TestCase):
         block_filler = [event for event in result["events"] if event["event"] == "block_filler"]
         self.assertEqual(len(block_filler), 1)
         self.assertEqual(block_filler[0]["wait_seconds"], 5.0)
-        self.assertEqual(block_filler[0]["duration"], 25.0)
-        self.assertEqual(block_filler[0]["startup_guard_seconds"], 20.0)
-        self.assertEqual([call["duration"] for call in filler.calls], [25.0])
+        self.assertEqual(block_filler[0]["duration"], 5.0)
+        self.assertEqual(block_filler[0]["startup_guard_seconds"], 0.0)
+        self.assertEqual([call["duration"] for call in filler.calls], [5.0])
         self.assertEqual([call.hls_start_number for call in runner.calls], [0, 4])
-        self.assertEqual(runner.calls[1].now, datetime(2026, 6, 17, 10, 0, 25))
+        self.assertEqual(runner.calls[1].now, datetime(2026, 6, 17, 10, 0, 5))
         self.assertEqual(runner.calls[1].stream_profile, "jellyfin")
         self.assertEqual(runner.calls[1].playout_mode, "ts-primary")
 
-    def test_boundary_filler_overrun_applies_to_show_to_commercial_boundary_too(self):
+    def test_boundary_filler_does_not_overrun_show_to_commercial_boundary(self):
         class CommercialScheduleClient:
             def fetch_schedule(self, channel, expected_blocks=None):
                 return {
@@ -1197,9 +1197,9 @@ class LiveControllerTests(unittest.TestCase):
             )
 
         self.assertNotIn("block_startup_bridge", [event["event"] for event in result["events"]])
-        self.assertEqual([call["duration"] for call in filler.calls], [25.0])
+        self.assertEqual([call["duration"] for call in filler.calls], [5.0])
         self.assertEqual([call.hls_start_number for call in runner.calls], [0, 4])
-        self.assertEqual(runner.calls[1].now, datetime(2026, 6, 17, 10, 0, 25))
+        self.assertEqual(runner.calls[1].now, datetime(2026, 6, 17, 10, 0, 5))
 
     def test_runs_filler_hls_during_wait_when_block_finishes_before_boundary(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1228,15 +1228,16 @@ class LiveControllerTests(unittest.TestCase):
             )
 
         self.assertEqual(len(filler.calls), 1)
-        self.assertEqual(filler.calls[0]["duration"], 1520.0)
+        self.assertEqual(filler.calls[0]["duration"], 1500.0)
         self.assertEqual(filler.calls[0]["hls_append"], True)
         self.assertEqual(filler.calls[0]["hls_start_number"], 1)
         self.assertEqual(filler.calls[0]["output_name"], "Sky_One")
         self.assertEqual(sleeps, [])
         self.assertIn("block_filler", [event["event"] for event in result["events"]])
         filler_event = [event for event in result["events"] if event["event"] == "block_filler"][0]
-        self.assertEqual(filler_event["duration"], 1520.0)
+        self.assertEqual(filler_event["duration"], 1500.0)
         self.assertEqual(filler_event["wait_seconds"], 1500.0)
+        self.assertEqual(filler_event["startup_guard_seconds"], 0.0)
         self.assertEqual(filler_event["hls_start_number"], 1)
         self.assertEqual(filler_event["hls_next_start_number"], 4)
         self.assertEqual([call.hls_start_number for call in runner.calls], [0, 4])

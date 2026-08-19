@@ -43,7 +43,7 @@ from .run_block import (
 )
 
 
-BOUNDARY_FILLER_STARTUP_GUARD_SECONDS = 20.0
+BOUNDARY_FILLER_STARTUP_GUARD_SECONDS = 0.0
 
 
 def _utc_now() -> datetime:
