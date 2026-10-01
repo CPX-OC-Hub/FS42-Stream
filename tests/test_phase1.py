@@ -64,6 +64,28 @@ class FS42ScheduleClientTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "expected 338 schedule blocks"):
             client.fetch_schedule("Sky One", expected_blocks=338)
 
+    def test_reconcile_schedule_posts_to_channel_encoded_add_time_endpoint(self):
+        body = json.dumps({"status": "accepted"}).encode()
+
+        def opener(request, timeout):
+            self.assertEqual(request.full_url, "http://fs42.example:4242/build/schedule/add_time/day/Sky%20One")
+            self.assertEqual(request.get_method(), "POST")
+            return mock.MagicMock(__enter__=lambda s: s, __exit__=lambda *a: None, read=lambda: body)
+
+        client = FS42ScheduleClient("http://fs42.example:4242", opener=opener)
+        self.assertEqual(client.reconcile_schedule("Sky One"), {"status": "accepted"})
+
+    def test_reset_schedule_posts_to_channel_encoded_reset_endpoint(self):
+        body = json.dumps({"status": "reset"}).encode()
+
+        def opener(request, timeout):
+            self.assertEqual(request.full_url, "http://fs42.example:4242/reset/schedule/Sky%20One")
+            self.assertEqual(request.get_method(), "POST")
+            return mock.MagicMock(__enter__=lambda s: s, __exit__=lambda *a: None, read=lambda: body)
+
+        client = FS42ScheduleClient("http://fs42.example:4242", opener=opener)
+        self.assertEqual(client.reset_schedule("Sky One"), {"status": "reset"})
+
 
 class ScheduleSelectionTests(unittest.TestCase):
     def test_selects_naive_fs42_schedule_using_configured_local_timezone(self):

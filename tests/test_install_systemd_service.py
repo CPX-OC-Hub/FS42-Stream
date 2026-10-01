@@ -64,6 +64,27 @@ class InstallSystemdServiceTests(unittest.TestCase):
         self.assertIn('FS42STREAM_BRB_IMAGE_PATH="catalog/SkyOne/runtime/brb.png"', output)
         self.assertIn('--brb-image-path "${FS42STREAM_BRB_IMAGE_PATH}"', output)
 
+    def test_dry_run_propagates_schedule_recovery_controls(self):
+        with tempfile.TemporaryDirectory() as tmp, mock.patch("sys.stdout") as stdout:
+            rc = main([
+                "--env-file", str(Path(tmp) / "env"),
+                "--unit-file", str(Path(tmp) / "unit"),
+                "--output-root", str(Path(tmp) / "hls"),
+                "--schedule-fallback-api-url", "http://127.0.0.1:4242",
+                "--schedule-timeout", "4.5",
+                "--schedule-recovery-interval", "17",
+                "--dry-run",
+            ])
+
+        self.assertEqual(rc, 0)
+        output = "".join(call.args[0] for call in stdout.write.call_args_list)
+        self.assertIn('FS42STREAM_SCHEDULE_FALLBACK_API_URL="http://127.0.0.1:4242"', output)
+        self.assertIn('FS42STREAM_SCHEDULE_TIMEOUT="4.5"', output)
+        self.assertIn('FS42STREAM_SCHEDULE_RECOVERY_INTERVAL="17"', output)
+        self.assertIn('--schedule-fallback-api-url "${FS42STREAM_SCHEDULE_FALLBACK_API_URL}"', output)
+        self.assertIn('--schedule-timeout "${FS42STREAM_SCHEDULE_TIMEOUT}"', output)
+        self.assertIn('--schedule-recovery-interval "${FS42STREAM_SCHEDULE_RECOVERY_INTERVAL}"', output)
+
     def test_dry_run_propagates_loudnorm_audio_normalization(self):
         with tempfile.TemporaryDirectory() as tmp, mock.patch("sys.stdout") as stdout:
             rc = main([

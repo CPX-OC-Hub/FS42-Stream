@@ -35,6 +35,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--schedule-host", default="127.0.0.1")
     parser.add_argument("--schedule-port", type=int, default=4242)
     parser.add_argument("--schedule-base-path", default="")
+    parser.add_argument("--schedule-fallback-api-url", default="", help="optional BRB/cached fallback schedule API URL")
+    parser.add_argument("--schedule-timeout", type=float, default=10.0, help="schedule API request timeout in seconds")
+    parser.add_argument("--schedule-recovery-interval", type=float, default=30.0, help="seconds between upstream health rechecks while serving fallback")
     parser.add_argument("--api-base-url", default="", help="deprecated full schedule API URL override; prefer split schedule variables")
     parser.add_argument("--public-base-url", default="")
     parser.add_argument("--logo-filename", default="logo.png")
@@ -73,6 +76,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         schedule_host=args.schedule_host,
         schedule_port=args.schedule_port,
         schedule_base_path=args.schedule_base_path,
+        schedule_fallback_api_url=args.schedule_fallback_api_url,
+        schedule_timeout=args.schedule_timeout,
+        schedule_recovery_interval=args.schedule_recovery_interval,
         api_base_url=args.api_base_url,
         public_base_url=args.public_base_url,
         logo_filename=args.logo_filename,

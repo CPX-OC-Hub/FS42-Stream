@@ -168,8 +168,17 @@ def _select_shared_schedule_block(
         except Exception:
             summary = None
     stale_schedule = _stale_schedule_state(summary, channel=config.channel, now=selection_now, schedule_timezone=config.schedule_timezone)
-    if stale_schedule and stale_schedule.get("active"):
+    recovery_status = _schedule_recovery_status(schedule_client)
+    if recovery_status.get("active"):
+        stale_schedule = recovery_status
+    requires_placeholder = bool(recovery_status.get("requires_placeholder"))
+    if not recovery_status and stale_schedule and stale_schedule.get("active") and stale_schedule.get("reason") == "summary-expired":
+        requires_placeholder = True
+    if requires_placeholder:
         schedule = _build_stale_placeholder_schedule(config.channel, now=selection_now, duration_limit=config.duration_limit, schedule_timezone=config.schedule_timezone, brb_image_path=config.brb_image_path)
+        stale_schedule = dict(stale_schedule or {"active": True, "channel": config.channel, "reason": "no-current-full-schedule"})
+        stale_schedule["active"] = True
+        stale_schedule["requires_placeholder"] = True
         stale_schedule["brb_image_path"] = str(config.brb_image_path)
     playout_state = supervise_schedule_playout(
         schedule,
@@ -183,6 +192,17 @@ def _select_shared_schedule_block(
         playout_state=playout_state,
         stale_schedule=dict(stale_schedule) if isinstance(stale_schedule, Mapping) else None,
     )
+
+
+def _schedule_recovery_status(schedule_client: ScheduleClient) -> dict[str, Any]:
+    status_getter = getattr(schedule_client, "status", None)
+    if not callable(status_getter):
+        return {}
+    try:
+        status = status_getter()
+    except Exception:
+        return {}
+    return dict(status) if isinstance(status, Mapping) else {}
 
 
 class HLSBlackSlateFillerRunner:

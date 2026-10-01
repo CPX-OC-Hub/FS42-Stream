@@ -15,6 +15,9 @@ The persistent-service installer writes `/etc/fs42stream/fs42stream.env`. Priori
 | Common | `FS42STREAM_SCHEDULE_SCHEME` | FieldStation42 schedule API scheme | `http` |
 | Common | `FS42STREAM_SCHEDULE_HOST` | FieldStation42 schedule API hostname/IP | `127.0.0.1` |
 | Common | `FS42STREAM_SCHEDULE_PORT` | FieldStation42 schedule API port | `4242` |
+| Resilience | `FS42STREAM_SCHEDULE_FALLBACK_API_URL` | Optional local BRB/cached schedule API; blank uses the last in-memory good schedule only | blank |
+| Resilience | `FS42STREAM_SCHEDULE_TIMEOUT` | Timeout for each summary/full schedule request, in seconds | `10` |
+| Resilience | `FS42STREAM_SCHEDULE_RECOVERY_INTERVAL` | Seconds between primary upstream rechecks while fallback is active | `30` |
 | Common | `FS42STREAM_PUBLIC_BASE_URL` | External base URL placed in M3U/XMLTV metadata; blank derives it from the HTTP `Host` header | blank |
 | Common | `FS42STREAM_LOGO_FILENAME` | Logo file beneath `<output-root>/<channel-slug>/` | `logo.png` |
 | Common | `FS42STREAM_STREAM_PROFILES` | Active output runners: `jellyfin`, `direct`, `both`, or `direct,jellyfin` | `jellyfin` |
@@ -37,6 +40,28 @@ FS42STREAM_BRB_IMAGE_PATH="catalog/SkyOne/runtime/brb.png"
 ```
 
 Relative values resolve beneath the configured FS42 root. Absolute values are accepted only beneath configured FS42 or SDTV media roots; unsafe paths such as `/etc/brb.png` are rejected. The configured BRB image is treated as an image-loop fallback slate, so the existing `--fallback-slate-video` behavior still takes precedence when configured.
+
+### Upstream recovery and automatic failback
+
+Set `FS42STREAM_SCHEDULE_FALLBACK_API_URL` to a local schedule endpoint that serves an explicit BRB schedule or a cached schedule. On a primary `/summary/schedules/<channel>` or `/schedules/<channel>` timeout/failure, the running controller uses that fallback (or its last successful in-memory schedule when no fallback URL is configured) instead of terminating. Status and channel health report `degraded` with `stale_schedule.reason="upstream-unavailable"` while it is active.
+
+The controller rechecks the configured primary at `FS42STREAM_SCHEDULE_RECOVERY_INTERVAL`. It keeps fallback active until both the channel summary and full schedule response succeed within `FS42STREAM_SCHEDULE_TIMEOUT`; failback occurs at the next schedule-block selection, preserving the current HLS block. The defaults are a 10-second request timeout and a 30-second recheck interval.
+
+### Summary reconciliation and safe operator repair
+
+When `/summary/schedules/<channel>` is missing or expired but `/schedules/<channel>` contains the current block, FS42-Stream keeps the full schedule in use and issues one non-destructive `build/schedule/add_time/day` reconciliation request per five-minute cooldown. It reports degraded schedule freshness while the summary remains stale, but does not replace a valid current block with BRB.
+
+Inspect any channel without changing FieldStation42:
+
+```bash
+cd /opt/fs42stream
+.venv/bin/python -m fs42stream.reconcile_schedule \
+  --channel 'Example Channel' --api-base-url http://127.0.0.1:4242
+```
+
+The command only permits `--apply` when the full schedule covers the current time and the summary is stale. `--apply` sends `build/schedule/add_time/day/<channel>` and waits for both a fresh summary and current full-schedule coverage. An approved destructive recovery can add `--reset --apply`, which sends the channel reset immediately before `add_time`.
+
+The command never restarts or reloads `fs42stream.service`. Restart/reload is an operator action only after its JSON output reports `action: "reconciled"` and both `validation.summary_fresh` and `validation.full_schedule_current` are true. After approval, verify the direct HLS playlist first and the Jellyfin HLS playlist separately.
 
 ## Install or generate service files
 
