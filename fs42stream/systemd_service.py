@@ -28,12 +28,18 @@ class ServiceConfig:
     schedule_host: str = DEFAULT_SCHEDULE_HOST
     schedule_port: int = DEFAULT_SCHEDULE_PORT
     schedule_base_path: str = DEFAULT_SCHEDULE_BASE_PATH
+    schedule_fallback_api_url: str = ""
+    schedule_timeout: float = 10.0
+    schedule_recovery_interval: float = 30.0
     api_base_url: str = ""
     public_base_url: str = ""
     logo_filename: str = "logo.png"
     stream_profiles: str = "jellyfin"
     brb_image_path: str = "runtime/brb.png"
     audio_normalization: str = "off"
+    jellyfin_pre_roll_lead_seconds: float = 0.0
+    jellyfin_pre_roll_min_buffer_seconds: float = 30.0
+    jellyfin_pre_roll_max_publish_delay_seconds: float = 60.0
 
 
 def render_environment_file(config: ServiceConfig) -> str:
@@ -53,12 +59,18 @@ def render_environment_file(config: ServiceConfig) -> str:
         "FS42STREAM_SCHEDULE_HOST": config.schedule_host,
         "FS42STREAM_SCHEDULE_PORT": str(config.schedule_port),
         "FS42STREAM_SCHEDULE_BASE_PATH": config.schedule_base_path,
+        "FS42STREAM_SCHEDULE_FALLBACK_API_URL": config.schedule_fallback_api_url,
+        "FS42STREAM_SCHEDULE_TIMEOUT": _num(config.schedule_timeout),
+        "FS42STREAM_SCHEDULE_RECOVERY_INTERVAL": _num(config.schedule_recovery_interval),
         "FS42STREAM_API_BASE_URL": config.api_base_url,
         "FS42STREAM_PUBLIC_BASE_URL": config.public_base_url,
         "FS42STREAM_LOGO_FILENAME": config.logo_filename,
         "FS42STREAM_STREAM_PROFILES": config.stream_profiles,
         "FS42STREAM_BRB_IMAGE_PATH": config.brb_image_path,
         "FS42STREAM_AUDIO_NORMALIZATION": config.audio_normalization,
+        "FS42STREAM_JELLYFIN_PRE_ROLL_LEAD_SECONDS": _num(config.jellyfin_pre_roll_lead_seconds),
+        "FS42STREAM_JELLYFIN_PRE_ROLL_MIN_BUFFER_SECONDS": _num(config.jellyfin_pre_roll_min_buffer_seconds),
+        "FS42STREAM_JELLYFIN_PRE_ROLL_MAX_PUBLISH_DELAY_SECONDS": _num(config.jellyfin_pre_roll_max_publish_delay_seconds),
     }
     lines = ["# Managed by FS42-Stream installer", "# Edit values here, then run: sudo systemctl restart fs42stream", ""]
     lines.extend(f'{key}="{_escape_env(value)}"' for key, value in values.items())
@@ -77,7 +89,7 @@ Type=simple
 User={config.user}
 WorkingDirectory={config.install_dir}
 EnvironmentFile={config.env_file}
-ExecStart={python} -m fs42stream.integrated_runner --channel "${{FS42STREAM_CHANNEL}}" --channel-slug ${{FS42STREAM_CHANNEL_SLUG}} --host ${{FS42STREAM_HOST}} --port ${{FS42STREAM_PORT}} --output-root ${{FS42STREAM_OUTPUT_ROOT}} --max-blocks ${{FS42STREAM_MAX_BLOCKS}} --duration-limit ${{FS42STREAM_DURATION_LIMIT}} --schedule-scheme ${{FS42STREAM_SCHEDULE_SCHEME}} --schedule-host ${{FS42STREAM_SCHEDULE_HOST}} --schedule-port ${{FS42STREAM_SCHEDULE_PORT}} --schedule-base-path "${{FS42STREAM_SCHEDULE_BASE_PATH}}" --api-base-url "${{FS42STREAM_API_BASE_URL}}" --public-base-url "${{FS42STREAM_PUBLIC_BASE_URL}}" --logo-filename ${{FS42STREAM_LOGO_FILENAME}} --video-encoder ${{FS42STREAM_VIDEO_ENCODER}} --vaapi-device ${{FS42STREAM_VAAPI_DEVICE}} --schedule-timezone ${{FS42STREAM_SCHEDULE_TIMEZONE}} --playout-mode ${{FS42STREAM_PLAYOUT_MODE}} --stream-profiles "${{FS42STREAM_STREAM_PROFILES}}" --brb-image-path "${{FS42STREAM_BRB_IMAGE_PATH}}" --audio-normalization "${{FS42STREAM_AUDIO_NORMALIZATION}}"
+ExecStart={python} -m fs42stream.integrated_runner --channel "${{FS42STREAM_CHANNEL}}" --channel-slug ${{FS42STREAM_CHANNEL_SLUG}} --host ${{FS42STREAM_HOST}} --port ${{FS42STREAM_PORT}} --output-root ${{FS42STREAM_OUTPUT_ROOT}} --max-blocks ${{FS42STREAM_MAX_BLOCKS}} --duration-limit ${{FS42STREAM_DURATION_LIMIT}} --schedule-scheme ${{FS42STREAM_SCHEDULE_SCHEME}} --schedule-host ${{FS42STREAM_SCHEDULE_HOST}} --schedule-port ${{FS42STREAM_SCHEDULE_PORT}} --schedule-base-path "${{FS42STREAM_SCHEDULE_BASE_PATH}}" --schedule-fallback-api-url "${{FS42STREAM_SCHEDULE_FALLBACK_API_URL}}" --schedule-timeout "${{FS42STREAM_SCHEDULE_TIMEOUT}}" --schedule-recovery-interval "${{FS42STREAM_SCHEDULE_RECOVERY_INTERVAL}}" --api-base-url "${{FS42STREAM_API_BASE_URL}}" --public-base-url "${{FS42STREAM_PUBLIC_BASE_URL}}" --logo-filename ${{FS42STREAM_LOGO_FILENAME}} --video-encoder ${{FS42STREAM_VIDEO_ENCODER}} --vaapi-device ${{FS42STREAM_VAAPI_DEVICE}} --schedule-timezone ${{FS42STREAM_SCHEDULE_TIMEZONE}} --playout-mode ${{FS42STREAM_PLAYOUT_MODE}} --stream-profiles "${{FS42STREAM_STREAM_PROFILES}}" --brb-image-path "${{FS42STREAM_BRB_IMAGE_PATH}}" --audio-normalization "${{FS42STREAM_AUDIO_NORMALIZATION}}" --jellyfin-pre-roll-lead-seconds "${{FS42STREAM_JELLYFIN_PRE_ROLL_LEAD_SECONDS}}" --jellyfin-pre-roll-min-buffer-seconds "${{FS42STREAM_JELLYFIN_PRE_ROLL_MIN_BUFFER_SECONDS}}" --jellyfin-pre-roll-max-publish-delay-seconds "${{FS42STREAM_JELLYFIN_PRE_ROLL_MAX_PUBLISH_DELAY_SECONDS}}"
 Restart=on-failure
 RestartSec=5
 KillSignal=SIGTERM

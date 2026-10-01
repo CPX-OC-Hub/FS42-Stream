@@ -35,12 +35,18 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--schedule-host", default="127.0.0.1")
     parser.add_argument("--schedule-port", type=int, default=4242)
     parser.add_argument("--schedule-base-path", default="")
+    parser.add_argument("--schedule-fallback-api-url", default="", help="optional BRB/cached fallback schedule API URL")
+    parser.add_argument("--schedule-timeout", type=float, default=10.0, help="schedule API request timeout in seconds")
+    parser.add_argument("--schedule-recovery-interval", type=float, default=30.0, help="seconds between upstream health rechecks while serving fallback")
     parser.add_argument("--api-base-url", default="", help="deprecated full schedule API URL override; prefer split schedule variables")
     parser.add_argument("--public-base-url", default="")
     parser.add_argument("--logo-filename", default="logo.png")
     parser.add_argument("--stream-profiles", default="jellyfin", help="active profiles: jellyfin (default), direct, both, or direct,jellyfin")
     parser.add_argument("--brb-image-path", default="runtime/brb.png", help="fallback BRB image path relative to FS42 root or absolute under an allowed media root")
     parser.add_argument("--audio-normalization", default="off", help="audio normalization mode: off (default) or loudnorm")
+    parser.add_argument("--jellyfin-pre-roll-lead-seconds", type=float, default=0.0, help="private Jellyfin next-block staging lead time; zero disables it")
+    parser.add_argument("--jellyfin-pre-roll-min-buffer-seconds", type=float, default=30.0, help="minimum staged Jellyfin duration required before a public boundary switch")
+    parser.add_argument("--jellyfin-pre-roll-max-publish-delay-seconds", type=float, default=60.0, help="maximum filler-backed delay while waiting for the staged Jellyfin safe buffer")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--skip-systemctl", action="store_true", help="write files but do not run systemctl daemon-reload/enable/restart")
     args = parser.parse_args(argv)
@@ -70,12 +76,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         schedule_host=args.schedule_host,
         schedule_port=args.schedule_port,
         schedule_base_path=args.schedule_base_path,
+        schedule_fallback_api_url=args.schedule_fallback_api_url,
+        schedule_timeout=args.schedule_timeout,
+        schedule_recovery_interval=args.schedule_recovery_interval,
         api_base_url=args.api_base_url,
         public_base_url=args.public_base_url,
         logo_filename=args.logo_filename,
         stream_profiles=args.stream_profiles,
         brb_image_path=args.brb_image_path,
         audio_normalization=args.audio_normalization,
+        jellyfin_pre_roll_lead_seconds=args.jellyfin_pre_roll_lead_seconds,
+        jellyfin_pre_roll_min_buffer_seconds=args.jellyfin_pre_roll_min_buffer_seconds,
+        jellyfin_pre_roll_max_publish_delay_seconds=args.jellyfin_pre_roll_max_publish_delay_seconds,
     )
     env_text = render_environment_file(config)
     unit_text = render_unit_file(config)

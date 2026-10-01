@@ -64,6 +64,28 @@ class FS42ScheduleClientTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "expected 338 schedule blocks"):
             client.fetch_schedule("Sky One", expected_blocks=338)
 
+    def test_reconcile_schedule_posts_to_channel_encoded_add_time_endpoint(self):
+        body = json.dumps({"status": "accepted"}).encode()
+
+        def opener(request, timeout):
+            self.assertEqual(request.full_url, "http://fs42.example:4242/build/schedule/add_time/day/Sky%20One")
+            self.assertEqual(request.get_method(), "POST")
+            return mock.MagicMock(__enter__=lambda s: s, __exit__=lambda *a: None, read=lambda: body)
+
+        client = FS42ScheduleClient("http://fs42.example:4242", opener=opener)
+        self.assertEqual(client.reconcile_schedule("Sky One"), {"status": "accepted"})
+
+    def test_reset_schedule_posts_to_channel_encoded_reset_endpoint(self):
+        body = json.dumps({"status": "reset"}).encode()
+
+        def opener(request, timeout):
+            self.assertEqual(request.full_url, "http://fs42.example:4242/reset/schedule/Sky%20One")
+            self.assertEqual(request.get_method(), "POST")
+            return mock.MagicMock(__enter__=lambda s: s, __exit__=lambda *a: None, read=lambda: body)
+
+        client = FS42ScheduleClient("http://fs42.example:4242", opener=opener)
+        self.assertEqual(client.reset_schedule("Sky One"), {"status": "reset"})
+
 
 class ScheduleSelectionTests(unittest.TestCase):
     def test_selects_naive_fs42_schedule_using_configured_local_timezone(self):
@@ -560,7 +582,7 @@ class FFMpegCommandBuilderTests(unittest.TestCase):
 
         joined = " ".join(cmd)
         self.assertIn("-hls_time 2", joined)
-        self.assertIn("-hls_list_size 12", joined)
+        self.assertIn("-hls_list_size 60", joined)
         self.assertIn("-g 50", joined)
         self.assertIn("-keyint_min 50", joined)
         self.assertIn("-sc_threshold 0", joined)
@@ -594,7 +616,7 @@ class FFMpegCommandBuilderTests(unittest.TestCase):
 
         joined = " ".join(cmd)
         self.assertIn("-hls_time 2", joined)
-        self.assertIn("-hls_list_size 12", joined)
+        self.assertIn("-hls_list_size 60", joined)
         self.assertIn("-g 50", joined)
         self.assertNotIn("-keyint_min", cmd)
         self.assertNotIn("-sc_threshold", cmd)
@@ -620,7 +642,7 @@ class FFMpegCommandBuilderTests(unittest.TestCase):
 
         joined = " ".join(cmd)
         self.assertIn("append_list", joined)
-        self.assertIn("discont_start", joined)
+        self.assertNotIn("discont_start", joined)
         self.assertIn("omit_endlist", joined)
 
     def test_builds_vaapi_h264_command_when_requested(self):
@@ -658,7 +680,7 @@ class FFMpegCommandBuilderTests(unittest.TestCase):
         self.assertIn("/tmp/hls/Sky_One_%05d.ts", joined)
         self.assertEqual(cmd[-1], "/tmp/hls/Sky_One.m3u8")
 
-    def test_appends_later_blocks_without_resetting_hls_sequence(self):
+    def test_appends_later_blocks_without_resetting_hls_sequence_and_keeps_direct_timestamps_continuous(self):
         resolver = PathResolver()
         probe = mock.Mock(validate_video=mock.Mock(return_value=ProbeResult(1, 320, 240, 25, 44100, 1)))
         block = BlockPlanner(resolver, probe).plan(SCHEDULE)[0]
@@ -668,11 +690,14 @@ class FFMpegCommandBuilderTests(unittest.TestCase):
             output_dir=Path("/tmp/hls"),
             output_name="Sky_One",
             hls_start_number=42,
+            hls_start_time_offset=83.25,
             hls_append=True,
         )
 
         joined = " ".join(cmd)
-        self.assertIn("-hls_flags omit_endlist+append_list+discont_start", joined)
+        self.assertIn("-output_ts_offset 83.25", joined)
+        self.assertIn("-hls_flags omit_endlist+append_list", joined)
+        self.assertNotIn("discont_start", joined)
         self.assertNotIn("-start_number", joined)
         self.assertIn("/tmp/hls/Sky_One_%05d.ts", joined)
         self.assertEqual(cmd[-1], "/tmp/hls/Sky_One.m3u8")

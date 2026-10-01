@@ -25,6 +25,8 @@ class IntegratedRunnerTests(unittest.TestCase):
         self.assertEqual(config.stream_profiles, ("jellyfin",))
         self.assertEqual(str(config.brb_image_path), "runtime/brb.png")
         self.assertEqual(config.audio_normalization, "off")
+        self.assertEqual(config.jellyfin_pre_roll_min_buffer_seconds, 30.0)
+        self.assertEqual(config.jellyfin_pre_roll_max_publish_delay_seconds, 60.0)
 
     def test_cli_reads_brb_image_path_from_environment_and_forwards_it_to_controller(self):
         configs = []
@@ -49,6 +51,41 @@ class IntegratedRunnerTests(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertEqual(str(configs[0].brb_image_path), "catalog/SkyOne/runtime/brb.png")
 
+    def test_integrated_config_rejects_non_positive_schedule_timeout_and_recovery_interval(self):
+        class FakeServer:
+            server_address = ("127.0.0.1", 8088)
+            def serve_forever(self):
+                pass
+            def shutdown(self):
+                pass
+            def server_close(self):
+                pass
+
+        class FakeController:
+            def run(self, config):
+                return {"status": "complete", "channel": config.channel, "blocks_completed": 1, "events": []}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = {"output_root": Path(tmp), "max_blocks": 1, "duration_limit": 1}
+            with self.assertRaisesRegex(ValueError, "schedule_timeout"):
+                run_integrated(IntegratedRunnerConfig(**base, schedule_timeout=0), server_factory=lambda **kwargs: FakeServer(), controller_factory=lambda: FakeController())
+            with self.assertRaisesRegex(ValueError, "schedule_recovery_interval"):
+                run_integrated(IntegratedRunnerConfig(**base, schedule_recovery_interval=0), server_factory=lambda **kwargs: FakeServer(), controller_factory=lambda: FakeController())
+
+    def test_cli_propagates_schedule_recovery_controls_from_environment(self):
+        configs = []
+
+        with mock.patch("fs42stream.integrated_runner.run_integrated", side_effect=lambda config, **kwargs: configs.append(config) or {"status": "complete"}), mock.patch("sys.stdout"), mock.patch.dict(os.environ, {
+            "FS42STREAM_SCHEDULE_FALLBACK_API_URL": "http://127.0.0.1:4242",
+            "FS42STREAM_SCHEDULE_TIMEOUT": "4.5",
+            "FS42STREAM_SCHEDULE_RECOVERY_INTERVAL": "17",
+        }, clear=True):
+            self.assertEqual(main([]), 0)
+
+        self.assertEqual(configs[0].schedule_fallback_api_url, "http://127.0.0.1:4242")
+        self.assertEqual(configs[0].schedule_timeout, 4.5)
+        self.assertEqual(configs[0].schedule_recovery_interval, 17.0)
+
     def test_cli_and_environment_propagate_audio_normalization_and_reject_invalid_values(self):
         configs = []
 
@@ -61,6 +98,30 @@ class IntegratedRunnerTests(unittest.TestCase):
 
         self.assertEqual([config.audio_normalization for config in configs], ["loudnorm", "loudnorm"])
         self.assertEqual(invalid.exception.code, 2)
+
+    def test_cli_and_environment_propagate_jellyfin_pre_roll_lead_seconds(self):
+        configs = []
+
+        class FakeServer:
+            server_address = ("127.0.0.1", 8088)
+            def serve_forever(self):
+                pass
+            def shutdown(self):
+                pass
+            def server_close(self):
+                pass
+
+        class FakeController:
+            def run(self, config):
+                configs.append(config)
+                return {"status": "complete", "channel": config.channel, "blocks_completed": 1, "events": []}
+
+        with tempfile.TemporaryDirectory() as tmp, mock.patch("sys.stdout"):
+            self.assertEqual(main(["--output-root", tmp, "--max-blocks", "1", "--duration-limit", "1", "--jellyfin-pre-roll-lead-seconds", "120"], server_factory=lambda **kwargs: FakeServer(), controller_factory=lambda: FakeController()), 0)
+            with mock.patch.dict(os.environ, {"FS42STREAM_JELLYFIN_PRE_ROLL_LEAD_SECONDS": "90"}, clear=True):
+                self.assertEqual(main(["--output-root", tmp, "--max-blocks", "1", "--duration-limit", "1"], server_factory=lambda **kwargs: FakeServer(), controller_factory=lambda: FakeController()), 0)
+
+        self.assertEqual([config.jellyfin_pre_roll_lead_seconds for config in configs], [120.0, 90.0])
 
     def test_jellyfin_only_integrated_status_omits_direct_urls(self):
         class FakeServer:

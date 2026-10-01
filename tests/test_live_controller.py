@@ -241,6 +241,36 @@ class LongBlockScheduleClient:
 
 
 class LiveControllerTests(unittest.TestCase):
+    @unittest.skipUnless(Path("/usr/bin/ffmpeg").exists(), "requires system ffmpeg")
+    def test_direct_boundary_filler_appends_next_segment_without_double_offset_or_discontinuity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            playlist = root / "Sky_One.m3u8"
+            lines = ["#EXTM3U", "#EXT-X-VERSION:3", "#EXT-X-TARGETDURATION:2", "#EXT-X-MEDIA-SEQUENCE:100"]
+            for number in range(100, 160):
+                lines.extend(["#EXTINF:2.000000,", f"Sky_One_{number:05d}.ts"])
+                (root / f"Sky_One_{number:05d}.ts").write_bytes(b"existing")
+            playlist.write_text("\n".join(lines) + "\n")
+
+            result = HLSBlackSlateFillerRunner("/usr/bin/ffmpeg").run(
+                output_dir=root,
+                output_name="Sky_One",
+                duration=4,
+                hls_start_number=160,
+                hls_start_time_offset=120.0,
+                hls_append=True,
+                stream_profile="direct",
+            )
+
+            text = playlist.read_text()
+            self.assertEqual(result["status"], "ok", result["ffmpeg"].get("stderr"))
+            self.assertNotIn("#EXT-X-DISCONTINUITY", text)
+            self.assertIn("Sky_One_00160.ts", text)
+            self.assertIn("Sky_One_00161.ts", text)
+            self.assertNotIn("Sky_One_00220.ts", text)
+            self.assertEqual(result["hls_next_start_number"], 162)
+            self.assertNotIn("-start_number", result["command"])
+
     def test_default_live_config_uses_ts_primary_playout_mode_and_passes_it_to_block_runner(self):
         updates = []
         runner = FakeBlockRunner()
@@ -504,10 +534,10 @@ class LiveControllerTests(unittest.TestCase):
         self.assertEqual(playlist_text.count("#EXT-X-DISCONTINUITY"), 0)
 
     def test_boundary_filler_uses_transition_safe_hls_cadence(self):
-        with tempfile.TemporaryDirectory() as tmp, mock.patch(
-            "subprocess.run",
-            return_value=subprocess.CompletedProcess(["ffmpeg"], 0, stdout="", stderr=""),
-        ) as run:
+        process = mock.Mock()
+        process.poll.return_value = 0
+        process.wait.return_value = 0
+        with tempfile.TemporaryDirectory() as tmp, mock.patch("subprocess.Popen", return_value=process) as popen:
             HLSBlackSlateFillerRunner("/usr/bin/ffmpeg").run(
                 output_dir=Path(tmp),
                 output_name="Sky_One",
@@ -516,20 +546,21 @@ class LiveControllerTests(unittest.TestCase):
                 hls_append=True,
             )
 
-        command = run.call_args.args[0]
+        command = popen.call_args.args[0]
         self.assertIn(["-hls_time", "2"], [command[index:index + 2] for index in range(len(command) - 1)])
         self.assertIn(["-g", "50"], [command[index:index + 2] for index in range(len(command) - 1)])
         self.assertIn(["-keyint_min", "50"], [command[index:index + 2] for index in range(len(command) - 1)])
         self.assertIn(["-sc_threshold", "0"], [command[index:index + 2] for index in range(len(command) - 1)])
-        self.assertIn(["-hls_list_size", "12"], [command[index:index + 2] for index in range(len(command) - 1)])
+        self.assertIn(["-hls_list_size", "60"], [command[index:index + 2] for index in range(len(command) - 1)])
         self.assertIn("-hls_flags", command)
-        self.assertIn("omit_endlist+append_list+discont_start", command)
+        self.assertIn("omit_endlist+append_list", command)
+        self.assertNotIn("discont_start", command)
 
     def test_jellyfin_boundary_filler_uses_explicit_elapsed_timestamp_offset(self):
-        with tempfile.TemporaryDirectory() as tmp, mock.patch(
-            "subprocess.run",
-            return_value=subprocess.CompletedProcess(["ffmpeg"], 0, stdout="", stderr=""),
-        ) as run:
+        process = mock.Mock()
+        process.poll.return_value = 0
+        process.wait.return_value = 0
+        with tempfile.TemporaryDirectory() as tmp, mock.patch("subprocess.Popen", return_value=process) as popen:
             HLSBlackSlateFillerRunner("/usr/bin/ffmpeg").run(
                 output_dir=Path(tmp),
                 output_name="Sky_One",
@@ -540,7 +571,7 @@ class LiveControllerTests(unittest.TestCase):
                 stream_profile="jellyfin",
             )
 
-        command = run.call_args.args[0]
+        command = popen.call_args.args[0]
         joined = " ".join(command)
         self.assertIn("-output_ts_offset 31.5", joined)
         self.assertIn("-t 8", joined)
@@ -552,15 +583,18 @@ class LiveControllerTests(unittest.TestCase):
         self.assertNotIn("-avoid_negative_ts", joined)
 
     def test_jellyfin_boundary_filler_reports_elapsed_offset_after_live_window_rollover(self):
-        def write_rolled_playlist(command, check, shell, stdout, stderr, text):
+        def write_rolled_playlist(command, shell, stdout, stderr, text):
             playlist = Path(command[-1])
             lines = ["#EXTM3U", "#EXT-X-VERSION:3", "#EXT-X-TARGETDURATION:2", "#EXT-X-MEDIA-SEQUENCE:8"]
             for number in range(8, 20):
                 lines.extend(["#EXTINF:2.000000,", f"Sky_One_{number:05d}.ts"])
             playlist.write_text("\n".join(lines) + "\n")
-            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+            process = mock.Mock()
+            process.poll.return_value = 0
+            process.wait.return_value = 0
+            return process
 
-        with tempfile.TemporaryDirectory() as tmp, mock.patch("subprocess.run", side_effect=write_rolled_playlist):
+        with tempfile.TemporaryDirectory() as tmp, mock.patch("subprocess.Popen", side_effect=write_rolled_playlist):
             diagnostics = HLSBlackSlateFillerRunner("/usr/bin/ffmpeg").run(
                 output_dir=Path(tmp),
                 output_name="Sky_One",
@@ -576,6 +610,34 @@ class LiveControllerTests(unittest.TestCase):
         self.assertEqual(diagnostics["hls_segment_duration"], 40.0)
         self.assertEqual(diagnostics["hls_next_start_time_offset"], 50.0)
         self.assertNotIn("#EXT-X-DISCONTINUITY\n#EXT-X-DISCONTINUITY", playlist_text)
+
+    def test_boundary_filler_caps_elapsed_offset_to_commanded_duration_when_live_window_contains_prior_segments(self):
+        def write_rolled_playlist_with_prior_segments(command, shell, stdout, stderr, text):
+            playlist = Path(command[-1])
+            lines = ["#EXTM3U", "#EXT-X-VERSION:3", "#EXT-X-TARGETDURATION:2", "#EXT-X-MEDIA-SEQUENCE:11617"]
+            for number in range(11617, 11677):
+                lines.extend(["#EXTINF:2.000000,", f"Sky_One_{number:05d}.ts"])
+            playlist.write_text("\n".join(lines) + "\n")
+            process = mock.Mock()
+            process.poll.return_value = 0
+            process.wait.return_value = 0
+            return process
+
+        with tempfile.TemporaryDirectory() as tmp, mock.patch("subprocess.Popen", side_effect=write_rolled_playlist_with_prior_segments):
+            diagnostics = HLSBlackSlateFillerRunner("/usr/bin/ffmpeg").run(
+                output_dir=Path(tmp),
+                output_name="Sky_One",
+                duration=28.307936,
+                hls_start_number=11602,
+                hls_start_time_offset=23195.92,
+                hls_append=True,
+                stream_profile="direct",
+            )
+
+        self.assertEqual(diagnostics["hls_next_start_number"], 11677)
+        self.assertEqual(diagnostics["duration"], 30.0)
+        self.assertEqual(diagnostics["hls_segment_duration"], 30.0)
+        self.assertEqual(diagnostics["hls_next_start_time_offset"], 23225.92)
 
     def test_status_and_block_start_event_share_supervisor_projection_state(self):
         updates = []
@@ -680,6 +742,91 @@ class LiveControllerTests(unittest.TestCase):
         self.assertEqual(playlist_text.count("#EXT-X-DISCONTINUITY"), 0)
         self.assertLess(float(first["format"]["start_time"]), float(filler["format"]["start_time"]))
         self.assertLess(float(filler["format"]["start_time"]), float(next_block["format"]["start_time"]))
+
+    def test_direct_live_boundary_keeps_continuous_timestamps_without_discontinuity_markers(self):
+        class FixtureScheduleClient:
+            def __init__(self, schedule):
+                self.schedule = schedule
+
+            def fetch_schedule(self, channel, expected_blocks=None):
+                return self.schedule
+
+            def fetch_schedule_summary(self, channel):
+                return {"schedule_summary": {"network_id": channel, "start": "2026-06-17T10:00:00", "end": "2026-06-17T10:00:14"}}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            clips = create_fixture_clips(root / "clips", count=4, duration=2.2)
+            schedule = {
+                "network_name": "Sky One",
+                "schedule_blocks": [
+                    {
+                        "title": "Show A",
+                        "start_time": "2026-06-17T10:00:00",
+                        "end_time": "2026-06-17T10:00:08",
+                        "plan": [
+                            {"realpath": str(clips[0]), "duration": 2.2, "skip": 0, "is_stream": False, "content_type": "feature", "media_type": "video"},
+                            {"realpath": str(clips[1]), "duration": 2.2, "skip": 0, "is_stream": False, "content_type": "commercial", "media_type": "video"},
+                        ],
+                    },
+                    {
+                        "title": "Show B",
+                        "start_time": "2026-06-17T10:00:08",
+                        "end_time": "2026-06-17T10:00:14",
+                        "plan": [
+                            {"realpath": str(clips[2]), "duration": 2.2, "skip": 0, "is_stream": False, "content_type": "bump", "media_type": "video"},
+                            {"realpath": str(clips[3]), "duration": 2.2, "skip": 0, "is_stream": False, "content_type": "feature", "media_type": "video"},
+                        ],
+                    },
+                ],
+            }
+            current = [
+                datetime(2026, 6, 17, 10, 0, 0),
+                datetime(2026, 6, 17, 10, 0, 5),
+                datetime(2026, 6, 17, 10, 0, 8),
+                datetime(2026, 6, 17, 10, 0, 8),
+            ]
+
+            def clock():
+                return current.pop(0) if current else datetime(2026, 6, 17, 10, 0, 8)
+
+            client = FixtureScheduleClient(schedule)
+            runner = BlockRunner(
+                client=client,
+                planner=BlockPlanner(PathResolver(fs42_root=root, sdtv_root=root), FFProbe("/usr/bin/ffprobe")),
+                builder=FFMpegHLSCommandBuilder("/usr/bin/ffmpeg"),
+            )
+            controller = LiveController(
+                schedule_client=client,
+                block_runner=runner,
+                filler_runner=HLSBlackSlateFillerRunner("/usr/bin/ffmpeg"),
+            )
+
+            result = controller.run(
+                LiveControllerConfig(
+                    channel="Sky One",
+                    output_root=root / "out",
+                    max_blocks=2,
+                    duration_limit=7200,
+                    clock=clock,
+                    stream_profile="direct",
+                )
+            )
+            playlist = Path(result["channel_output_dir"]) / "Sky_One.m3u8"
+            playlist_text = playlist.read_text()
+            first = json.loads(subprocess.check_output(["/usr/bin/ffprobe", "-v", "error", "-show_entries", "format=start_time", "-of", "json", str(playlist.parent / "Sky_One_00000.ts")], text=True))
+            filler = json.loads(subprocess.check_output(["/usr/bin/ffprobe", "-v", "error", "-show_entries", "format=start_time", "-of", "json", str(playlist.parent / "Sky_One_00003.ts")], text=True))
+            next_block = json.loads(subprocess.check_output(["/usr/bin/ffprobe", "-v", "error", "-show_entries", "format=start_time", "-of", "json", str(playlist.parent / "Sky_One_00005.ts")], text=True))
+
+        self.assertEqual(playlist_text.count("#EXT-X-DISCONTINUITY"), 0)
+        starts = [
+            float(first["format"]["start_time"]),
+            float(filler["format"]["start_time"]),
+            float(next_block["format"]["start_time"]),
+        ]
+        self.assertEqual(starts, sorted(starts))
+        for left, right in zip(starts, starts[1:]):
+            self.assertLess(right - left, 10.0)
 
     def test_service_duration_default_spans_ninety_minute_block_without_boundary_filler(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -949,7 +1096,7 @@ class LiveControllerTests(unittest.TestCase):
         self.assertEqual([call.duration_limit for call in runner.calls], [1500.0, 1800])
         self.assertEqual(updates[-1]["status"], "complete")
 
-    def test_boundary_filler_overruns_wallclock_boundary_instead_of_jellyfin_startup_bridge(self):
+    def test_boundary_filler_stops_at_wallclock_boundary_instead_of_overrunning(self):
         class FeatureScheduleClient:
             def fetch_schedule(self, channel, expected_blocks=None):
                 return {
@@ -999,15 +1146,15 @@ class LiveControllerTests(unittest.TestCase):
         block_filler = [event for event in result["events"] if event["event"] == "block_filler"]
         self.assertEqual(len(block_filler), 1)
         self.assertEqual(block_filler[0]["wait_seconds"], 5.0)
-        self.assertEqual(block_filler[0]["duration"], 25.0)
-        self.assertEqual(block_filler[0]["startup_guard_seconds"], 20.0)
-        self.assertEqual([call["duration"] for call in filler.calls], [25.0])
+        self.assertEqual(block_filler[0]["duration"], 5.0)
+        self.assertEqual(block_filler[0]["startup_guard_seconds"], 0.0)
+        self.assertEqual([call["duration"] for call in filler.calls], [5.0])
         self.assertEqual([call.hls_start_number for call in runner.calls], [0, 4])
-        self.assertEqual(runner.calls[1].now, datetime(2026, 6, 17, 10, 0, 25))
+        self.assertEqual(runner.calls[1].now, datetime(2026, 6, 17, 10, 0, 5))
         self.assertEqual(runner.calls[1].stream_profile, "jellyfin")
         self.assertEqual(runner.calls[1].playout_mode, "ts-primary")
 
-    def test_boundary_filler_overrun_applies_to_show_to_commercial_boundary_too(self):
+    def test_boundary_filler_does_not_overrun_show_to_commercial_boundary(self):
         class CommercialScheduleClient:
             def fetch_schedule(self, channel, expected_blocks=None):
                 return {
@@ -1050,9 +1197,9 @@ class LiveControllerTests(unittest.TestCase):
             )
 
         self.assertNotIn("block_startup_bridge", [event["event"] for event in result["events"]])
-        self.assertEqual([call["duration"] for call in filler.calls], [25.0])
+        self.assertEqual([call["duration"] for call in filler.calls], [5.0])
         self.assertEqual([call.hls_start_number for call in runner.calls], [0, 4])
-        self.assertEqual(runner.calls[1].now, datetime(2026, 6, 17, 10, 0, 25))
+        self.assertEqual(runner.calls[1].now, datetime(2026, 6, 17, 10, 0, 5))
 
     def test_runs_filler_hls_during_wait_when_block_finishes_before_boundary(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1081,15 +1228,16 @@ class LiveControllerTests(unittest.TestCase):
             )
 
         self.assertEqual(len(filler.calls), 1)
-        self.assertEqual(filler.calls[0]["duration"], 1520.0)
+        self.assertEqual(filler.calls[0]["duration"], 1500.0)
         self.assertEqual(filler.calls[0]["hls_append"], True)
         self.assertEqual(filler.calls[0]["hls_start_number"], 1)
         self.assertEqual(filler.calls[0]["output_name"], "Sky_One")
         self.assertEqual(sleeps, [])
         self.assertIn("block_filler", [event["event"] for event in result["events"]])
         filler_event = [event for event in result["events"] if event["event"] == "block_filler"][0]
-        self.assertEqual(filler_event["duration"], 1520.0)
+        self.assertEqual(filler_event["duration"], 1500.0)
         self.assertEqual(filler_event["wait_seconds"], 1500.0)
+        self.assertEqual(filler_event["startup_guard_seconds"], 0.0)
         self.assertEqual(filler_event["hls_start_number"], 1)
         self.assertEqual(filler_event["hls_next_start_number"], 4)
         self.assertEqual([call.hls_start_number for call in runner.calls], [0, 4])
@@ -1338,6 +1486,56 @@ class LiveControllerTests(unittest.TestCase):
         self.assertEqual(payload["status"], "complete")
         self.assertEqual(payload["blocks_completed"], 2)
         self.assertEqual(payload["events"][0]["block"]["title"], "First Live Block")
+
+    def test_jellyfin_preroll_keeps_next_block_private_until_boundary_then_publishes_and_resumes_after_staged_media(self):
+        class PreRollRunner:
+            def __init__(self):
+                self.calls = []
+
+            def run(self, config):
+                self.calls.append(config)
+                staged = ".jellyfin-staging" in config.output_dir.parts
+                playlist = config.output_dir / f"{config.output_name}.m3u8"
+                config.output_dir.mkdir(parents=True, exist_ok=True)
+                if staged:
+                    names = [f"{config.output_name}_00000.ts", f"{config.output_name}_00001.ts"]
+                    for name in names:
+                        (config.output_dir / name).write_bytes(b"staged")
+                    playlist.write_text("#EXTM3U\n#EXTINF:2.0,\n" + "\n#EXTINF:2.0,\n".join(names) + "\n")
+                    return {"status": "ok", "playlist": str(playlist), "hls_next_start_number": 2, "hls_next_start_time_offset": 4.0, "hls": {"segments": [str(config.output_dir / name) for name in names]}, "ffmpeg": {"returncode": 0}, "plan": []}
+                if len([call for call in self.calls if ".jellyfin-staging" not in call.output_dir.parts]) == 1:
+                    names = [f"{config.output_name}_{number:05d}.ts" for number in range(3)]
+                    for name in names:
+                        (config.output_dir / name).write_bytes(b"current")
+                    playlist.write_text("#EXTM3U\n#EXTINF:2.0,\n" + "\n#EXTINF:2.0,\n".join(names) + "\n")
+                    return {"status": "ok", "playlist": str(playlist), "hls_next_start_number": 3, "hls_next_start_time_offset": 6.0, "hls": {"segments": [str(config.output_dir / name) for name in names]}, "ffmpeg": {"returncode": 0}, "plan": []}
+                return {"status": "ok", "playlist": str(playlist), "hls_next_start_number": 6, "hls_next_start_time_offset": 12.0, "hls": {"segments": []}, "ffmpeg": {"returncode": 0}, "plan": []}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            updates = []
+            runner = PreRollRunner()
+            result = LiveController(schedule_client=FakeScheduleClient(), block_runner=runner).run(
+                LiveControllerConfig(channel="Example Channel", output_root=Path(tmp), max_blocks=2, duration_limit=1800, now=datetime(2026, 6, 17, 10, 0, 0), stream_profile="jellyfin", jellyfin_pre_roll_lead_seconds=20, jellyfin_pre_roll_min_buffer_seconds=4, status_callback=updates.append)
+            )
+            public = Path(result["channel_output_dir"]) / "Example_Channel.m3u8"
+            public_text = public.read_text()
+
+        stage_call = next(call for call in runner.calls if ".jellyfin-staging" in call.output_dir.parts)
+        public_calls = [call for call in runner.calls if ".jellyfin-staging" not in call.output_dir.parts]
+        self.assertEqual(stage_call.now, datetime(2026, 6, 17, 10, 30, 0))
+        self.assertEqual(stage_call.hls_start_time_offset, 0.0)
+        self.assertEqual(public_calls[1].now, datetime(2026, 6, 17, 10, 30, 4))
+        self.assertEqual(public_calls[1].hls_start_number, 5)
+        self.assertEqual(public_calls[1].hls_start_time_offset, 10.0)
+        self.assertIn("Example_Channel_00003.ts", public_text)
+        self.assertIn("Example_Channel_00004.ts", public_text)
+        self.assertNotIn("#EXT-X-ENDLIST", public_text)
+        self.assertNotIn("#EXT-X-DISCONTINUITY", public_text)
+        diagnostics = result["jellyfin_pre_roll"]
+        self.assertEqual(diagnostics["pre_roll_state"], "published")
+        self.assertEqual(diagnostics["staged_segments_ready"], 2)
+        self.assertEqual(diagnostics["public_boundary_switch"]["event"], "public_boundary_switch")
+        self.assertTrue(any(update.get("jellyfin_pre_roll", {}).get("pre_roll_state") == "staged-private" for update in updates))
 
 
 if __name__ == "__main__":

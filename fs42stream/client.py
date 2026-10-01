@@ -71,6 +71,38 @@ class FS42ScheduleClient:
             raise ValueError(f"expected {expected_blocks} schedule blocks, got {len(blocks)}")
         return data
 
+    def reconcile_schedule(self, channel: str = DEFAULT_SCHEDULE_CHANNEL) -> Mapping[str, Any]:
+        """Ask FieldStation42 to extend/rebuild a channel's day schedule.
+
+        This is intentionally non-destructive and is safe for the bounded
+        automatic self-heal path. Operators can use :meth:`reset_schedule`
+        before this method only after inspecting a stale summary/full schedule.
+        """
+        return self._fetch_json(
+            f"/build/schedule/add_time/day/{urllib.parse.quote(channel, safe='')}",
+            method="POST",
+        )
+
+    def reset_schedule(self, channel: str = DEFAULT_SCHEDULE_CHANNEL) -> Mapping[str, Any]:
+        """Reset one FieldStation42 channel schedule for an approved repair."""
+        return self._fetch_json(
+            f"/reset/schedule/{urllib.parse.quote(channel, safe='')}",
+            method="POST",
+        )
+
+    def _fetch_json(self, path: str, *, method: str = "GET") -> Mapping[str, Any]:
+        request = urllib.request.Request(
+            f"{self.base_url}{path}",
+            headers={"Accept": "application/json", "User-Agent": "fs42stream-phase1/0"},
+            method=method,
+        )
+        with self._opener(request, timeout=self.timeout) as response:
+            payload = response.read()
+        data = json.loads(payload.decode("utf-8"))
+        if not isinstance(data, dict):
+            raise ValueError("FieldStation42 reconciliation response must be a JSON object")
+        return data
+
     def fetch_summary(self) -> Mapping[str, Any]:
         request = urllib.request.Request(f"{self.base_url}/summary", headers={"Accept": "application/json"})
         with self._opener(request, timeout=self.timeout) as response:

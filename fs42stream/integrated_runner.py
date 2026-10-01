@@ -18,6 +18,7 @@ from .live_controller import LiveController, LiveControllerConfig, SharedSchedul
 from .paths import PathResolver
 from .planner import DEFAULT_BRB_IMAGE_PATH, BlockPlanner
 from .run_block import DEFAULT_API_BASE_URL, DEFAULT_CHANNEL, DEFAULT_FFMPEG, DEFAULT_FFPROBE, DEFAULT_FS42_ROOT, DEFAULT_SCHEDULE_TIMEZONE, DEFAULT_SDTV_ROOT, BlockRunner
+from .schedule_recovery import RecoveringScheduleClient
 from .systemd_service import ServiceConfig
 
 
@@ -58,6 +59,9 @@ class IntegratedRunnerConfig:
     schedule_host: str = DEFAULT_SCHEDULE_HOST
     schedule_port: int = DEFAULT_SCHEDULE_PORT
     schedule_base_path: str = DEFAULT_SCHEDULE_BASE_PATH
+    schedule_fallback_api_url: str = ""
+    schedule_timeout: float = 10.0
+    schedule_recovery_interval: float = 30.0
     api_base_url: str = ""
     channel_slug: str | None = None
     public_base_url: str | None = None
@@ -73,6 +77,9 @@ class IntegratedRunnerConfig:
     playout_mode: PlayoutMode = "ts-primary"
     brb_image_path: str | Path = DEFAULT_BRB_IMAGE_PATH
     audio_normalization: AudioNormalization = "off"
+    jellyfin_pre_roll_lead_seconds: float = 0.0
+    jellyfin_pre_roll_min_buffer_seconds: float = 30.0
+    jellyfin_pre_roll_max_publish_delay_seconds: float = 60.0
 
 
 class IntegratedServer(Protocol):
@@ -103,6 +110,10 @@ def run_integrated(
         raise ValueError("max_blocks must be positive")
     if config.duration_limit <= 0:
         raise ValueError("duration_limit must be positive")
+    if config.schedule_timeout <= 0:
+        raise ValueError("schedule_timeout must be positive")
+    if config.schedule_recovery_interval <= 0:
+        raise ValueError("schedule_recovery_interval must be positive")
     audio_normalization = normalize_audio_normalization(config.audio_normalization)
     stream_profiles = tuple(config.stream_profiles)
     if not stream_profiles:
@@ -128,6 +139,9 @@ def run_integrated(
             "stream_profiles": list(stream_profiles),
             "playout_mode": config.playout_mode,
             "audio_normalization": audio_normalization,
+            "jellyfin_pre_roll_lead_seconds": config.jellyfin_pre_roll_lead_seconds,
+            "jellyfin_pre_roll_min_buffer_seconds": config.jellyfin_pre_roll_min_buffer_seconds,
+            "jellyfin_pre_roll_max_publish_delay_seconds": config.jellyfin_pre_roll_max_publish_delay_seconds,
             "schedule_timezone": config.schedule_timezone,
             "brb_image_path": str(config.brb_image_path),
             "updated_at": _utc_now(),
@@ -166,6 +180,7 @@ def run_integrated(
         "stream_profiles": list(stream_profiles),
         "playout_mode": config.playout_mode,
         "audio_normalization": audio_normalization,
+        "jellyfin_pre_roll_lead_seconds": config.jellyfin_pre_roll_lead_seconds,
         "schedule_timezone": config.schedule_timezone,
         "brb_image_path": str(config.brb_image_path),
         "updated_at": _utc_now(),
@@ -204,6 +219,9 @@ def run_integrated(
                             playout_mode=config.playout_mode,
                             shared_schedule_clock=shared_schedule_clock,
                             brb_image_path=config.brb_image_path,
+                            jellyfin_pre_roll_lead_seconds=config.jellyfin_pre_roll_lead_seconds,
+                            jellyfin_pre_roll_min_buffer_seconds=config.jellyfin_pre_roll_min_buffer_seconds,
+                            jellyfin_pre_roll_max_publish_delay_seconds=config.jellyfin_pre_roll_max_publish_delay_seconds,
                         )
                     )
                 )
@@ -261,6 +279,9 @@ def main(
     parser.add_argument("--schedule-host", default=DEFAULT_SCHEDULE_HOST)
     parser.add_argument("--schedule-port", type=int, default=DEFAULT_SCHEDULE_PORT)
     parser.add_argument("--schedule-base-path", default=DEFAULT_SCHEDULE_BASE_PATH)
+    parser.add_argument("--schedule-fallback-api-url", default=os.environ.get("FS42STREAM_SCHEDULE_FALLBACK_API_URL", ""), help="optional BRB/cached fallback schedule API URL")
+    parser.add_argument("--schedule-timeout", type=float, default=float(os.environ.get("FS42STREAM_SCHEDULE_TIMEOUT", "10")), help="schedule API request timeout in seconds")
+    parser.add_argument("--schedule-recovery-interval", type=float, default=float(os.environ.get("FS42STREAM_SCHEDULE_RECOVERY_INTERVAL", "30")), help="seconds between upstream health rechecks while serving fallback")
     parser.add_argument("--api-base-url", default="", help="deprecated full schedule API URL override; prefer --schedule-* options")
     parser.add_argument("--channel-slug", default=None)
     parser.add_argument("--public-base-url", default=None, help="public base URL for IPTV/XMLTV metadata; defaults to the request Host")
@@ -276,6 +297,9 @@ def main(
     parser.add_argument("--stream-profiles", default=os.environ.get("FS42STREAM_STREAM_PROFILES", "jellyfin"), help="active output profiles: jellyfin (default), direct, both, or a comma-separated list")
     parser.add_argument("--brb-image-path", default=os.environ.get("FS42STREAM_BRB_IMAGE_PATH", str(DEFAULT_BRB_IMAGE_PATH)), help="fallback BRB image path relative to FS42 root or absolute under an allowed media root")
     parser.add_argument("--audio-normalization", type=parse_audio_normalization, default=os.environ.get("FS42STREAM_AUDIO_NORMALIZATION", "off"), metavar="{off,loudnorm}", help="audio normalization mode; default off")
+    parser.add_argument("--jellyfin-pre-roll-lead-seconds", type=float, default=float(os.environ.get("FS42STREAM_JELLYFIN_PRE_ROLL_LEAD_SECONDS", "0")), help="private Jellyfin next-block staging lead time; zero disables it")
+    parser.add_argument("--jellyfin-pre-roll-min-buffer-seconds", type=float, default=float(os.environ.get("FS42STREAM_JELLYFIN_PRE_ROLL_MIN_BUFFER_SECONDS", "30")), help="minimum staged Jellyfin duration required before a public boundary switch")
+    parser.add_argument("--jellyfin-pre-roll-max-publish-delay-seconds", type=float, default=float(os.environ.get("FS42STREAM_JELLYFIN_PRE_ROLL_MAX_PUBLISH_DELAY_SECONDS", "60")), help="maximum filler-backed delay while waiting for the staged Jellyfin safe buffer")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv)
 
@@ -291,6 +315,9 @@ def main(
         schedule_host=args.schedule_host,
         schedule_port=args.schedule_port,
         schedule_base_path=args.schedule_base_path,
+        schedule_fallback_api_url=args.schedule_fallback_api_url,
+        schedule_timeout=args.schedule_timeout,
+        schedule_recovery_interval=args.schedule_recovery_interval,
         api_base_url=args.api_base_url,
         channel_slug=args.channel_slug,
         public_base_url=args.public_base_url,
@@ -306,6 +333,9 @@ def main(
         stream_profiles=parse_stream_profiles(args.stream_profiles),
         brb_image_path=args.brb_image_path,
         audio_normalization=args.audio_normalization,
+        jellyfin_pre_roll_lead_seconds=args.jellyfin_pre_roll_lead_seconds,
+        jellyfin_pre_roll_min_buffer_seconds=args.jellyfin_pre_roll_min_buffer_seconds,
+        jellyfin_pre_roll_max_publish_delay_seconds=args.jellyfin_pre_roll_max_publish_delay_seconds,
     )
     effective_controller_factory = controller_factory
     if controller_factory is LiveController:
@@ -321,9 +351,15 @@ def main(
 
 def _create_controller(config: IntegratedRunnerConfig) -> LiveController:
     schedule_api_url = _schedule_api_url(config)
-    schedule_client = FS42ScheduleClient(schedule_api_url)
+    fallback_client = FS42ScheduleClient(config.schedule_fallback_api_url, timeout=config.schedule_timeout) if config.schedule_fallback_api_url else None
+    schedule_client = RecoveringScheduleClient(
+        primary=FS42ScheduleClient(schedule_api_url, timeout=config.schedule_timeout),
+        fallback=fallback_client,
+        recovery_interval=config.schedule_recovery_interval,
+        schedule_timezone=config.schedule_timezone,
+    )
     block_runner = BlockRunner(
-        client=FS42ScheduleClient(schedule_api_url),
+        client=schedule_client,
         planner=BlockPlanner(
             PathResolver(fs42_root=config.fs42_root, sdtv_root=config.sdtv_root),
             FFProbe(config.ffprobe),
